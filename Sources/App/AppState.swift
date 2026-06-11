@@ -133,7 +133,8 @@ final class AppState: ObservableObject {
     /// In-window logging path. The UI guarantees a photo; nil is tolerated
     /// (photo-save failure must never lose the prayer). If the window already
     /// passed this also handles the qada path (photo/jamaat are dropped).
-    func log(_ prayer: Prayer, photoFilename: String? = nil, jamaat: Bool = false) {
+    func log(_ prayer: Prayer, photoFilename: String? = nil, jamaat: Bool = false,
+             placeTag: PlaceTag? = nil, placeName: String? = nil) {
         guard let target = targetWindow(for: prayer) else { return }            // not computable / upcoming
         guard !hasLog(prayer: prayer, dayKey: target.dayKey) else { return }    // double-log = no-op
         guard let tier = GameEngine.tier(for: target.window, at: AppClock.now) else { return } // window not open yet
@@ -145,6 +146,7 @@ final class AppState: ObservableObject {
             return name
         }()
         let countsJamaat = inWindow && jamaat
+        let countsPlace: PlaceTag? = inWindow ? placeTag : nil
         let xp = tier.xp + (countsJamaat ? GameEngine.jamaatBonus : 0)
 
         let excused = profile.excusedDayKeys.contains(target.dayKey)
@@ -154,7 +156,9 @@ final class AppState: ObservableObject {
 
         let entry = PrayerLog(id: UUID(), prayer: prayer, dayKey: target.dayKey,
                               loggedAt: AppClock.now, tier: tier, xp: xp,
-                              photoFilename: normalizedPhoto, jamaat: countsJamaat)
+                              photoFilename: normalizedPhoto, jamaat: countsJamaat,
+                              placeTag: countsPlace,
+                              placeName: countsPlace == .onTheGo ? placeName : nil)
         logs.append(entry)
 
         var newProfile = profile
@@ -285,11 +289,13 @@ final class AppState: ObservableObject {
         for buddy in BuddySimulator.buddies {
             let member = BuddySimulator.member(for: buddy)
             var state: GridEntryState = .waiting
+            var placeLabel: String? = nil
             if let window {
                 switch BuddySimulator.outcome(for: buddy, dayKey: dayKey, window: window) {
                 case .inWindow(let tier, let loggedAt, let seed):
                     if now >= loggedAt {
                         state = .posted(.illustration(seed: seed), tier: tier, at: loggedAt)
+                        placeLabel = BuddySimulator.placeTag(seed: seed).map { "\($0.emoji) \($0.displayName)" }
                     }
                 case .qada(let at):
                     if now >= at { state = .qada(at: at) }
@@ -298,15 +304,17 @@ final class AppState: ObservableObject {
                 }
             }
             entries.append(GridEntry(id: "\(member.id)|\(dayKey)|\(prayer.rawValue)",
-                                     member: member, state: state))
+                                     member: member, state: state, placeLabel: placeLabel))
         }
 
         let myState: GridEntryState
+        var myPlaceLabel: String? = nil
         if let myLog = logs.first(where: { $0.dayKey == dayKey && $0.prayer == prayer }) {
             if myLog.tier.isInWindow {
                 let content: PostContent = myLog.photoFilename.map { .photo(filename: $0) }
                     ?? .illustration(seed: BuddySimulator.seed(name: "you", dayKey: dayKey, prayer: prayer))
                 myState = .posted(content, tier: myLog.tier, at: myLog.loggedAt)
+                myPlaceLabel = Self.placeLabel(for: myLog)
             } else {
                 myState = .qada(at: myLog.loggedAt)
             }
@@ -318,8 +326,35 @@ final class AppState: ObservableObject {
             myState = .waiting
         }
         entries.append(GridEntry(id: "you|\(dayKey)|\(prayer.rawValue)",
-                                 member: youMember, state: myState))
+                                 member: youMember, state: myState, placeLabel: myPlaceLabel))
         return entries
+    }
+
+    /// "🏠 Home" / "📍 Capitol Hill" pill text for a log's place, if tagged.
+    static func placeLabel(for log: PrayerLog) -> String? {
+        guard let tag = log.placeTag else { return nil }
+        if tag == .onTheGo, let name = log.placeName, !name.isEmpty {
+            return "\(tag.emoji) \(name)"
+        }
+        return "\(tag.emoji) \(tag.displayName)"
+    }
+
+    /// Counts per place tag across all your in-window logs (Journey "Places").
+    /// Also surfaces the distinct on-the-go place names, most-recent first.
+    func placeStats() -> (counts: [(tag: PlaceTag, count: Int)], spots: [String]) {
+        var counts: [PlaceTag: Int] = [:]
+        var spots: [String] = []
+        for log in logs.reversed() {
+            guard let tag = log.placeTag else { continue }
+            counts[tag, default: 0] += 1
+            if tag == .onTheGo, let name = log.placeName, !name.isEmpty, !spots.contains(name) {
+                spots.append(name)
+            }
+        }
+        let ordered = PlaceTag.allCases.compactMap { tag in
+            counts[tag].map { (tag: tag, count: $0) }
+        }
+        return (ordered, spots)
     }
 
     /// Weekly circle scores (current Mon-start week), sorted descending.
@@ -629,12 +664,23 @@ final class AppState: ObservableObject {
                     : .qada
                 let loggedAt = dayStart.addingTimeInterval(Double(6 + i * 3) * 3600 + rng.uniform() * 1800)
                 var photo: String?
+                var place: PlaceTag?
+                var placeName: String?
                 if tier.isInWindow, rng.uniform() < 0.7 {
                     photo = PhotoStore.saveDemo(seed: rng.next(), dayKey: key, prayer: prayer)
+                    // ~60% of demo posts carry a place tag so Journey's
+                    // "Places" section has something to show.
+                    if rng.uniform() < 0.6 {
+                        place = BuddySimulator.placeTag(seed: rng.next())
+                        if place == .onTheGo {
+                            placeName = ["Green Lake", "Campus library", "Buc-ee's, Texas"][Int(rng.next() % 3)]
+                        }
+                    }
                 }
                 generated.append(PrayerLog(id: UUID(), prayer: prayer, dayKey: key,
                                            loggedAt: loggedAt, tier: tier, xp: tier.xp,
-                                           photoFilename: photo, jamaat: false))
+                                           photoFilename: photo, jamaat: false,
+                                           placeTag: place, placeName: placeName))
             }
         }
 

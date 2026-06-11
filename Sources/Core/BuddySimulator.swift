@@ -72,6 +72,17 @@ enum BuddySimulator {
         return hash
     }
 
+    /// Deterministic place tag for a buddy's post, derived from its
+    /// illustration seed (~55% home, ~25% masjid, ~10% work, ~10% on the go).
+    static func placeTag(seed: UInt64) -> PlaceTag? {
+        switch seed % 100 {
+        case 0..<55: return .home
+        case 55..<80: return .masjid
+        case 80..<90: return .work
+        default: return .onTheGo
+        }
+    }
+
     /// Deterministic outcome for one buddy × day × prayer. Pure function of
     /// (buddy, dayKey, window) — never reads the clock.
     static func outcome(for buddy: Buddy, dayKey: String, window: PrayerWindow) -> Outcome {

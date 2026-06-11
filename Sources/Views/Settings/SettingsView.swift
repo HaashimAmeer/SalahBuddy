@@ -150,6 +150,9 @@ struct SettingsView: View {
                 .pickerStyle(.menu)
                 .tint(Theme.green)
             }
+            Text("Method only moves Fajr and Isha — Dhuhr, Asr and Maghrib are the same for every method.")
+                .font(Theme.sans(11.5, .semibold))
+                .foregroundStyle(Theme.inkMuted)
 
             VStack(alignment: .leading, spacing: 8) {
                 Text("Asr madhab")
@@ -160,6 +163,9 @@ struct SettingsView: View {
                     Text("Hanafi (later)").tag(AsrMadhab.hanafi)
                 }
                 .pickerStyle(.segmented)
+                Text("Madhab only moves Asr — Hanafi puts it about an hour later. Check \"Today's times\" below to see changes apply.")
+                    .font(Theme.sans(11.5, .semibold))
+                    .foregroundStyle(Theme.inkMuted)
             }
         }
         .padding(18)

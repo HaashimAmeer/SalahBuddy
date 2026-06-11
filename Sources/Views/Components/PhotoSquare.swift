@@ -75,17 +75,29 @@ struct PhotoSquare: View {
                 colors: [.clear, .black.opacity(0.45)],
                 startPoint: .center, endPoint: .bottom)
 
-            HStack(spacing: 4) {
-                Text(entry.member.name)
-                    .font(Theme.sans(nameFontSize, .bold))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
-                Spacer(minLength: 2)
-                Text(Self.timeFormatter.string(from: at))
-                    .font(Theme.sans(max(8, size * 0.075), .semibold))
-                    .opacity(0.9)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
+            VStack(alignment: .leading, spacing: 2) {
+                // v3: where they prayed, when tagged — "🏠 Home", "📍 Capitol Hill".
+                if let place = entry.placeLabel, size >= 70 {
+                    Text(place)
+                        .font(Theme.sans(max(8, size * 0.07), .bold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(.black.opacity(0.35), in: Capsule())
+                }
+                HStack(spacing: 4) {
+                    Text(entry.member.name)
+                        .font(Theme.sans(nameFontSize, .bold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                    Spacer(minLength: 2)
+                    Text(Self.timeFormatter.string(from: at))
+                        .font(Theme.sans(max(8, size * 0.075), .semibold))
+                        .opacity(0.9)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                }
             }
             .foregroundStyle(.white)
             .padding(.horizontal, size * 0.07)

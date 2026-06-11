@@ -85,6 +85,29 @@ struct DaySchedule {
 
 // MARK: - Logs
 
+/// Where a prayer happened — one optional tap at post time, never required.
+enum PlaceTag: String, Codable, CaseIterable, Identifiable {
+    case home, masjid, work, onTheGo
+
+    var id: String { rawValue }
+    var emoji: String {
+        switch self {
+        case .home: return "🏠"
+        case .masjid: return "🕌"
+        case .work: return "💼"
+        case .onTheGo: return "📍"
+        }
+    }
+    var displayName: String {
+        switch self {
+        case .home: return "Home"
+        case .masjid: return "Masjid"
+        case .work: return "Work"
+        case .onTheGo: return "On the go"
+        }
+    }
+}
+
 struct PrayerLog: Codable, Identifiable, Equatable {
     var id: UUID
     var prayer: Prayer
@@ -94,9 +117,12 @@ struct PrayerLog: Codable, Identifiable, Equatable {
     var xp: Int
     var photoFilename: String?  // v2: in-window photo proof (nil for qada / v1 logs)
     var jamaat: Bool            // v2: prayed in congregation (+5 XP, tracked for challenges)
+    var placeTag: PlaceTag?     // v3: optional "where I prayed" tag
+    var placeName: String?      // v3: reverse-geocoded name when tagged .onTheGo
 
     init(id: UUID, prayer: Prayer, dayKey: String, loggedAt: Date, tier: LogTier, xp: Int,
-         photoFilename: String? = nil, jamaat: Bool = false) {
+         photoFilename: String? = nil, jamaat: Bool = false,
+         placeTag: PlaceTag? = nil, placeName: String? = nil) {
         self.id = id
         self.prayer = prayer
         self.dayKey = dayKey
@@ -105,11 +131,13 @@ struct PrayerLog: Codable, Identifiable, Equatable {
         self.xp = xp
         self.photoFilename = photoFilename
         self.jamaat = jamaat
+        self.placeTag = placeTag
+        self.placeName = placeName
     }
 
-    // Migration-safe decoding: v1 logs (no photoFilename/jamaat) must keep decoding.
+    // Migration-safe decoding: v1/v2 logs (missing newer fields) must keep decoding.
     private enum CodingKeys: String, CodingKey {
-        case id, prayer, dayKey, loggedAt, tier, xp, photoFilename, jamaat
+        case id, prayer, dayKey, loggedAt, tier, xp, photoFilename, jamaat, placeTag, placeName
     }
 
     init(from decoder: Decoder) throws {
@@ -122,6 +150,8 @@ struct PrayerLog: Codable, Identifiable, Equatable {
         xp = try c.decode(Int.self, forKey: .xp)
         photoFilename = try c.decodeIfPresent(String.self, forKey: .photoFilename)
         jamaat = try c.decodeIfPresent(Bool.self, forKey: .jamaat) ?? false
+        placeTag = try c.decodeIfPresent(PlaceTag.self, forKey: .placeTag)
+        placeName = try c.decodeIfPresent(String.self, forKey: .placeName)
     }
 }
 
@@ -303,6 +333,8 @@ struct GridEntry: Identifiable {
     let id: String
     let member: CircleMember
     let state: GridEntryState
+    /// v3: short place pill for posted squares, e.g. "🏠 Home" or "📍 Capitol Hill".
+    var placeLabel: String? = nil
 }
 
 enum GridCellState: Equatable {

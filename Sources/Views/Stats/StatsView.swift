@@ -21,6 +21,7 @@ struct StatsView: View {
                     photoCalendarCard
                     heatmapCard
                     statTiles
+                    placesCard
                     challengesCard
                     badgeCard
                 }
@@ -423,6 +424,61 @@ struct StatsView: View {
                 .frame(maxWidth: .infinity)
                 .cardStyle()
             }
+        }
+    }
+
+    // MARK: - Places (v3)
+
+    /// Where you've been praying — counts per tag, plus the distinct
+    /// on-the-go spots. Only shows once at least one post is tagged.
+    @ViewBuilder
+    private var placesCard: some View {
+        let stats = state.placeStats()
+        if !stats.counts.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                sectionTitle("Places you've prayed", symbol: "mappin.and.ellipse", color: Theme.qadaBlue)
+
+                HStack(spacing: 10) {
+                    ForEach(stats.counts, id: \.tag) { item in
+                        VStack(spacing: 4) {
+                            Text(item.tag.emoji).font(.system(size: 22))
+                            Text("\(item.count)")
+                                .font(Theme.sans(20, .heavy))
+                                .foregroundStyle(Theme.inkDeep)
+                                .contentTransition(.numericText())
+                            Text(item.tag.displayName)
+                                .font(Theme.sans(11, .semibold))
+                                .foregroundStyle(Theme.inkMuted)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.8)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .background(Theme.bg, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    }
+                }
+
+                if !stats.spots.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Spots on the go")
+                            .font(Theme.sans(12, .bold))
+                            .foregroundStyle(Theme.inkMuted)
+                        ForEach(stats.spots.prefix(5), id: \.self) { spot in
+                            HStack(spacing: 6) {
+                                Image(systemName: "mappin.circle.fill")
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(Theme.qadaBlue)
+                                Text(spot)
+                                    .font(Theme.sans(13, .semibold))
+                                    .foregroundStyle(Theme.inkDeep)
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(18)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .cardStyle()
         }
     }
 

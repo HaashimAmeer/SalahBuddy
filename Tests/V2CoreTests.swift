@@ -387,6 +387,31 @@ final class V2CoreTests: XCTestCase {
         XCTAssertEqual(logs[0].xp, 5, "old persisted qada logs keep their stored xp")
         XCTAssertNil(logs[0].photoFilename)
         XCTAssertFalse(logs[0].jamaat)
+        XCTAssertNil(logs[0].placeTag, "v3 place fields default nil for old logs")
+        XCTAssertNil(logs[0].placeName)
+    }
+
+    func testV2LogWithoutPlaceFieldsStillDecodes() throws {
+        // v2-shaped log: photo + jamaat present, no placeTag/placeName.
+        let json = """
+        [{"id":"6F9619FF-8B86-D011-B42D-00C04FC964FF",
+          "prayer":"fajr","dayKey":"2026-06-09",
+          "loggedAt":"2026-06-09T11:20:00Z","tier":"onTime","xp":35,
+          "photoFilename":"2026-06-09-fajr.jpg","jamaat":true}]
+        """.data(using: .utf8)!
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let logs = try decoder.decode([PrayerLog].self, from: json)
+        XCTAssertEqual(logs[0].photoFilename, "2026-06-09-fajr.jpg")
+        XCTAssertTrue(logs[0].jamaat)
+        XCTAssertNil(logs[0].placeTag)
+    }
+
+    func testBuddyPlaceTagIsDeterministicAndDistributed() {
+        XCTAssertEqual(BuddySimulator.placeTag(seed: 7), BuddySimulator.placeTag(seed: 7))
+        // All four tags reachable across seeds.
+        let tags = Set((0..<200).compactMap { BuddySimulator.placeTag(seed: UInt64($0)) })
+        XCTAssertEqual(tags, Set(PlaceTag.allCases))
     }
 
     func testV1ProfileJSONStillDecodes() throws {

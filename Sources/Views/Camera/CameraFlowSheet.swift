@@ -2,8 +2,8 @@ import SwiftUI
 import UIKit
 
 /// The capture sheet flow around `CameraCaptureView`:
-/// capture → jamaat-toggle confirm → PhotoStore.save → appState.log →
-/// dismiss (the existing celebration overlay then fires on Today).
+/// capture → confirm (jamaat toggle + optional place tag) → PhotoStore.save →
+/// appState.log → dismiss (the existing celebration overlay then fires on Today).
 /// Owned by the home agent.
 struct CameraFlowSheet: View {
     let target: CameraTarget
@@ -18,11 +18,13 @@ struct CameraFlowSheet: View {
             Theme.bg.ignoresSafeArea()
 
             if let image = captured {
-                JamaatConfirmView(prayer: target.prayer,
-                                  image: image,
-                                  onPost: { jamaat in post(image, jamaat: jamaat) },
-                                  onRetake: { captured = nil },
-                                  onCancel: { dismiss() })
+                PostConfirmView(prayer: target.prayer,
+                                image: image,
+                                onPost: { jamaat, place, placeName in
+                                    post(image, jamaat: jamaat, place: place, placeName: placeName)
+                                },
+                                onRetake: { captured = nil },
+                                onCancel: { dismiss() })
             } else {
                 CameraCaptureView(onCapture: { captured = $0 },
                                   onCancel: { dismiss() })
@@ -31,13 +33,14 @@ struct CameraFlowSheet: View {
         .interactiveDismissDisabled(captured != nil)
     }
 
-    private func post(_ image: UIImage, jamaat: Bool) {
+    private func post(_ image: UIImage, jamaat: Bool, place: PlaceTag?, placeName: String?) {
         // Photo-save failure (disk) must never lose the prayer: an empty
         // filename from PhotoStore.save is treated as "no photo".
         let saved = PhotoStore.save(image, dayKey: target.dayKey, prayer: target.prayer)
         let filename = saved.isEmpty ? nil : saved
         withAnimation(Theme.spring) {
-            state.log(target.prayer, photoFilename: filename, jamaat: jamaat)
+            state.log(target.prayer, photoFilename: filename, jamaat: jamaat,
+                      placeTag: place, placeName: placeName)
         }
         dismiss()
     }
@@ -45,17 +48,26 @@ struct CameraFlowSheet: View {
 
 // MARK: - Confirm step
 
-/// Photo preview + optional "Prayed in jamaat 🕌" toggle (+5 XP) + post CTA.
-struct JamaatConfirmView: View {
+/// Photo preview + optional "Prayed in jamaat 🕌" toggle (+5 XP) + optional
+/// one-tap place tag + post CTA. Tagging is never required — skipping is fine.
+struct PostConfirmView: View {
     let prayer: Prayer
     let image: UIImage
-    let onPost: (Bool) -> Void
+    let onPost: (Bool, PlaceTag?, String?) -> Void
     let onRetake: () -> Void
     let onCancel: () -> Void
 
     @EnvironmentObject private var state: AppState
 
     @State private var jamaat = false
+    @State private var place: PlaceTag?
+
+    /// Reverse-geocoded spot name, only attached for the "On the go" tag and
+    /// only when the device location actually resolved one.
+    private var resolvedPlaceName: String? {
+        guard place == .onTheGo else { return nil }
+        return state.location.placeName
+    }
 
     var body: some View {
         ScrollView(showsIndicators: false) {
@@ -66,6 +78,8 @@ struct JamaatConfirmView: View {
 
                 jamaatToggle
 
+                placePicker
+
                 if let tier = state.potentialTier(for: prayer), tier.isInWindow {
                     Text("+\(tier.xp + (jamaat ? GameEngine.jamaatBonus : 0)) XP — \(tier.label)")
                         .font(Theme.sans(15, .bold))
@@ -74,7 +88,7 @@ struct JamaatConfirmView: View {
                 }
 
                 ChunkyButton(title: "Post to your circle 🎉", color: Theme.green, isEnabled: true) {
-                    onPost(jamaat)
+                    onPost(jamaat, place, resolvedPlaceName)
                 }
 
                 Button(action: onRetake) {
@@ -116,7 +130,7 @@ struct JamaatConfirmView: View {
             .resizable()
             .scaledToFill()
             .frame(maxWidth: .infinity)
-            .frame(height: 360)
+            .frame(height: 330)
             .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
             .shadow(color: .black.opacity(0.05), radius: 10, x: 0, y: 2)
     }
@@ -140,5 +154,53 @@ struct JamaatConfirmView: View {
         }
         .padding(14)
         .cardStyle()
+    }
+
+    private var placePicker: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Where did you pray? (optional)")
+                .font(Theme.sans(13, .semibold))
+                .foregroundStyle(Theme.inkMuted)
+            HStack(spacing: 8) {
+                ForEach(PlaceTag.allCases) { tag in
+                    placeChip(tag)
+                }
+            }
+            if place == .onTheGo {
+                Text(state.location.placeName.map { "📍 \($0)" } ?? "📍 Using your current spot")
+                    .font(Theme.sans(12, .semibold))
+                    .foregroundStyle(Theme.qadaBlue)
+                    .transition(.opacity)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .cardStyle()
+        .animation(Theme.spring, value: place)
+    }
+
+    private func placeChip(_ tag: PlaceTag) -> some View {
+        let selected = place == tag
+        return Button {
+            place = selected ? nil : tag   // tap again to clear — never forced
+        } label: {
+            VStack(spacing: 3) {
+                Text(tag.emoji).font(.system(size: 20))
+                Text(tag.displayName)
+                    .font(Theme.sans(11, selected ? .bold : .semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 9)
+            .background(selected ? Theme.greenSoft : Theme.bg,
+                        in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(selected ? Theme.green : .clear, lineWidth: 1.5)
+            )
+            .foregroundStyle(selected ? Theme.inkDeep : Theme.inkMuted)
+        }
+        .buttonStyle(.plain)
     }
 }
