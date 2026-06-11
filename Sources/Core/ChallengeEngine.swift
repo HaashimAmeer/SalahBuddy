@@ -80,11 +80,20 @@ enum ChallengeEngine {
     /// custom circle challenges are appended as group definitions.
     static func activeDefinitions(_ ctx: Context) -> [Definition] {
         let target = raceTarget(completions: ctx.completions)
+        // circleperfect's target is the live circle size (every member, incl. you).
+        let circleSize = max(1, ctx.memberWeekLogs.count)
         var defs = definitions.map { def -> Definition in
-            guard def.id == "race300" else { return def }
-            return Definition(id: def.id, title: "Race to \(target)",
-                              detail: "Be first in your circle to \(target) weekly XP",
-                              emoji: def.emoji, isGroup: true, target: target, rewardXP: def.rewardXP)
+            switch def.id {
+            case "race300":
+                return Definition(id: def.id, title: "Race to \(target)",
+                                  detail: "Be first in your circle to \(target) weekly XP",
+                                  emoji: def.emoji, isGroup: true, target: target, rewardXP: def.rewardXP)
+            case "circleperfect":
+                return Definition(id: def.id, title: def.title, detail: def.detail,
+                                  emoji: def.emoji, isGroup: true, target: circleSize, rewardXP: def.rewardXP)
+            default:
+                return def
+            }
         }
         defs += ctx.customChallenges.map { c in
             Definition(id: c.id, title: c.title, detail: c.detail,

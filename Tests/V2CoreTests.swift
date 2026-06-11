@@ -156,9 +156,67 @@ final class V2CoreTests: XCTestCase {
     }
 
     func testBuddyRoster() {
-        XCTAssertEqual(BuddySimulator.buddies.map(\.name), ["Mina", "Harun", "Haifa"])
-        XCTAssertEqual(BuddySimulator.buddies.map(\.consistency), [0.92, 0.75, 0.85])
-        XCTAssertEqual(BuddySimulator.buddies.map(\.emoji), ["🌸", "🧢", "📚"])
+        // v3.3: bigger demo circle (8 buddies + you = 9).
+        XCTAssertEqual(BuddySimulator.buddies.count, 8)
+        XCTAssertEqual(BuddySimulator.buddies.first?.name, "Mina")
+        // All distinct names + emojis, consistency in a plausible range.
+        XCTAssertEqual(Set(BuddySimulator.buddies.map(\.name)).count, 8)
+        XCTAssertEqual(Set(BuddySimulator.buddies.map(\.emoji)).count, 8)
+        XCTAssertTrue(BuddySimulator.buddies.allSatisfy { $0.consistency > 0.5 && $0.consistency <= 1.0 })
+    }
+
+    func testTravelPairs() {
+        XCTAssertEqual(TravelPairs.partner(of: .dhuhr), .asr)
+        XCTAssertEqual(TravelPairs.partner(of: .asr), .dhuhr)
+        XCTAssertEqual(TravelPairs.partner(of: .maghrib), .isha)
+        XCTAssertEqual(TravelPairs.partner(of: .isha), .maghrib)
+        XCTAssertNil(TravelPairs.partner(of: .fajr))
+
+        XCTAssertEqual(TravelPairs.lead(of: .asr), .dhuhr)
+        XCTAssertEqual(TravelPairs.lead(of: .dhuhr), .dhuhr)
+        XCTAssertEqual(TravelPairs.lead(of: .isha), .maghrib)
+        XCTAssertEqual(TravelPairs.lead(of: .maghrib), .maghrib)
+        XCTAssertEqual(TravelPairs.lead(of: .fajr), .fajr)
+
+        XCTAssertFalse(TravelPairs.isCombinable(.fajr))
+        XCTAssertTrue(TravelPairs.isCombinable(.dhuhr))
+        XCTAssertEqual(TravelPairs.pairs.map(\.lead), [.dhuhr, .maghrib])
+    }
+
+    func testCombinedWindowTierBothPrayersSameTier() {
+        // Combined Dhuhr+Asr window = [dhuhr.start, asr.end]. Both prayers earn
+        // the SAME tier (computed against the merged span), quartered.
+        let start = date(2026, 6, 10, 13, 0)
+        let combined = PrayerWindow(prayer: .dhuhr, start: start,
+                                    end: start.addingTimeInterval(240 * 60)) // 4h → 1h quarters
+        XCTAssertEqual(GameEngine.tier(for: combined, at: start.addingTimeInterval(30 * 60)), .onTime)
+        XCTAssertEqual(GameEngine.tier(for: combined, at: start.addingTimeInterval(90 * 60)), .prayed)
+        XCTAssertEqual(GameEngine.tier(for: combined, at: start.addingTimeInterval(150 * 60)), .lastCall)
+        XCTAssertEqual(GameEngine.tier(for: combined, at: start.addingTimeInterval(210 * 60)), .closeCall)
+        XCTAssertEqual(GameEngine.tier(for: combined, at: start.addingTimeInterval(240 * 60)), .qada)
+    }
+
+    func testSettingsTravelMigration() throws {
+        // v3.2 settings JSON without isTraveling decodes to false.
+        let json = """
+        {"calcMethod":"northAmerica","madhab":"shafi","useDeviceLocation":true,
+         "fixedLatitude":47.6,"fixedLongitude":-122.3,"locationName":"Seattle",
+         "notificationsEnabled":true,"dailyGoal":100,"hasOnboarded":true}
+        """.data(using: .utf8)!
+        let settings = try JSONDecoder().decode(AppSettings.self, from: json)
+        XCTAssertFalse(settings.isTraveling)
+
+        var traveling = settings
+        traveling.isTraveling = true
+        let data = try JSONEncoder().encode(traveling)
+        XCTAssertTrue(try JSONDecoder().decode(AppSettings.self, from: data).isTraveling)
+    }
+
+    func testCircleperfectTargetTracksCircleSize() {
+        let members = (0..<9).map { (member("m\($0)"), [PrayerLog]()) }
+        let ctx = context(memberWeekLogs: members)
+        let def = ChallengeEngine.activeDefinitions(ctx).first { $0.id == "circleperfect" }!
+        XCTAssertEqual(def.target, 9, "every member, incl. you, must full-day")
     }
 
     func testBuddyPostsHiddenBeforeLoggedAtVisibleAfter() {

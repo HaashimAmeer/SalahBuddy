@@ -139,7 +139,58 @@ final class AppState: ObservableObject {
         guard !hasLog(prayer: prayer, dayKey: target.dayKey) else { return }    // double-log = no-op
         guard let tier = GameEngine.tier(for: target.window, at: AppClock.now) else { return } // window not open yet
 
-        // Qada (after window, same schedule day): tap-only, no photo, no jamaat.
+        let snapshot = preLogSnapshot(dayKey: target.dayKey)
+        let entry = buildLog(prayer: prayer, dayKey: target.dayKey, tier: tier,
+                             photoFilename: photoFilename, jamaat: jamaat,
+                             placeTag: placeTag, placeName: placeName)
+        logs.append(entry)
+        finalizeLogging(added: [entry], snapshot: snapshot,
+                        celebrationPrayer: prayer, celebrationTier: tier, dayKey: target.dayKey)
+    }
+
+    /// v3.3: travel (jam') — log the lead prayer AND its partner together from
+    /// one photo. Both earn the tier computed against the COMBINED window
+    /// [lead.start, follow.end], so combining early still earns the most. Both
+    /// share the photo; each computes its own (Jumma-aware) congregation bonus.
+    func logCombined(lead: Prayer, photoFilename: String? = nil, jamaat: Bool = false,
+                     placeTag: PlaceTag? = nil, placeName: String? = nil) {
+        guard let follow = TravelPairs.partner(of: lead),
+              TravelPairs.lead(of: lead) == lead,
+              let combined = combinedWindow(lead: lead),
+              let tier = GameEngine.tier(for: combined, at: AppClock.now) else {
+            log(lead, photoFilename: photoFilename, jamaat: jamaat,
+                placeTag: placeTag, placeName: placeName)
+            return
+        }
+        let dayKey = todaySchedule?.dayKey ?? todayKey
+        let snapshot = preLogSnapshot(dayKey: dayKey)
+
+        var added: [PrayerLog] = []
+        for prayer in [lead, follow] where !hasLog(prayer: prayer, dayKey: dayKey) {
+            added.append(buildLog(prayer: prayer, dayKey: dayKey, tier: tier,
+                                  photoFilename: photoFilename, jamaat: jamaat,
+                                  placeTag: placeTag, placeName: placeName))
+        }
+        guard !added.isEmpty else { return }
+        logs.append(contentsOf: added)
+        finalizeLogging(added: added, snapshot: snapshot,
+                        celebrationPrayer: lead, celebrationTier: tier, dayKey: dayKey)
+    }
+
+    /// The merged window for a travel pair: [lead.start, follow.end].
+    func combinedWindow(lead: Prayer) -> PrayerWindow? {
+        guard let follow = TravelPairs.partner(of: lead),
+              let leadWin = todaySchedule?.window(for: lead),
+              let followWin = todaySchedule?.window(for: follow) else { return nil }
+        return PrayerWindow(prayer: lead, start: leadWin.start, end: followWin.end)
+    }
+
+    /// Builds a single in-window/qada log, applying the in-window normalization
+    /// (photo/jamaat/place dropped for qada), the Jumma-aware congregation
+    /// bonus, and the remember-place side effect.
+    private func buildLog(prayer: Prayer, dayKey: String, tier: LogTier,
+                          photoFilename: String?, jamaat: Bool,
+                          placeTag: PlaceTag?, placeName: String?) -> PrayerLog {
         let inWindow = tier.isInWindow
         let normalizedPhoto: String? = {
             guard inWindow, let name = photoFilename, !name.isEmpty else { return nil }
@@ -148,29 +199,41 @@ final class AppState: ObservableObject {
         let countsJamaat = inWindow && jamaat
         let countsPlace: PlaceTag? = inWindow ? placeTag : nil
         if let tag = countsPlace { rememberPlaceIfNeeded(tag) }
-        // v3.2: Friday Dhuhr in congregation is Jumma — bigger bonus.
         let congregationBonus = GameEngine.congregationBonus(prayer: prayer, date: AppClock.now)
         let xp = tier.xp + (countsJamaat ? congregationBonus : 0)
+        return PrayerLog(id: UUID(), prayer: prayer, dayKey: dayKey,
+                         loggedAt: AppClock.now, tier: tier, xp: xp,
+                         photoFilename: normalizedPhoto, jamaat: countsJamaat,
+                         placeTag: countsPlace,
+                         placeName: countsPlace == .onTheGo ? placeName : nil)
+    }
 
-        let excused = profile.excusedDayKeys.contains(target.dayKey)
-        let levelBefore = GameEngine.level(forTotalXP: profile.totalXP)
-        let wasPerfect = GameEngine.isPerfectDay(logs: logs, dayKey: target.dayKey,
-                                                 excusedDayKeys: profile.excusedDayKeys)
+    private struct PreLogSnapshot {
+        let levelBefore: Int
+        let wasPerfect: Bool
+    }
 
-        let entry = PrayerLog(id: UUID(), prayer: prayer, dayKey: target.dayKey,
-                              loggedAt: AppClock.now, tier: tier, xp: xp,
-                              photoFilename: normalizedPhoto, jamaat: countsJamaat,
-                              placeTag: countsPlace,
-                              placeName: countsPlace == .onTheGo ? placeName : nil)
-        logs.append(entry)
+    private func preLogSnapshot(dayKey: String) -> PreLogSnapshot {
+        PreLogSnapshot(levelBefore: GameEngine.level(forTotalXP: profile.totalXP),
+                       wasPerfect: GameEngine.isPerfectDay(logs: logs, dayKey: dayKey,
+                                                           excusedDayKeys: profile.excusedDayKeys))
+    }
 
+    /// Shared post-log processing for both single and combined logging:
+    /// XP, perfect-day bonus, streak, badges, level-up, persistence, and the
+    /// celebration. `added` may hold one log (single) or two (combined); XP is
+    /// summed so a combined post celebrates the full amount.
+    private func finalizeLogging(added: [PrayerLog], snapshot: PreLogSnapshot,
+                                 celebrationPrayer: Prayer, celebrationTier: LogTier, dayKey: String) {
+        let excused = profile.excusedDayKeys.contains(dayKey)
         var newProfile = profile
-        newProfile.totalXP += xp
+        let addedXP = added.reduce(0) { $0 + $1.xp }
+        newProfile.totalXP += addedXP
 
         var bonusXP = 0
         var perfectDay = false
-        if !wasPerfect,
-           GameEngine.isPerfectDay(logs: logs, dayKey: target.dayKey,
+        if !snapshot.wasPerfect,
+           GameEngine.isPerfectDay(logs: logs, dayKey: dayKey,
                                    excusedDayKeys: profile.excusedDayKeys) {
             perfectDay = true
             bonusXP = GameEngine.perfectDayBonus
@@ -180,16 +243,15 @@ final class AppState: ObservableObject {
 
         var streakExtended = false
         if !excused,
-           GameEngine.isDayComplete(logs: logs, dayKey: target.dayKey),
-           newProfile.lastStreakDayKey != target.dayKey {
-            newProfile = GameEngine.applyStreakIncrement(to: newProfile, dayKey: target.dayKey)
+           GameEngine.isDayComplete(logs: logs, dayKey: dayKey),
+           newProfile.lastStreakDayKey != dayKey {
+            newProfile = GameEngine.applyStreakIncrement(to: newProfile, dayKey: dayKey)
             streakExtended = true
         }
 
         let newBadgeIDs = Badges.newlyEarnedIDs(profile: newProfile, logs: logs)
         for id in newBadgeIDs { newProfile.earnedBadges[id] = AppClock.now }
-
-        let leveledUp = GameEngine.level(forTotalXP: newProfile.totalXP) > levelBefore
+        let leveledUp = GameEngine.level(forTotalXP: newProfile.totalXP) > snapshot.levelBefore
 
         profile = newProfile
         persist()
@@ -197,7 +259,8 @@ final class AppState: ObservableObject {
         // The just-logged prayer's pending "Last call" must be dropped.
         NotificationManager.shared.reschedule()
 
-        celebration = LogResult(prayer: prayer, tier: tier, xpEarned: xp, bonusXP: bonusXP,
+        celebration = LogResult(prayer: celebrationPrayer, tier: celebrationTier,
+                                xpEarned: addedXP, bonusXP: bonusXP,
                                 newBadgeIDs: newBadgeIDs, leveledUp: leveledUp,
                                 perfectDay: perfectDay, streakExtended: streakExtended)
     }
@@ -228,7 +291,10 @@ final class AppState: ObservableObject {
         logs.remove(at: index)
 
         // Undo removes the photo file too — the grid returns to its CTA state.
-        if let photo = removed.photoFilename {
+        // v3.3: a combined (travel) pair shares one photo, so only delete the
+        // file once no remaining log still references it.
+        if let photo = removed.photoFilename,
+           !logs.contains(where: { $0.photoFilename == photo }) {
             PhotoStore.delete(photo)
         }
 
@@ -247,6 +313,25 @@ final class AppState: ObservableObject {
         persist()
         // The prayer is unlogged again — restore its "Last call" if applicable.
         NotificationManager.shared.reschedule()
+    }
+
+    // MARK: - Travel mode (v3.3)
+
+    var isTraveling: Bool { settings.isTraveling }
+
+    func setTraveling(_ on: Bool) {
+        guard settings.isTraveling != on else { return }
+        settings.isTraveling = on   // didSet persists + refreshes + reschedules
+        objectWillChange.send()
+    }
+
+    /// Auto-suggest travel mode: you've saved a Home and you're currently far
+    /// (>80 km) from it. Manual toggle is always available regardless.
+    func shouldSuggestTravel() -> Bool {
+        guard !settings.isTraveling,
+              let home = settings.savedPlaces[PlaceTag.home.rawValue],
+              let coord = location.deviceCoordinate else { return false }
+        return home.distanceMeters(latitude: coord.latitude, longitude: coord.longitude) > 80_000
     }
 
     // MARK: - Excused days (v2) / "Can't pray" break mode (v3.2)

@@ -301,6 +301,7 @@ struct AppSettings: Codable {
     var hardestPrayer: Prayer? = nil   // v2: onboarding goal-setting → seeds goal3 challenge
     var savedPlaces: [String: SavedPlace] = [:]   // v3: PlaceTag.rawValue → remembered spot
     var memberKind: String? = nil      // v3.2: "brother" / "sister" (onboarding, optional) — tailors copy
+    var isTraveling: Bool = false      // v3.3: travel mode — combine Dhuhr+Asr and Maghrib+Isha
 
     init() {}
 
@@ -319,7 +320,41 @@ struct AppSettings: Codable {
         hardestPrayer = (try? c.decodeIfPresent(Prayer.self, forKey: .hardestPrayer)) ?? nil
         savedPlaces = (try? c.decode([String: SavedPlace].self, forKey: .savedPlaces)) ?? [:]
         memberKind = (try? c.decodeIfPresent(String.self, forKey: .memberKind)) ?? nil
+        isTraveling = (try? c.decode(Bool.self, forKey: .isTraveling)) ?? false
     }
+}
+
+// MARK: - Travel combining (v3.3)
+
+/// While traveling (safar) you may combine (jam') Dhuhr+Asr and Maghrib+Isha.
+/// Fajr is never combined. This helper defines the pairs and which prayer
+/// leads (the earlier one). Qasr — shortening rak'ahs — isn't trackable here.
+enum TravelPairs {
+    /// The combinable pairs, lead (earlier) first.
+    static let pairs: [(lead: Prayer, follow: Prayer)] = [(.dhuhr, .asr), (.maghrib, .isha)]
+
+    /// The prayer combined with `prayer`, or nil for Fajr (never combined).
+    static func partner(of prayer: Prayer) -> Prayer? {
+        switch prayer {
+        case .dhuhr: return .asr
+        case .asr: return .dhuhr
+        case .maghrib: return .isha
+        case .isha: return .maghrib
+        case .fajr: return nil
+        }
+    }
+
+    /// The earlier prayer of `prayer`'s pair (itself if it's already the lead
+    /// or Fajr).
+    static func lead(of prayer: Prayer) -> Prayer {
+        switch prayer {
+        case .asr: return .dhuhr
+        case .isha: return .maghrib
+        default: return prayer
+        }
+    }
+
+    static func isCombinable(_ prayer: Prayer) -> Bool { prayer != .fajr }
 }
 
 // MARK: - Badges

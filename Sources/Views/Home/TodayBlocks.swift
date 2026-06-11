@@ -18,9 +18,16 @@ struct CurrentPrayerBlock: View {
         VStack(alignment: .leading, spacing: 14) {
             header
 
-            if isWindowOpen, !excusedForBlockDay,
-               let tier = state.potentialTier(for: block.prayer), tier.isInWindow {
-                Text("+\(tier.xp) XP if you pray now")
+            if block.combinedWith != nil, !excusedForBlockDay {
+                Text("🧳 Traveling — pray them together and log once.")
+                    .font(Theme.sans(12, .semibold))
+                    .foregroundStyle(Theme.qadaBlue)
+            }
+
+            if isWindowOpen, !excusedForBlockDay, let tier = activeTier, tier.isInWindow {
+                Text(block.combinedWith != nil
+                     ? "+\(tier.xp) XP each if you log now"
+                     : "+\(tier.xp) XP if you pray now")
                     .font(Theme.sans(13, .bold))
                     .foregroundStyle(Theme.gold)
             }
@@ -32,10 +39,12 @@ struct CurrentPrayerBlock: View {
             LiveCircleGrid(entries: entries,
                            showCTA: isWindowOpen && !excusedForBlockDay,
                            onPost: onPost,
-                           onUndoMine: { withAnimation(Theme.spring) { state.undoLog(block.prayer) } })
+                           onUndoMine: { undoMine() })
 
             if iPostedInWindow(entries) {
-                Text("Hold your photo to undo")
+                Text(block.combinedWith != nil
+                     ? "Both logged · hold your photo to undo"
+                     : "Hold your photo to undo")
                     .font(Theme.sans(11, .semibold))
                     .foregroundStyle(Theme.inkMuted.opacity(0.8))
                     .frame(maxWidth: .infinity, alignment: .center)
@@ -46,9 +55,24 @@ struct CurrentPrayerBlock: View {
         .animation(Theme.spring, value: block)
     }
 
+    /// Tier the log would earn now — against the combined window when traveling.
+    private var activeTier: LogTier? {
+        if block.combinedWith != nil, let win = state.combinedWindow(lead: block.prayer) {
+            return GameEngine.tier(for: win, at: now)
+        }
+        return state.potentialTier(for: block.prayer)
+    }
+
+    private func undoMine() {
+        withAnimation(Theme.spring) {
+            state.undoLog(block.prayer)
+            if let partner = block.combinedWith { state.undoLog(partner) }
+        }
+    }
+
     private var header: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text("\(block.prayer.emoji) \(block.prayer.displayName)")
+            Text(titleText)
                 .font(Theme.sans(22, .bold))
                 .foregroundStyle(Theme.inkDeep)
 
@@ -73,6 +97,13 @@ struct CurrentPrayerBlock: View {
                     .foregroundStyle(Theme.inkMuted)
             }
         }
+    }
+
+    private var titleText: String {
+        if let partner = block.combinedWith {
+            return "\(block.prayer.emoji) \(block.prayer.displayName) + \(partner.displayName)"
+        }
+        return "\(block.prayer.emoji) \(block.prayer.displayName)"
     }
 
     /// v3.2: during a break this becomes the engagement card — dhikr for
@@ -497,7 +528,7 @@ struct UpcomingSection: View {
                 ForEach(upcoming, id: \.prayer) { window in
                     HStack(spacing: 10) {
                         Text(window.prayer.emoji)
-                        Text(window.prayer.displayName)
+                        Text(upcomingLabel(window.prayer))
                             .font(Theme.sans(15, .semibold))
                             .foregroundStyle(Theme.inkDeep)
                         Spacer(minLength: 8)
@@ -515,6 +546,100 @@ struct UpcomingSection: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    /// "Dhuhr + Asr" when traveling and the pair is still ahead.
+    private func upcomingLabel(_ prayer: Prayer) -> String {
+        if let partner = state.upcomingCombinedPartner(for: prayer, now: now) {
+            return "\(prayer.displayName) + \(partner.displayName)"
+        }
+        return prayer.displayName
+    }
+}
+
+// MARK: - Travel mode (v3.3)
+
+/// Quiet manual "I'm traveling" toggle — combines Dhuhr+Asr and Maghrib+Isha.
+struct TravelToggleRow: View {
+    @EnvironmentObject private var state: AppState
+
+    var body: some View {
+        Button {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            withAnimation(Theme.spring) { state.setTraveling(!state.isTraveling) }
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: state.isTraveling ? "airplane.circle.fill" : "airplane")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(state.isTraveling ? Theme.qadaBlue : Theme.inkMuted)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(state.isTraveling ? "Traveling — prayers combined" : "Traveling?")
+                        .font(Theme.sans(14, .bold))
+                        .foregroundStyle(Theme.inkDeep)
+                    Text(state.isTraveling
+                         ? "Dhuhr+Asr and Maghrib+Isha log together. Tap to turn off."
+                         : "Combine Dhuhr+Asr and Maghrib+Isha (jam').")
+                        .font(Theme.sans(11.5, .semibold))
+                        .foregroundStyle(Theme.inkMuted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 8)
+                Image(systemName: state.isTraveling ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(state.isTraveling ? Theme.qadaBlue : Theme.mist)
+                    .contentTransition(.symbolEffect(.replace))
+            }
+            .padding(14)
+            .background(state.isTraveling ? Theme.qadaBlue.opacity(0.10) : Theme.surface,
+                        in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(state.isTraveling ? Theme.qadaBlue.opacity(0.5) : Theme.mist.opacity(0.4),
+                                  lineWidth: 1.5)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// Auto-suggestion banner: shows when you're far from your saved Home.
+struct TravelSuggestionBanner: View {
+    @EnvironmentObject private var state: AppState
+    @Binding var dismissed: Bool
+
+    var body: some View {
+        if !dismissed, !state.isTraveling, state.shouldSuggestTravel() {
+            HStack(spacing: 10) {
+                Image(systemName: "airplane")
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(Theme.qadaBlue)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Looks like you're away from home")
+                        .font(Theme.sans(13, .bold))
+                        .foregroundStyle(Theme.inkDeep)
+                    Text("Combine prayers while you travel?")
+                        .font(Theme.sans(11.5, .semibold))
+                        .foregroundStyle(Theme.inkMuted)
+                }
+                Spacer(minLength: 8)
+                Button("Not now") { withAnimation(Theme.spring) { dismissed = true } }
+                    .font(Theme.sans(12, .semibold))
+                    .foregroundStyle(Theme.inkMuted)
+                    .buttonStyle(.plain)
+                Button("Enable") {
+                    withAnimation(Theme.spring) { state.setTraveling(true) }
+                }
+                .font(Theme.sans(13, .bold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(Capsule().fill(Theme.qadaBlue))
+                .buttonStyle(.plain)
+            }
+            .padding(12)
+            .background(Theme.qadaBlue.opacity(0.10),
+                        in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
     }
 }

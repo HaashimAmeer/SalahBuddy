@@ -9,6 +9,7 @@ struct HomeView: View {
     @Environment(\.appNow) private var now
 
     @State private var cameraTarget: CameraTarget?
+    @State private var travelSuggestionDismissed = false
 
     var body: some View {
         ZStack {
@@ -20,15 +21,19 @@ struct HomeView: View {
                     PrayerTimesStrip(currentPrayer: state.currentTodayBlock(now: now)?
                         .isYesterdayIsha == false ? state.currentTodayBlock(now: now)?.prayer : nil)
 
+                    TravelSuggestionBanner(dismissed: $travelSuggestionDismissed)
+
                     if let block = state.currentTodayBlock(now: now) {
                         CurrentPrayerBlock(block: block) {
-                            cameraTarget = CameraTarget(prayer: block.prayer, dayKey: block.dayKey)
+                            cameraTarget = CameraTarget(prayer: block.prayer, dayKey: block.dayKey,
+                                                        combinedLead: block.combinedWith != nil ? block.prayer : nil)
                         }
                     }
 
                     MakeUpSection()
                     EarlierTodaySection()
                     UpcomingSection()
+                    TravelToggleRow()
                     ExcusedTodayFooter()
                 }
                 .padding(.horizontal, 16)
@@ -161,5 +166,8 @@ struct PrayerTimesStrip: View {
 struct CameraTarget: Identifiable, Equatable {
     let prayer: Prayer
     let dayKey: String
-    var id: String { "\(dayKey)|\(prayer.rawValue)" }
+    /// v3.3: when set, posting logs this prayer AND its travel partner together
+    /// (jam') via `logCombined`. `prayer` is the lead (earlier) prayer.
+    var combinedLead: Prayer? = nil
+    var id: String { "\(dayKey)|\(prayer.rawValue)\(combinedLead != nil ? "|combined" : "")" }
 }

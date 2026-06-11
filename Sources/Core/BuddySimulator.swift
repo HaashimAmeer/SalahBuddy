@@ -35,10 +35,18 @@ enum BuddySimulator {
         let consistency: Double
     }
 
+    /// v3.3: bigger demo circle (8 buddies + you = 9) so the grid, scoreboard
+    /// and week view are exercised at realistic size. Varied consistency
+    /// spreads the leaderboard out.
     static let buddies: [Buddy] = [
         Buddy(name: "Mina", emoji: "🌸", consistency: 0.92),
         Buddy(name: "Harun", emoji: "🧢", consistency: 0.75),
         Buddy(name: "Haifa", emoji: "📚", consistency: 0.85),
+        Buddy(name: "Yusuf", emoji: "⚽️", consistency: 0.68),
+        Buddy(name: "Sana", emoji: "🎨", consistency: 0.88),
+        Buddy(name: "Bilal", emoji: "🚴", consistency: 0.79),
+        Buddy(name: "Layla", emoji: "🌷", consistency: 0.95),
+        Buddy(name: "Omar", emoji: "🎧", consistency: 0.62),
     ]
 
     static func member(for buddy: Buddy) -> CircleMember {

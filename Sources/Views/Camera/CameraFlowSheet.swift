@@ -39,8 +39,13 @@ struct CameraFlowSheet: View {
         let saved = PhotoStore.save(image, dayKey: target.dayKey, prayer: target.prayer)
         let filename = saved.isEmpty ? nil : saved
         withAnimation(Theme.spring) {
-            state.log(target.prayer, photoFilename: filename, jamaat: jamaat,
-                      placeTag: place, placeName: placeName)
+            if let lead = target.combinedLead {
+                state.logCombined(lead: lead, photoFilename: filename, jamaat: jamaat,
+                                  placeTag: place, placeName: placeName)
+            } else {
+                state.log(target.prayer, photoFilename: filename, jamaat: jamaat,
+                          placeTag: place, placeName: placeName)
+            }
         }
         dismiss()
     }

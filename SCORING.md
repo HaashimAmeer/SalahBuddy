@@ -26,6 +26,15 @@ In-window always beats qada; qada always beats nothing.
 | **Jumma** | +10 | Friday Dhuhr in congregation (replaces the jamaat bonus that day) |
 | Dhikr | +5 each, max 5/day | Only while on a break; **private** — levels you up but never shows on the circle scoreboard |
 
+## Traveling (combining / jam')
+
+Turn on **Traveling** (toggle on Today, or accept the auto-suggestion when you're >80 km from your saved Home). While on:
+
+- **Dhuhr+Asr** and **Maghrib+Isha** each merge into one card. Fajr is never combined.
+- One photo logs **both** prayers of the pair at once. Both earn the tier computed against the merged window — so combining early still earns the most (full XP each, no penalty for combining; it's a valid concession).
+- Both count toward your streak and perfect day; both squares show the shared photo.
+- Turn it off when you're home.
+
 ## Streaks & freezes
 
 - A day counts toward your streak when **all 5** prayers are logged (any tier).
