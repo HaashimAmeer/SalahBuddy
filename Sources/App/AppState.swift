@@ -160,6 +160,8 @@ final class AppState: ObservableObject {
 
         profile = newProfile
         persist()
+        // The just-logged prayer's pending "Last call" must be dropped.
+        NotificationManager.shared.reschedule()
 
         celebration = LogResult(prayer: prayer, tier: tier, xpEarned: tier.xp, bonusXP: bonusXP,
                                 newBadgeIDs: newBadgeIDs, leveledUp: leveledUp,
@@ -192,6 +194,8 @@ final class AppState: ObservableObject {
 
         profile = newProfile
         persist()
+        // The prayer is unlogged again — restore its "Last call" if applicable.
+        NotificationManager.shared.reschedule()
     }
 
     // MARK: - League
@@ -263,28 +267,42 @@ final class AppState: ObservableObject {
     }
 
     /// Walk every elapsed day from the day after `lastReconciledDayKey`
-    /// through yesterday. Incomplete day → consume a freeze, else streak → 0.
-    /// Never touches today.
+    /// through the last *decided* day. Incomplete day → consume a freeze,
+    /// else streak → 0. Never touches today.
+    ///
+    /// "Last decided day" is normally yesterday, BUT yesterday's isha window
+    /// stays open past midnight (it ends at today's fajr). While that window
+    /// is still open and isha is unlogged for yesterday, yesterday's outcome
+    /// isn't known yet — a 1 AM isha log can still complete it — so we stop
+    /// the walk one day earlier and pick yesterday up on a later refresh.
     private func reconcileStreakIfNeeded(now: Date, calendar: Calendar) {
         let todayStart = calendar.startOfDay(for: now)
-        guard let yesterdayStart = calendar.date(byAdding: .day, value: -1, to: todayStart) else { return }
-        let yesterdayKey = AppClock.dayKey(for: yesterdayStart)
+        guard var lastDecidedStart = calendar.date(byAdding: .day, value: -1, to: todayStart) else { return }
+
+        if let prev = previousIshaWindow,
+           now < prev.end,
+           AppClock.dayKey(for: lastDecidedStart) == previousDayKey,
+           !hasLog(prayer: .isha, dayKey: previousDayKey) {
+            guard let dayBefore = calendar.date(byAdding: .day, value: -1, to: lastDecidedStart) else { return }
+            lastDecidedStart = dayBefore
+        }
+        let lastDecidedKey = AppClock.dayKey(for: lastDecidedStart)
 
         guard let lastKey = profile.lastReconciledDayKey,
               let lastDate = AppClock.date(fromDayKey: lastKey) else {
-            // First run (or unparseable state): start the ledger at yesterday
-            // without penalizing pre-install days.
-            if profile.lastReconciledDayKey != yesterdayKey {
-                profile.lastReconciledDayKey = yesterdayKey
+            // First run (or unparseable state): start the ledger at the last
+            // decided day without penalizing pre-install days.
+            if profile.lastReconciledDayKey != lastDecidedKey {
+                profile.lastReconciledDayKey = lastDecidedKey
                 persistProfile()
             }
             return
         }
-        guard lastDate < yesterdayStart else { return }   // nothing new (or time-traveled backwards)
+        guard lastDate < lastDecidedStart else { return }   // nothing new (or time-traveled backwards)
 
         var elapsed: [(dayKey: String, isComplete: Bool)] = []
-        var day = calendar.date(byAdding: .day, value: 1, to: lastDate) ?? yesterdayStart
-        while day <= yesterdayStart {
+        var day = calendar.date(byAdding: .day, value: 1, to: lastDate) ?? lastDecidedStart
+        while day <= lastDecidedStart {
             let key = AppClock.dayKey(for: day)
             elapsed.append((key, GameEngine.isDayComplete(logs: logs, dayKey: key)))
             guard let next = calendar.date(byAdding: .day, value: 1, to: day) else { break }

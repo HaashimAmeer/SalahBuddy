@@ -29,6 +29,9 @@ targets:
     platform: iOS
     sources: [Tests]
     dependencies: [{ target: SalahBuddy }]
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
 schemes:
   SalahBuddy:
     build: { targets: { SalahBuddy: all } }
