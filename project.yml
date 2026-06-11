@@ -1,0 +1,35 @@
+name: SalahBuddy
+options:
+  bundleIdPrefix: com.haashim
+  deploymentTarget: { iOS: "17.0" }
+  createIntermediateGroups: true
+packages:
+  Adhan: { url: https://github.com/batoulapps/adhan-swift, from: "1.4.0" }
+settings:
+  base:
+    DEVELOPMENT_TEAM: DWNR6L5744
+targets:
+  SalahBuddy:
+    type: application
+    platform: iOS
+    sources: [Sources]
+    dependencies: [{ package: Adhan }]
+    info:
+      path: Sources/Info.plist
+      properties:
+        UILaunchScreen: {}
+        NSLocationWhenInUseUsageDescription: "SalahBuddy uses your location to calculate accurate prayer times."
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.haashim.salahbuddy
+        TARGETED_DEVICE_FAMILY: "1"
+  SalahBuddyTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [Tests]
+    dependencies: [{ target: SalahBuddy }]
+schemes:
+  SalahBuddy:
+    build: { targets: { SalahBuddy: all } }
+    test: { targets: [SalahBuddyTests] }
