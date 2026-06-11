@@ -31,9 +31,19 @@ enum GameEngine {
     static let maxStreakFreezes = 2
     static let jamaatBonus = 5            // v2: optional "prayed in jamaat" bonus
     static let jummaBonus = 10            // v3.2: Friday Dhuhr in congregation = Jumma
-    static let dhikrXP = 5                // v3.2: per dhikr session while excused (private XP)
-    static let maxDhikrPerDay = 5
+    // v3.5: dhikr/good-deeds while on a break. The ACT is unlimited (never
+    // blocked); only XP is softly capped per day so it can't be farmed. All of
+    // it is private — never on the circle scoreboard.
+    static let dhikrXP = 1                // per tasbih tap
+    static let deedXP = 10               // per good-deed prompt
+    static let recoveryDailyXPCap = 40   // shared soft daily cap for dhikr + deeds
     static let maxExcusedPerMonth = 10    // legacy v2 cap — no longer enforced (excused is a mode now)
+
+    /// v3.5: how much of `amount` can still be granted today given what's
+    /// already been earned from dhikr+deeds, respecting the soft cap. Pure.
+    static func recoveryGrant(amount: Int, earnedToday: Int) -> Int {
+        max(0, min(amount, recoveryDailyXPCap - earnedToday))
+    }
 
     /// Friday in the user's current calendar → the Dhuhr jamaat toggle becomes
     /// "Prayed Jumma" and earns the bigger bonus.

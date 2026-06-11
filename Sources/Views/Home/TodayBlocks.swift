@@ -12,6 +12,8 @@ struct CurrentPrayerBlock: View {
     @EnvironmentObject private var state: AppState
     @Environment(\.appNow) private var now
 
+    @State private var showRecharge = false
+
     var body: some View {
         let entries = state.gridEntries(for: block.prayer, dayKey: block.dayKey)
 
@@ -53,6 +55,9 @@ struct CurrentPrayerBlock: View {
         .padding(16)
         .cardStyle()
         .animation(Theme.spring, value: block)
+        .sheet(isPresented: $showRecharge) {
+            RecoverySheet().environmentObject(state)
+        }
     }
 
     /// Tier the log would earn now — against the combined window when traveling.
@@ -127,28 +132,26 @@ struct CurrentPrayerBlock: View {
                     .foregroundStyle(Theme.inkMuted)
                     .fixedSize(horizontal: false, vertical: true)
 
-                Text("Dhikr today · \(state.dhikrToday)/\(GameEngine.maxDhikrPerDay) · +\(GameEngine.dhikrXP) XP each")
+                Text("🌟 \(state.dhikrToday) dhikr today · +\(state.recoveryXPToday) XP")
                     .font(Theme.sans(11, .semibold))
                     .foregroundStyle(Theme.inkMuted.opacity(0.85))
 
                 // Equal-width, single-line, same-height buttons so they line up.
                 HStack(spacing: 10) {
-                    let dhikrMaxed = state.dhikrToday >= GameEngine.maxDhikrPerDay
                     Button {
                         UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                        withAnimation(Theme.spring) { state.logDhikr() }
+                        showRecharge = true
                     } label: {
-                        Text("📿 Log dhikr")
+                        Text("📿 Dhikr & deeds")
                             .font(Theme.sans(14, .bold))
                             .foregroundStyle(.white)
                             .lineLimit(1)
                             .minimumScaleFactor(0.8)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 11)
-                            .background(Capsule().fill(dhikrMaxed ? Theme.mist : Theme.lilac))
+                            .background(Capsule().fill(Theme.lilac))
                     }
                     .buttonStyle(.plain)
-                    .disabled(dhikrMaxed)
 
                     Button {
                         withAnimation(Theme.spring) { state.resumePrayers() }

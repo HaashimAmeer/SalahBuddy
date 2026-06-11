@@ -176,16 +176,19 @@ struct UserProfile: Codable {
     var excusedDayKeys: Set<String>            // v2: days marked "Can't pray today"
     var challengeCompletions: [String: Date]   // v2: challenge id (or "id|weekKey") → completion date
     var excusedModeSince: String?              // v3.2: dayKey the "can't pray" break started (nil = not on a break)
-    var dhikrByDay: [String: Int]              // v3.2: dayKey → dhikr sessions logged (private XP)
+    var dhikrByDay: [String: Int]              // v3.2: dayKey → dhikr count (taps), unlimited
     var customChallenges: [CustomChallenge]    // v3.2: group challenges the circle created
     var breakReason: String?                   // v3.4: "period" / "illness" / "other" — tailors break copy
+    var recoveryXPByDay: [String: Int]         // v3.5: XP earned from dhikr+deeds per day (enforces soft cap)
+    var deedsByDay: [String: [String]]         // v3.5: completed good-deed ids per day
 
     init(name: String, totalXP: Int, streak: Int, longestStreak: Int, streakFreezes: Int,
          lastStreakDayKey: String?, lastReconciledDayKey: String?, earnedBadges: [String: Date],
          perfectDayCount: Int, joinedAt: Date,
          excusedDayKeys: Set<String> = [], challengeCompletions: [String: Date] = [:],
          excusedModeSince: String? = nil, dhikrByDay: [String: Int] = [:],
-         customChallenges: [CustomChallenge] = [], breakReason: String? = nil) {
+         customChallenges: [CustomChallenge] = [], breakReason: String? = nil,
+         recoveryXPByDay: [String: Int] = [:], deedsByDay: [String: [String]] = [:]) {
         self.name = name
         self.totalXP = totalXP
         self.streak = streak
@@ -202,6 +205,8 @@ struct UserProfile: Codable {
         self.dhikrByDay = dhikrByDay
         self.customChallenges = customChallenges
         self.breakReason = breakReason
+        self.recoveryXPByDay = recoveryXPByDay
+        self.deedsByDay = deedsByDay
     }
 
     // Migration-safe decoding: v1 profiles lack the v2 fields.
@@ -210,6 +215,7 @@ struct UserProfile: Codable {
         case lastStreakDayKey, lastReconciledDayKey, earnedBadges, perfectDayCount, joinedAt
         case excusedDayKeys, challengeCompletions
         case excusedModeSince, dhikrByDay, customChallenges, breakReason
+        case recoveryXPByDay, deedsByDay
     }
 
     init(from decoder: Decoder) throws {
@@ -230,6 +236,8 @@ struct UserProfile: Codable {
         dhikrByDay = (try? c.decodeIfPresent([String: Int].self, forKey: .dhikrByDay)) ?? [:]
         customChallenges = (try? c.decodeIfPresent([CustomChallenge].self, forKey: .customChallenges)) ?? []
         breakReason = (try? c.decodeIfPresent(String.self, forKey: .breakReason)) ?? nil
+        recoveryXPByDay = (try? c.decodeIfPresent([String: Int].self, forKey: .recoveryXPByDay)) ?? [:]
+        deedsByDay = (try? c.decodeIfPresent([String: [String]].self, forKey: .deedsByDay)) ?? [:]
     }
 
     static func fresh(now: Date) -> UserProfile {
@@ -325,6 +333,59 @@ struct AppSettings: Codable {
         memberKind = (try? c.decodeIfPresent(String.self, forKey: .memberKind)) ?? nil
         isTraveling = (try? c.decode(Bool.self, forKey: .isTraveling)) ?? false
     }
+}
+
+// MARK: - Recharge (v3.5: good deeds during a break)
+
+/// One phrase of the tasbih (dhikr after prayer): Arabic, transliteration,
+/// meaning, and how many times it's repeated in a round (33 / 33 / 34 = 100).
+struct TasbihPhrase: Equatable {
+    let arabic: String
+    let translit: String
+    let meaning: String
+    let count: Int
+}
+
+/// A good-deed prompt offered during a break — all universally encouraged
+/// during menstruation (no Qur'an *reciting*, to sidestep the mushaf debate).
+struct GoodDeed: Identifiable, Equatable {
+    let id: String
+    let emoji: String
+    let title: String
+    let arabic: String?
+}
+
+enum Recharge {
+    static let roundTotal = 100
+
+    static let tasbih: [TasbihPhrase] = [
+        TasbihPhrase(arabic: "سُبْحَانَ اللّٰه", translit: "SubhanAllah",
+                     meaning: "Glory be to Allah", count: 33),
+        TasbihPhrase(arabic: "الْحَمْدُ لِلّٰه", translit: "Alhamdulillah",
+                     meaning: "All praise is for Allah", count: 33),
+        TasbihPhrase(arabic: "اللّٰهُ أَكْبَر", translit: "Allahu Akbar",
+                     meaning: "Allah is the Greatest", count: 34),
+    ]
+
+    /// Phrase + how many of it are done so far, for a running total. `inSet`
+    /// is 0-based within the current phrase; `phraseIndex` is 0/1/2.
+    static func position(forTotal total: Int) -> (phrase: TasbihPhrase, inSet: Int, phraseIndex: Int) {
+        let pos = ((total % roundTotal) + roundTotal) % roundTotal   // 0..99, safe for 0
+        if pos < 33 { return (tasbih[0], pos, 0) }
+        if pos < 66 { return (tasbih[1], pos - 33, 1) }
+        return (tasbih[2], pos - 66, 2)
+    }
+
+    static let goodDeeds: [GoodDeed] = [
+        GoodDeed(id: "salawat", emoji: "🤲", title: "Send 10 salawat ﷺ",
+                 arabic: "اللّٰهُمَّ صَلِّ عَلَى مُحَمَّد"),
+        GoodDeed(id: "istighfar", emoji: "💫", title: "Istighfar ×100",
+                 arabic: "أَسْتَغْفِرُ اللّٰه"),
+        GoodDeed(id: "dua", emoji: "💜", title: "Make du'a for someone you love", arabic: nil),
+        GoodDeed(id: "sadaqah", emoji: "🌿", title: "Give a little sadaqah", arabic: nil),
+        GoodDeed(id: "quran", emoji: "🎧", title: "Listen to a page of Qur'an", arabic: nil),
+        GoodDeed(id: "gratitude", emoji: "🌸", title: "Note 3 things you're grateful for", arabic: nil),
+    ]
 }
 
 // MARK: - Travel combining (v3.3)

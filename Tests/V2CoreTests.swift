@@ -472,12 +472,52 @@ final class V2CoreTests: XCTestCase {
         p.customChallenges = [CustomChallenge(id: "custom-x", prayer: .isha, days: 4,
                                               createdAt: Date(timeIntervalSince1970: 0))]
         p.breakReason = "period"
+        p.recoveryXPByDay["2026-06-10"] = 25
+        p.deedsByDay["2026-06-10"] = ["salawat", "dua"]
         let data = try JSONEncoder().encode(p)
         let decoded = try JSONDecoder().decode(UserProfile.self, from: data)
         XCTAssertEqual(decoded.excusedModeSince, "2026-06-10")
         XCTAssertEqual(decoded.dhikrByDay["2026-06-10"], 3)
         XCTAssertEqual(decoded.customChallenges.first?.days, 4)
         XCTAssertEqual(decoded.breakReason, "period")
+        XCTAssertEqual(decoded.recoveryXPByDay["2026-06-10"], 25)
+        XCTAssertEqual(decoded.deedsByDay["2026-06-10"], ["salawat", "dua"])
+    }
+
+    func testRechargeTasbihContent() {
+        XCTAssertEqual(Recharge.tasbih.map(\.count), [33, 33, 34])
+        XCTAssertEqual(Recharge.tasbih.map(\.count).reduce(0, +), Recharge.roundTotal)
+        XCTAssertEqual(Recharge.tasbih.map(\.translit), ["SubhanAllah", "Alhamdulillah", "Allahu Akbar"])
+        // Deed prompts: non-empty, unique ids, no Qur'an *reciting* prompt.
+        XCTAssertFalse(Recharge.goodDeeds.isEmpty)
+        XCTAssertEqual(Set(Recharge.goodDeeds.map(\.id)).count, Recharge.goodDeeds.count)
+        XCTAssertFalse(Recharge.goodDeeds.contains { $0.title.lowercased().contains("recite") })
+    }
+
+    func testRechargeTasbihPositions() {
+        // Boundaries within a round: 33 SubhanAllah, 33 Alhamdulillah, 34 Allahu Akbar.
+        XCTAssertEqual(Recharge.position(forTotal: 0).phraseIndex, 0)
+        XCTAssertEqual(Recharge.position(forTotal: 0).inSet, 0)
+        XCTAssertEqual(Recharge.position(forTotal: 32).phraseIndex, 0)
+        XCTAssertEqual(Recharge.position(forTotal: 33).phraseIndex, 1)   // into Alhamdulillah
+        XCTAssertEqual(Recharge.position(forTotal: 33).inSet, 0)
+        XCTAssertEqual(Recharge.position(forTotal: 65).phraseIndex, 1)
+        XCTAssertEqual(Recharge.position(forTotal: 66).phraseIndex, 2)   // into Allahu Akbar
+        XCTAssertEqual(Recharge.position(forTotal: 99).phraseIndex, 2)
+        XCTAssertEqual(Recharge.position(forTotal: 100).phraseIndex, 0)  // next round wraps
+        XCTAssertEqual(Recharge.position(forTotal: 100).inSet, 0)
+    }
+
+    func testRecoveryGrantRespectsSoftCap() {
+        let cap = GameEngine.recoveryDailyXPCap
+        // Under the cap: full amount.
+        XCTAssertEqual(GameEngine.recoveryGrant(amount: 10, earnedToday: 0), 10)
+        XCTAssertEqual(GameEngine.recoveryGrant(amount: 1, earnedToday: cap - 1), 1)
+        // Straddling the cap: only the remainder.
+        XCTAssertEqual(GameEngine.recoveryGrant(amount: 10, earnedToday: cap - 3), 3)
+        // At/over the cap: nothing (act continues, XP doesn't).
+        XCTAssertEqual(GameEngine.recoveryGrant(amount: 10, earnedToday: cap), 0)
+        XCTAssertEqual(GameEngine.recoveryGrant(amount: 10, earnedToday: cap + 5), 0)
     }
 
     func testAllEightDefinitionsExist() {

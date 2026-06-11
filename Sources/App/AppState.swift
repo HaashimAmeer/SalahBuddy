@@ -404,18 +404,41 @@ final class AppState: ObservableObject {
         persistProfile()
     }
 
-    // MARK: - Dhikr (v3.2 — private XP while on a break)
+    // MARK: - Recharge: dhikr + good deeds (v3.5 — private XP while on a break)
 
     var dhikrToday: Int { profile.dhikrByDay[todayKey] ?? 0 }
+    var recoveryXPToday: Int { profile.recoveryXPByDay[todayKey] ?? 0 }
+    var recoveryXPRemaining: Int { max(0, GameEngine.recoveryDailyXPCap - recoveryXPToday) }
+    var isRecoveryCapped: Bool { recoveryXPRemaining == 0 }
+    var deedsDoneToday: Set<String> { Set(profile.deedsByDay[todayKey] ?? []) }
 
-    /// Log a dhikr session: +5 XP, up to 5/day. Counts toward your level but
-    /// is deliberately NOT part of weekly circle scores — it's just for you.
-    func logDhikr() {
-        guard dhikrToday < GameEngine.maxDhikrPerDay else { return }
-        profile.dhikrByDay[todayKey] = dhikrToday + 1
-        profile.totalXP += GameEngine.dhikrXP
+    /// Tasbih tap: ALWAYS counts (unlimited, never blocked). XP accrues only up
+    /// to the gentle daily cap — past it the act continues, just without points.
+    func tapTasbih() {
+        profile.dhikrByDay[todayKey, default: 0] += 1
+        awardRecoveryXP(GameEngine.dhikrXP)
         persistProfile()
     }
+
+    /// Complete a good-deed prompt for today: once per deed per day, +deedXP
+    /// (subject to the same shared soft cap).
+    func completeDeed(_ id: String) {
+        guard !deedsDoneToday.contains(id) else { return }
+        profile.deedsByDay[todayKey, default: []].append(id)
+        awardRecoveryXP(GameEngine.deedXP)
+        persistProfile()
+    }
+
+    /// Grant up to `amount` XP, never exceeding today's recovery cap.
+    private func awardRecoveryXP(_ amount: Int) {
+        let granted = GameEngine.recoveryGrant(amount: amount, earnedToday: recoveryXPToday)
+        guard granted > 0 else { return }
+        profile.totalXP += granted
+        profile.recoveryXPByDay[todayKey, default: 0] += granted
+    }
+
+    /// Legacy alias (older call sites) — one tasbih tap.
+    func logDhikr() { tapTasbih() }
 
     // MARK: - Circle (v2)
 
