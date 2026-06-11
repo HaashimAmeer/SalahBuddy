@@ -20,6 +20,7 @@ targets:
       path: Sources/Info.plist
       properties:
         UILaunchScreen: {}
+        CFBundleIconName: AppIcon
         NSLocationWhenInUseUsageDescription: "SalahBuddy uses your location to calculate accurate prayer times."
         NSCameraUsageDescription: "SalahBuddy uses the camera so you can snap a quick photo when you pray and share it with your circle."
         NSPhotoLibraryUsageDescription: "SalahBuddy lets you pick a photo from your library for your prayer post."
@@ -28,6 +29,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: org.amacvoters.salahbuddymock
         TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
   SalahBuddyTests:
     type: bundle.unit-test
     platform: iOS
