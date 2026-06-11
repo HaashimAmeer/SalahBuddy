@@ -39,7 +39,10 @@ Turn on **Traveling** (toggle on Today, or accept the auto-suggestion when you'r
 
 - A day counts toward your streak when **all 5** prayers are logged (any tier).
 - Every 7 consecutive days banks a **streak freeze** (max 2). A missed day consumes a freeze instead of resetting you.
-- **Breaks** ("Can't pray right now" — sickness, travel, period): streak fully paused, no cap, resume with one tap. Your circle sees a gentle "excused", never a reason. A soft reminder arrives after 5 days.
+- **Breaks** ("Can't pray right now"): streak fully paused, no cap, resume with one tap. Your circle sees a gentle "excused", never the reason. The flow is gender-aware (from onboarding):
+  - **Sisters**: a normal-framed **period** break — prayers are *waived* (no make-ups, religiously correct), streak safe, dhikr earns private XP. Up to ~10 days is treated as expected, with a soft check-in after 10.
+  - **Brothers**: no period option. "Traveling" routes to combining (you can still pray); only genuine illness starts a break (soft check-in after 5 days).
+  - **Prefer not to say**: the unified break with all reasons.
 
 ## Levels
 

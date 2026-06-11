@@ -43,11 +43,17 @@ final class NotificationManager {
     private static let breakReminderID = idPrefix + "breakReminder"
 
     /// One gentle nudge a few days into a "can't pray" break — dhikr keeps
-    /// you connected, and resuming is one tap away.
-    func scheduleBreakReminder(daysFromNow days: Int) {
+    /// you connected, and resuming is one tap away. v3.4: copy adapts to the
+    /// reason (a period nudge is softer and assumes ~10 days is normal).
+    func scheduleBreakReminder(daysFromNow days: Int, reason: String? = nil) {
         let content = UNMutableNotificationContent()
-        content.title = "We miss you 💜"
-        content.body = "No pressure — log some dhikr for a few XP, and tap Resume whenever you're ready."
+        if reason == "period" {
+            content.title = "Still resting? 🌸"
+            content.body = "No rush at all — tap Resume whenever you're ready, and log some dhikr for a little XP meanwhile."
+        } else {
+            content.title = "We miss you 💜"
+            content.body = "No pressure — log some dhikr for a few XP, and tap Resume whenever you're ready."
+        }
         content.sound = .default
         let trigger = UNTimeIntervalNotificationTrigger(
             timeInterval: TimeInterval(days) * 24 * 3600, repeats: false)

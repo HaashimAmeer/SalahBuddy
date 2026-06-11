@@ -463,6 +463,7 @@ final class V2CoreTests: XCTestCase {
         XCTAssertNil(profile.excusedModeSince)
         XCTAssertTrue(profile.dhikrByDay.isEmpty)
         XCTAssertTrue(profile.customChallenges.isEmpty)
+        XCTAssertNil(profile.breakReason, "v3.4 breakReason defaults nil for older profiles")
 
         // Round-trip with the new fields survives.
         var p = profile
@@ -470,11 +471,13 @@ final class V2CoreTests: XCTestCase {
         p.dhikrByDay["2026-06-10"] = 3
         p.customChallenges = [CustomChallenge(id: "custom-x", prayer: .isha, days: 4,
                                               createdAt: Date(timeIntervalSince1970: 0))]
+        p.breakReason = "period"
         let data = try JSONEncoder().encode(p)
         let decoded = try JSONDecoder().decode(UserProfile.self, from: data)
         XCTAssertEqual(decoded.excusedModeSince, "2026-06-10")
         XCTAssertEqual(decoded.dhikrByDay["2026-06-10"], 3)
         XCTAssertEqual(decoded.customChallenges.first?.days, 4)
+        XCTAssertEqual(decoded.breakReason, "period")
     }
 
     func testAllEightDefinitionsExist() {

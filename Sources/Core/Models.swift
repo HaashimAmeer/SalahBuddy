@@ -178,13 +178,14 @@ struct UserProfile: Codable {
     var excusedModeSince: String?              // v3.2: dayKey the "can't pray" break started (nil = not on a break)
     var dhikrByDay: [String: Int]              // v3.2: dayKey → dhikr sessions logged (private XP)
     var customChallenges: [CustomChallenge]    // v3.2: group challenges the circle created
+    var breakReason: String?                   // v3.4: "period" / "illness" / "other" — tailors break copy
 
     init(name: String, totalXP: Int, streak: Int, longestStreak: Int, streakFreezes: Int,
          lastStreakDayKey: String?, lastReconciledDayKey: String?, earnedBadges: [String: Date],
          perfectDayCount: Int, joinedAt: Date,
          excusedDayKeys: Set<String> = [], challengeCompletions: [String: Date] = [:],
          excusedModeSince: String? = nil, dhikrByDay: [String: Int] = [:],
-         customChallenges: [CustomChallenge] = []) {
+         customChallenges: [CustomChallenge] = [], breakReason: String? = nil) {
         self.name = name
         self.totalXP = totalXP
         self.streak = streak
@@ -200,6 +201,7 @@ struct UserProfile: Codable {
         self.excusedModeSince = excusedModeSince
         self.dhikrByDay = dhikrByDay
         self.customChallenges = customChallenges
+        self.breakReason = breakReason
     }
 
     // Migration-safe decoding: v1 profiles lack the v2 fields.
@@ -207,7 +209,7 @@ struct UserProfile: Codable {
         case name, totalXP, streak, longestStreak, streakFreezes
         case lastStreakDayKey, lastReconciledDayKey, earnedBadges, perfectDayCount, joinedAt
         case excusedDayKeys, challengeCompletions
-        case excusedModeSince, dhikrByDay, customChallenges
+        case excusedModeSince, dhikrByDay, customChallenges, breakReason
     }
 
     init(from decoder: Decoder) throws {
@@ -227,6 +229,7 @@ struct UserProfile: Codable {
         excusedModeSince = (try? c.decodeIfPresent(String.self, forKey: .excusedModeSince)) ?? nil
         dhikrByDay = (try? c.decodeIfPresent([String: Int].self, forKey: .dhikrByDay)) ?? [:]
         customChallenges = (try? c.decodeIfPresent([CustomChallenge].self, forKey: .customChallenges)) ?? []
+        breakReason = (try? c.decodeIfPresent(String.self, forKey: .breakReason)) ?? nil
     }
 
     static func fresh(now: Date) -> UserProfile {

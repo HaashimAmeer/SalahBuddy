@@ -113,14 +113,16 @@ struct CurrentPrayerBlock: View {
         if state.isOnBreak {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 8) {
-                    Image(systemName: "moon.fill")
+                    Image(systemName: state.breakReason == "period" ? "drop.fill" : "moon.fill")
                         .font(.system(size: 13, weight: .semibold))
-                    Text("On a break — your streak is safe 💜")
+                    Text(state.breakCopy.headline + " — streak safe")
                         .font(Theme.sans(14, .bold))
                 }
                 .foregroundStyle(Theme.lilac)
 
-                Text("Stay connected with a little dhikr — those points are just for you, never shown to your circle.")
+                Text(state.breakReason == "period"
+                     ? "These prayers are waived — nothing to make up. Stay connected with a little dhikr; those points are just for you."
+                     : "Stay connected with a little dhikr — those points are just for you, never shown to your circle.")
                     .font(Theme.sans(12.5, .semibold))
                     .foregroundStyle(Theme.inkMuted)
                     .fixedSize(horizontal: false, vertical: true)
@@ -738,48 +740,74 @@ struct TravelSuggestionBanner: View {
 struct ExcusedTodayFooter: View {
     @EnvironmentObject private var state: AppState
 
-    @State private var confirming = false
+    // v3.4: the entry routes differently by gender (memberKind).
+    @State private var sisterConfirm = false
+    @State private var brotherConfirm = false
+    @State private var genericConfirm = false
 
     var body: some View {
         Group {
             if state.isOnBreak {
                 breakBanner
             } else {
-                Button {
-                    confirming = true
-                } label: {
-                    Text("Can't pray right now?")
-                        .font(Theme.sans(13, .semibold))
-                        .foregroundStyle(Theme.inkMuted)
-                        .underline()
-                }
-                .buttonStyle(.plain)
-                .confirmationDialog("Take a break?",
-                                    isPresented: $confirming, titleVisibility: .visible) {
-                    Button("Start a break 🌙") {
-                        withAnimation(Theme.spring) { state.startBreak() }
-                    }
-                    Button("Not now", role: .cancel) {}
-                } message: {
-                    Text("Sickness, travel, your period — whatever the reason, your streak is safe until you tap Resume. Your circle sees a gentle \"excused\", never the details. Dhikr earns you private XP meanwhile.")
-                }
+                entryButton
             }
         }
         .padding(.top, 6)
     }
 
+    @ViewBuilder
+    private var entryButton: some View {
+        Button {
+            if state.isSister { sisterConfirm = true }
+            else if state.isBrother { brotherConfirm = true }
+            else { genericConfirm = true }
+        } label: {
+            Text("Can't pray right now?")
+                .font(Theme.sans(13, .semibold))
+                .foregroundStyle(Theme.inkMuted)
+                .underline()
+        }
+        .buttonStyle(.plain)
+        // Sisters: period leads, framed as completely normal.
+        .confirmationDialog("Need a break?", isPresented: $sisterConfirm, titleVisibility: .visible) {
+            Button("On my period 🌸") { withAnimation(Theme.spring) { state.startBreak(reason: "period") } }
+            Button("Another reason") { withAnimation(Theme.spring) { state.startBreak(reason: "other") } }
+            Button("Not now", role: .cancel) {}
+        } message: {
+            Text("Your prayers are waived while you rest — nothing to make up, and your streak stays safe. Your circle only sees a gentle \"resting\". Dhikr earns private XP meanwhile.")
+        }
+        // Brothers: travel routes to combining (you can still pray); only
+        // genuine inability starts a break.
+        .confirmationDialog("Can't pray right now?", isPresented: $brotherConfirm, titleVisibility: .visible) {
+            Button("I'm traveling ✈️") { withAnimation(Theme.spring) { state.setTraveling(true) } }
+            Button("I'm unwell 🤒") { withAnimation(Theme.spring) { state.startBreak(reason: "illness") } }
+            Button("Not now", role: .cancel) {}
+        } message: {
+            Text("Traveling? You can still pray — turn on combining to log Dhuhr+Asr and Maghrib+Isha together. A break is for when you genuinely can't; your streak stays safe either way.")
+        }
+        // Unknown gender: the unified break.
+        .confirmationDialog("Take a break?", isPresented: $genericConfirm, titleVisibility: .visible) {
+            Button("Start a break 🌙") { withAnimation(Theme.spring) { state.startBreak(reason: "other") } }
+            Button("Not now", role: .cancel) {}
+        } message: {
+            Text("Sickness, travel, your period — whatever the reason, your streak is safe until you tap Resume. Your circle sees a gentle \"excused\", never the details.")
+        }
+    }
+
     private var breakBanner: some View {
         HStack(spacing: 10) {
-            Image(systemName: "moon.fill")
+            Image(systemName: state.breakReason == "period" ? "drop.fill" : "moon.fill")
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(Theme.lilac)
             VStack(alignment: .leading, spacing: 2) {
-                Text("On a break — streak safe")
+                Text(state.breakCopy.headline)
                     .font(Theme.sans(14, .bold))
                     .foregroundStyle(Theme.inkDeep)
-                Text("Resume whenever you're ready 💜")
+                Text(state.breakCopy.subtext)
                     .font(Theme.sans(12, .semibold))
                     .foregroundStyle(Theme.inkMuted)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 8)
             Button("Resume") {

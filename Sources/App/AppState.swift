@@ -346,13 +346,24 @@ final class AppState: ObservableObject {
     /// active is auto-marked excused, then "Resume prayers" ends it. No
     /// monthly cap; the accountability is that the circle sees the break.
     var isOnBreak: Bool { profile.excusedModeSince != nil }
+    var breakReason: String? { profile.breakReason }
 
-    func startBreak() {
+    // v3.4: gender (from onboarding) tailors the break flow. "Prefer not to
+    // say" → both nil → the unified break.
+    var isSister: Bool { settings.memberKind == "sister" }
+    var isBrother: Bool { settings.memberKind == "brother" }
+
+    /// v3.4: reason tailors copy + reminder cadence. A period break commonly
+    /// runs up to ~10 days (and its prayers are waived, never made up); other
+    /// breaks nudge sooner.
+    func startBreak(reason: String? = nil) {
         guard !isOnBreak else { return }
         profile.excusedModeSince = todayKey
+        profile.breakReason = reason
         profile.excusedDayKeys.insert(todayKey)
         persistProfile()
-        NotificationManager.shared.scheduleBreakReminder(daysFromNow: 5)
+        NotificationManager.shared.scheduleBreakReminder(daysFromNow: reason == "period" ? 10 : 5,
+                                                         reason: reason)
         objectWillChange.send()
     }
 
@@ -360,11 +371,25 @@ final class AppState: ObservableObject {
     func resumePrayers() {
         guard isOnBreak else { return }
         profile.excusedModeSince = nil
+        profile.breakReason = nil
         profile.excusedDayKeys.remove(todayKey)
         persistProfile()
         NotificationManager.shared.cancelBreakReminder()
         NotificationManager.shared.reschedule()
         objectWillChange.send()
+    }
+
+    /// Banner copy for the active break, tailored to the reason.
+    var breakCopy: (headline: String, subtext: String) {
+        switch profile.breakReason {
+        case "period":
+            return ("On a break 🌸",
+                    "Your prayers are waived while you rest — nothing to make up. Streak's safe, and dhikr earns private XP.")
+        case "illness":
+            return ("Resting up 💜", "Feel better — your streak is safe until you resume.")
+        default:
+            return ("On a break 💜", "Your streak is safe until you resume.")
+        }
     }
 
     /// Legacy single-day toggle (kept for the pre-mode UI path); no cap.
