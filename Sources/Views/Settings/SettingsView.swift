@@ -1,20 +1,452 @@
 import SwiftUI
+import UserNotifications
+import UIKit
 
-// PLACEHOLDER — owned by the stats-settings agent, which will replace this file.
+/// Settings tab — profile name, prayer-time calculation, location,
+/// notifications (incl. denied state), About, and a DEBUG developer section
+/// with time-travel controls.
 struct SettingsView: View {
     @EnvironmentObject private var state: AppState
+    @Environment(\.scenePhase) private var scenePhase
+
+    @State private var name: String = ""
+    @State private var notificationStatus: UNAuthorizationStatus = .notDetermined
+    @State private var showDeniedAlert = false
+    @State private var showResetConfirm = false
 
     var body: some View {
         ZStack {
             Theme.cream.ignoresSafeArea()
-            VStack(spacing: 12) {
-                Text("Settings")
-                    .font(Theme.rounded(28))
-                    .foregroundStyle(Theme.ink)
-                Text("SettingsView placeholder")
+            ScrollView {
+                VStack(spacing: 16) {
+                    header
+                    profileCard
+                    calculationCard
+                    locationCard
+                    notificationsCard
+                    aboutCard
+                    #if DEBUG
+                    developerCard
+                    #endif
+                }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 24)
+            }
+        }
+        .onAppear {
+            name = state.profile.name
+            refreshNotificationStatus()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { refreshNotificationStatus() }
+        }
+        .onChange(of: state.settings.calcMethod) { _, _ in
+            NotificationManager.shared.reschedule()
+        }
+        .onChange(of: state.settings.madhab) { _, _ in
+            NotificationManager.shared.reschedule()
+        }
+        .onChange(of: state.settings.useDeviceLocation) { _, _ in
+            NotificationManager.shared.reschedule()
+        }
+        .alert("Notifications are off", isPresented: $showDeniedAlert) {
+            Button("Open Settings") { openSystemSettings() }
+            Button("Not now", role: .cancel) {}
+        } message: {
+            Text("SalahBuddy needs permission to remind you. Enable notifications in the system Settings app.")
+        }
+        .confirmationDialog("Reset all data?", isPresented: $showResetConfirm, titleVisibility: .visible) {
+            Button("Reset everything", role: .destructive) {
+                state.resetAllData()
+                NotificationManager.shared.cancelAll()
+                name = ""
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Logs, XP, streak, and badges will be erased. This cannot be undone.")
+        }
+    }
+
+    private var header: some View {
+        HStack {
+            Text("Settings")
+                .font(Theme.rounded(30))
+                .foregroundStyle(Theme.ink)
+            Spacer()
+        }
+        .padding(.top, 8)
+    }
+
+    // MARK: - Profile
+
+    private var profileCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionTitle("Profile", symbol: "person.fill", color: Theme.green)
+
+            TextField("Your name", text: $name)
+                .font(Theme.rounded(17, .semibold))
+                .foregroundStyle(Theme.ink)
+                .textInputAutocapitalization(.words)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+                .background(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Theme.cream)
+                )
+                .onSubmit { commitName() }
+                .onChange(of: name) { _, _ in commitName() }
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity)
+        .cardStyle()
+    }
+
+    private func commitName() {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed != state.profile.name else { return }
+        state.setName(trimmed)
+    }
+
+    // MARK: - Calculation
+
+    private var calculationCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            sectionTitle("Prayer times", symbol: "clock.fill", color: Theme.sky)
+
+            HStack {
+                Text("Method")
                     .font(Theme.rounded(15, .semibold))
+                    .foregroundStyle(Theme.ink)
+                Spacer()
+                Picker("Method", selection: $state.settings.calcMethod) {
+                    ForEach(CalcMethod.allCases, id: \.self) { method in
+                        Text(method.displayName).tag(method)
+                    }
+                }
+                .pickerStyle(.menu)
+                .tint(Theme.green)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Asr madhab")
+                    .font(Theme.rounded(15, .semibold))
+                    .foregroundStyle(Theme.ink)
+                Picker("Asr madhab", selection: $state.settings.madhab) {
+                    Text("Shafi (standard)").tag(AsrMadhab.shafi)
+                    Text("Hanafi (later)").tag(AsrMadhab.hanafi)
+                }
+                .pickerStyle(.segmented)
+            }
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity)
+        .cardStyle()
+    }
+
+    // MARK: - Location
+
+    private var locationCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionTitle("Location", symbol: "location.fill", color: Theme.coral)
+
+            Toggle(isOn: locationBinding) {
+                Text("Use my location")
+                    .font(Theme.rounded(15, .semibold))
+                    .foregroundStyle(Theme.ink)
+            }
+            .tint(Theme.green)
+
+            HStack(spacing: 6) {
+                Image(systemName: state.isUsingDeviceLocation ? "location.fill" : "mappin.circle.fill")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(Theme.inkSoft)
+                Text(state.isUsingDeviceLocation
+                     ? "Using device location — \(state.activeLocationName)"
+                     : "Using fixed location — \(state.activeLocationName)")
+                    .font(Theme.rounded(13, .semibold))
                     .foregroundStyle(Theme.inkSoft)
             }
+
+            Divider()
+
+            Text("Today's times")
+                .font(Theme.rounded(14, .heavy))
+                .foregroundStyle(Theme.inkSoft)
+                .tracking(0.5)
+
+            if let schedule = state.todaySchedule {
+                VStack(spacing: 8) {
+                    ForEach(schedule.windows, id: \.prayer) { window in
+                        HStack {
+                            Image(systemName: window.prayer.symbolName)
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundStyle(Theme.color(for: window.prayer))
+                                .frame(width: 24)
+                            Text(window.prayer.displayName)
+                                .font(Theme.rounded(15, .semibold))
+                                .foregroundStyle(Theme.ink)
+                            Spacer()
+                            Text(window.start, format: .dateTime.hour().minute())
+                                .font(Theme.rounded(15, .bold))
+                                .foregroundStyle(Theme.ink)
+                        }
+                    }
+                }
+            } else {
+                Text("Couldn't compute prayer times for this location.")
+                    .font(Theme.rounded(13, .semibold))
+                    .foregroundStyle(Theme.coral)
+            }
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity)
+        .cardStyle()
+    }
+
+    private var locationBinding: Binding<Bool> {
+        Binding(
+            get: { state.settings.useDeviceLocation },
+            set: { newValue in
+                state.settings.useDeviceLocation = newValue
+                if newValue, state.location.authorizationStatus == .notDetermined {
+                    state.location.requestPermission()
+                }
+            }
+        )
+    }
+
+    // MARK: - Notifications
+
+    private var notificationsCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionTitle("Reminders", symbol: "bell.fill", color: Theme.gold)
+
+            Toggle(isOn: notificationsBinding) {
+                Text("Prayer notifications")
+                    .font(Theme.rounded(15, .semibold))
+                    .foregroundStyle(Theme.ink)
+            }
+            .tint(Theme.green)
+
+            if notificationStatus == .denied {
+                Button {
+                    openSystemSettings()
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 13, weight: .bold))
+                        Text("Notifications are disabled in system Settings — tap to fix")
+                            .font(Theme.rounded(13, .bold))
+                            .multilineTextAlignment(.leading)
+                    }
+                    .foregroundStyle(Theme.coral)
+                }
+                .buttonStyle(.plain)
+            } else {
+                Text("A nudge at each prayer's start, plus a last call 30 minutes before its window closes.")
+                    .font(Theme.rounded(13, .semibold))
+                    .foregroundStyle(Theme.inkSoft)
+            }
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity)
+        .cardStyle()
+    }
+
+    private var notificationsBinding: Binding<Bool> {
+        Binding(
+            get: { state.settings.notificationsEnabled },
+            set: { newValue in
+                if newValue {
+                    enableNotifications()
+                } else {
+                    state.settings.notificationsEnabled = false
+                    NotificationManager.shared.cancelAll()
+                }
+            }
+        )
+    }
+
+    private func enableNotifications() {
+        Task {
+            let status = await NotificationManager.shared.authorizationStatus()
+            switch status {
+            case .denied:
+                showDeniedAlert = true
+            case .notDetermined:
+                let granted = await NotificationManager.shared.requestPermission()
+                if granted {
+                    state.settings.notificationsEnabled = true
+                    NotificationManager.shared.reschedule()
+                } else {
+                    showDeniedAlert = true
+                }
+            default:
+                state.settings.notificationsEnabled = true
+                NotificationManager.shared.reschedule()
+            }
+            refreshNotificationStatus()
+        }
+    }
+
+    private func refreshNotificationStatus() {
+        Task {
+            notificationStatus = await NotificationManager.shared.authorizationStatus()
+            // Keep the toggle honest if permission was revoked behind our back.
+            if notificationStatus == .denied, state.settings.notificationsEnabled {
+                state.settings.notificationsEnabled = false
+                NotificationManager.shared.cancelAll()
+            }
+        }
+    }
+
+    private func openSystemSettings() {
+        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+        UIApplication.shared.open(url)
+    }
+
+    // MARK: - About
+
+    private var aboutCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionTitle("About", symbol: "moon.stars.fill", color: Theme.lilac)
+
+            aboutRow(label: "App", value: "SalahBuddy")
+            aboutRow(label: "Version", value: appVersion)
+            aboutRow(label: "Daily XP goal", value: "\(state.settings.dailyGoal) XP")
+            aboutRow(label: "Praying since", value: state.profile.joinedAt
+                .formatted(.dateTime.month(.abbreviated).day().year()))
+
+            Text("Made with 🤲 to help you keep all five, every day.")
+                .font(Theme.rounded(13, .semibold))
+                .foregroundStyle(Theme.inkSoft)
+                .padding(.top, 4)
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity)
+        .cardStyle()
+    }
+
+    private var appVersion: String {
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
+        return version
+    }
+
+    private func aboutRow(label: String, value: String) -> some View {
+        HStack {
+            Text(label)
+                .font(Theme.rounded(15, .semibold))
+                .foregroundStyle(Theme.inkSoft)
+            Spacer()
+            Text(value)
+                .font(Theme.rounded(15, .bold))
+                .foregroundStyle(Theme.ink)
+        }
+    }
+
+    // MARK: - Developer (DEBUG only)
+
+    #if DEBUG
+    private var developerCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            sectionTitle("Developer", symbol: "wrench.and.screwdriver.fill", color: Theme.inkSoft)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Time travel")
+                    .font(Theme.rounded(14, .heavy))
+                    .foregroundStyle(Theme.inkSoft)
+                HStack(spacing: 8) {
+                    timeTravelButton("+1h", seconds: 3600)
+                    timeTravelButton("+6h", seconds: 6 * 3600)
+                    timeTravelButton("+1d", seconds: 24 * 3600)
+                    Button {
+                        AppClock.offset = 0
+                        state.refresh()
+                        NotificationManager.shared.reschedule()
+                    } label: {
+                        Text("Reset")
+                            .font(Theme.rounded(14, .bold))
+                            .foregroundStyle(Theme.coral)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(Capsule().fill(Theme.coral.opacity(0.12)))
+                    }
+                    .buttonStyle(.plain)
+                }
+                Text(offsetDescription)
+                    .font(Theme.rounded(12, .semibold))
+                    .foregroundStyle(Theme.inkSoft)
+            }
+
+            Divider()
+
+            Button {
+                state.fillDemoHistory()
+                NotificationManager.shared.reschedule()
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "wand.and.stars")
+                    Text("Fill 3-week demo history")
+                }
+                .font(Theme.rounded(15, .bold))
+                .foregroundStyle(Theme.sky)
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                showResetConfirm = true
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "trash.fill")
+                    Text("Reset all data")
+                }
+                .font(Theme.rounded(15, .bold))
+                .foregroundStyle(Theme.coral)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity)
+        .cardStyle()
+    }
+
+    private func timeTravelButton(_ label: String, seconds: TimeInterval) -> some View {
+        Button {
+            AppClock.offset += seconds
+            state.refresh()
+            NotificationManager.shared.reschedule()
+        } label: {
+            Text(label)
+                .font(Theme.rounded(14, .bold))
+                .foregroundStyle(Theme.ink)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Capsule().fill(Theme.cream))
+                .overlay(Capsule().strokeBorder(Theme.inkSoft.opacity(0.3), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var offsetDescription: String {
+        let offset = AppClock.offset
+        guard offset != 0 else { return "Clock is real time" }
+        let hours = Int(offset) / 3600
+        let minutes = (Int(offset) % 3600) / 60
+        return "Clock offset: +\(hours)h \(minutes)m → now \(AppClock.now.formatted(.dateTime.month().day().hour().minute()))"
+    }
+    #endif
+
+    // MARK: - Shared bits
+
+    private func sectionTitle(_ title: String, symbol: String, color: Color) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: symbol)
+                .font(.system(size: 16, weight: .bold))
+                .foregroundStyle(color)
+            Text(title)
+                .font(Theme.rounded(18))
+                .foregroundStyle(Theme.ink)
+            Spacer()
         }
     }
 }

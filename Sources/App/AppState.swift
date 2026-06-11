@@ -10,6 +10,9 @@ final class AppState: ObservableObject {
         didSet {
             Store.save(settings, to: Store.settingsFile)
             refresh()
+            // Settings changes (calc method, location, notifications toggle,
+            // onboarding completion) all affect the notification schedule.
+            NotificationManager.shared.reschedule()
         }
     }
     @Published private(set) var todaySchedule: DaySchedule?
