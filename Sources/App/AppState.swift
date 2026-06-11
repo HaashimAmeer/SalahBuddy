@@ -147,6 +147,7 @@ final class AppState: ObservableObject {
         }()
         let countsJamaat = inWindow && jamaat
         let countsPlace: PlaceTag? = inWindow ? placeTag : nil
+        if let tag = countsPlace { rememberPlaceIfNeeded(tag) }
         let xp = tier.xp + (countsJamaat ? GameEngine.jamaatBonus : 0)
 
         let excused = profile.excusedDayKeys.contains(target.dayKey)
@@ -328,6 +329,34 @@ final class AppState: ObservableObject {
         entries.append(GridEntry(id: "you|\(dayKey)|\(prayer.rawValue)",
                                  member: youMember, state: myState, placeLabel: myPlaceLabel))
         return entries
+    }
+
+    // MARK: - Saved places (v3)
+
+    /// First time you tag Home/Masjid/Work with a device fix available, the
+    /// spot is remembered so future posts nearby can auto-suggest the tag.
+    /// On-the-go is never saved — it's by definition not a fixed place.
+    private func rememberPlaceIfNeeded(_ tag: PlaceTag) {
+        guard tag != .onTheGo,
+              settings.savedPlaces[tag.rawValue] == nil,
+              let coord = location.deviceCoordinate else { return }
+        settings.savedPlaces[tag.rawValue] = SavedPlace(latitude: coord.latitude,
+                                                        longitude: coord.longitude)
+    }
+
+    /// The saved place you're currently within ~250 m of, if any.
+    func suggestedPlaceTag() -> PlaceTag? {
+        guard let coord = location.deviceCoordinate else { return nil }
+        return SavedPlace.nearest(to: coord.latitude, coord.longitude,
+                                  in: settings.savedPlaces)
+    }
+
+    var savedPlaceTags: [PlaceTag] {
+        PlaceTag.allCases.filter { settings.savedPlaces[$0.rawValue] != nil }
+    }
+
+    func clearSavedPlaces() {
+        settings.savedPlaces = [:]
     }
 
     /// "🏠 Home" / "📍 Capitol Hill" pill text for a log's place, if tagged.

@@ -414,6 +414,39 @@ final class V2CoreTests: XCTestCase {
         XCTAssertEqual(tags, Set(PlaceTag.allCases))
     }
 
+    func testSavedPlaceNearestPicksClosestWithinRadius() {
+        // ~111m per 0.001° latitude. Home ≈ origin; masjid ≈ 1.1km north.
+        let places = [
+            "home": SavedPlace(latitude: 47.6062, longitude: -122.3321),
+            "masjid": SavedPlace(latitude: 47.6162, longitude: -122.3321),
+        ]
+        // Standing ~55m from home → suggest home.
+        XCTAssertEqual(SavedPlace.nearest(to: 47.6067, -122.3321, in: places), .home)
+        // Standing ~55m from the masjid → suggest masjid, not home.
+        XCTAssertEqual(SavedPlace.nearest(to: 47.6157, -122.3321, in: places), .masjid)
+        // Standing ~550m from both → no suggestion.
+        XCTAssertNil(SavedPlace.nearest(to: 47.6112, -122.3321, in: places))
+        // Custom radius widens the net.
+        XCTAssertNotNil(SavedPlace.nearest(to: 47.6112, -122.3321, in: places, maxMeters: 700))
+    }
+
+    func testSettingsWithoutSavedPlacesStillDecodes() throws {
+        let json = """
+        {"calcMethod":"northAmerica","madhab":"shafi","useDeviceLocation":true,
+         "fixedLatitude":47.6,"fixedLongitude":-122.3,"locationName":"Seattle",
+         "notificationsEnabled":true,"dailyGoal":100,"hasOnboarded":true}
+        """.data(using: .utf8)!
+        let settings = try JSONDecoder().decode(AppSettings.self, from: json)
+        XCTAssertTrue(settings.savedPlaces.isEmpty)
+
+        // Round-trip with a saved place survives.
+        var withPlace = settings
+        withPlace.savedPlaces["home"] = SavedPlace(latitude: 1, longitude: 2)
+        let data = try JSONEncoder().encode(withPlace)
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: data)
+        XCTAssertEqual(decoded.savedPlaces["home"], SavedPlace(latitude: 1, longitude: 2))
+    }
+
     func testV1ProfileJSONStillDecodes() throws {
         let json = """
         {"name":"Haashim","totalXP":1234,"streak":4,"longestStreak":9,

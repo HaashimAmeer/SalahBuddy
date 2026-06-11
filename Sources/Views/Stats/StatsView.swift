@@ -9,6 +9,7 @@ struct StatsView: View {
 
     @State private var displayedMonth: Date = AppClock.now
     @State private var selectedSummary: DayPhotoSummary?
+    @State private var showLevelRoad = false
 
     var body: some View {
         ZStack {
@@ -31,6 +32,10 @@ struct StatsView: View {
         }
         .sheet(item: $selectedSummary) { summary in
             DayPhotoSheet(summary: summary)
+                .environmentObject(state)
+        }
+        .sheet(isPresented: $showLevelRoad) {
+            LevelRoadSheet()
                 .environmentObject(state)
         }
     }
@@ -92,15 +97,21 @@ struct StatsView: View {
                         .font(Theme.sans(13, .bold))
                         .foregroundStyle(Theme.inkMuted)
                     Spacer()
-                    Text("Level \(state.level + 1) ahead!")
-                        .font(Theme.sans(13, .bold))
-                        .foregroundStyle(Theme.gold)
+                    HStack(spacing: 3) {
+                        Text("See all levels")
+                            .font(Theme.sans(13, .bold))
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 11, weight: .bold))
+                    }
+                    .foregroundStyle(Theme.gold)
                 }
             }
         }
         .padding(18)
         .frame(maxWidth: .infinity)
         .cardStyle()
+        .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .onTapGesture { showLevelRoad = true }
     }
 
     private var levelProgress: Double {

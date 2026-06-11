@@ -61,6 +61,7 @@ struct PostConfirmView: View {
 
     @State private var jamaat = false
     @State private var place: PlaceTag?
+    @State private var autoSuggested = false
 
     /// Reverse-geocoded spot name, only attached for the "On the go" tag and
     /// only when the device location actually resolved one.
@@ -103,6 +104,13 @@ struct PostConfirmView: View {
             .padding(.top, 18)
             .padding(.bottom, 30)
         }
+        .onAppear {
+            // Near a remembered place? Pre-select its tag — one less tap.
+            if place == nil, let suggestion = state.suggestedPlaceTag() {
+                place = suggestion
+                autoSuggested = true
+            }
+        }
     }
 
     private var header: some View {
@@ -135,25 +143,40 @@ struct PostConfirmView: View {
             .shadow(color: .black.opacity(0.05), radius: 10, x: 0, y: 2)
     }
 
+    /// v3: the whole card is the tap target — a big selectable chip instead
+    /// of a small iOS toggle nobody noticed.
     private var jamaatToggle: some View {
-        HStack(spacing: 10) {
-            Text("🕌")
-                .font(.system(size: 22))
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Prayed in jamaat")
-                    .font(Theme.sans(15, .semibold))
-                    .foregroundStyle(Theme.inkDeep)
-                Text("+\(GameEngine.jamaatBonus) XP bonus")
-                    .font(Theme.sans(12, .semibold))
-                    .foregroundStyle(Theme.inkMuted)
+        Button {
+            jamaat.toggle()
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        } label: {
+            HStack(spacing: 12) {
+                Text("🕌")
+                    .font(.system(size: 26))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Prayed in jamaat")
+                        .font(Theme.sans(16, .bold))
+                        .foregroundStyle(Theme.inkDeep)
+                    Text("Tap if you prayed in congregation · +\(GameEngine.jamaatBonus) XP")
+                        .font(Theme.sans(12, .semibold))
+                        .foregroundStyle(Theme.inkMuted)
+                }
+                Spacer(minLength: 8)
+                Image(systemName: jamaat ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 26, weight: .semibold))
+                    .foregroundStyle(jamaat ? Theme.green : Theme.mist)
+                    .contentTransition(.symbolEffect(.replace))
             }
-            Spacer(minLength: 8)
-            Toggle("", isOn: $jamaat)
-                .labelsHidden()
-                .tint(Theme.green)
+            .padding(14)
+            .background(jamaat ? Theme.greenSoft : Theme.surface,
+                        in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(jamaat ? Theme.green : Theme.mist.opacity(0.5), lineWidth: 1.5)
+            )
         }
-        .padding(14)
-        .cardStyle()
+        .buttonStyle(.plain)
+        .animation(Theme.spring, value: jamaat)
     }
 
     private var placePicker: some View {
@@ -165,6 +188,18 @@ struct PostConfirmView: View {
                 ForEach(PlaceTag.allCases) { tag in
                     placeChip(tag)
                 }
+            }
+            if autoSuggested, let place {
+                Text("Looks like you're near your \(place.displayName.lowercased()) — tap to change.")
+                    .font(Theme.sans(12, .semibold))
+                    .foregroundStyle(Theme.green)
+                    .transition(.opacity)
+            } else if let place, place != .onTheGo, state.location.deviceCoordinate != nil,
+                      !state.savedPlaceTags.contains(place) {
+                Text("We'll remember this spot as your \(place.displayName.lowercased()) and suggest it next time.")
+                    .font(Theme.sans(12, .semibold))
+                    .foregroundStyle(Theme.inkMuted)
+                    .transition(.opacity)
             }
             if place == .onTheGo {
                 Text(state.location.placeName.map { "📍 \($0)" } ?? "📍 Using your current spot")
@@ -183,6 +218,7 @@ struct PostConfirmView: View {
         let selected = place == tag
         return Button {
             place = selected ? nil : tag   // tap again to clear — never forced
+            autoSuggested = false
         } label: {
             VStack(spacing: 3) {
                 Text(tag.emoji).font(.system(size: 20))

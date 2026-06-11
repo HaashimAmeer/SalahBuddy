@@ -197,6 +197,31 @@ struct SettingsView: View {
                     .foregroundStyle(Theme.inkMuted)
             }
 
+            if !state.savedPlaceTags.isEmpty {
+                Divider()
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Saved places")
+                            .font(Theme.sans(15, .semibold))
+                            .foregroundStyle(Theme.inkDeep)
+                        Text(state.savedPlaceTags.map { "\($0.emoji) \($0.displayName)" }
+                                .joined(separator: "  "))
+                            .font(Theme.sans(12, .semibold))
+                            .foregroundStyle(Theme.inkMuted)
+                    }
+                    Spacer()
+                    Button("Forget") {
+                        state.clearSavedPlaces()
+                    }
+                    .font(Theme.sans(13, .bold))
+                    .foregroundStyle(Theme.amber)
+                    .buttonStyle(.plain)
+                }
+                Text("Remembered the first time you tagged each place — used to auto-suggest the tag when you post nearby.")
+                    .font(Theme.sans(11.5, .semibold))
+                    .foregroundStyle(Theme.inkMuted)
+            }
+
             Divider()
 
             Text("Today's times")

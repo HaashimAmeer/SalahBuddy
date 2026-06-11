@@ -239,6 +239,38 @@ enum AsrMadhab: String, Codable, CaseIterable {
     case shafi, hanafi
 }
 
+/// v3: a remembered coordinate for a place tag ("Home" etc.), captured the
+/// first time you tag that place with a device fix available. Powers the
+/// near-a-saved-place auto-suggestion on the post screen.
+struct SavedPlace: Codable, Equatable {
+    var latitude: Double
+    var longitude: Double
+
+    /// Great-circle distance in meters (haversine) — pure, testable.
+    func distanceMeters(latitude lat: Double, longitude lon: Double) -> Double {
+        let r = 6_371_000.0
+        let dLat = (lat - latitude) * .pi / 180
+        let dLon = (lon - longitude) * .pi / 180
+        let a = sin(dLat / 2) * sin(dLat / 2)
+            + cos(latitude * .pi / 180) * cos(lat * .pi / 180) * sin(dLon / 2) * sin(dLon / 2)
+        return r * 2 * atan2(sqrt(a), sqrt(1 - a))
+    }
+
+    /// The saved place within `maxMeters` of the coordinate, nearest first.
+    static func nearest(to lat: Double, _ lon: Double,
+                        in places: [String: SavedPlace],
+                        maxMeters: Double = 250) -> PlaceTag? {
+        places
+            .compactMap { key, place -> (PlaceTag, Double)? in
+                guard let tag = PlaceTag(rawValue: key) else { return nil }
+                let d = place.distanceMeters(latitude: lat, longitude: lon)
+                return d <= maxMeters ? (tag, d) : nil
+            }
+            .min { $0.1 < $1.1 }?
+            .0
+    }
+}
+
 struct AppSettings: Codable {
     var calcMethod: CalcMethod = .northAmerica
     var madhab: AsrMadhab = .shafi
@@ -250,6 +282,7 @@ struct AppSettings: Codable {
     var dailyGoal: Int = 100
     var hasOnboarded: Bool = false
     var hardestPrayer: Prayer? = nil   // v2: onboarding goal-setting → seeds goal3 challenge
+    var savedPlaces: [String: SavedPlace] = [:]   // v3: PlaceTag.rawValue → remembered spot
 
     init() {}
 
@@ -266,6 +299,7 @@ struct AppSettings: Codable {
         dailyGoal = (try? c.decode(Int.self, forKey: .dailyGoal)) ?? 100
         hasOnboarded = (try? c.decode(Bool.self, forKey: .hasOnboarded)) ?? false
         hardestPrayer = (try? c.decodeIfPresent(Prayer.self, forKey: .hardestPrayer)) ?? nil
+        savedPlaces = (try? c.decode([String: SavedPlace].self, forKey: .savedPlaces)) ?? [:]
     }
 }
 
