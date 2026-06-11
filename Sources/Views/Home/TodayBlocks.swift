@@ -225,15 +225,92 @@ struct LiveCircleGrid: View {
     let onPost: () -> Void
     let onUndoMine: () -> Void
 
-    private let columns = [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)]
+    @State private var page = 0
+    @State private var width: CGFloat = 0
+
+    private let perPage = 4
+    private let spacing: CGFloat = 12
 
     var body: some View {
-        LazyVGrid(columns: columns, spacing: 12) {
-            ForEach(displayEntries) { entry in
-                cell(entry)
-                    .aspectRatio(1, contentMode: .fit)
+        Group {
+            if displayEntries.count <= perPage {
+                gridPage(displayEntries)
+            } else {
+                // v3.3: page the circle 4 at a time (2×2) so the Today screen
+                // stays short no matter how many friends — swipe for the next 4.
+                VStack(spacing: 10) {
+                    TabView(selection: $page) {
+                        ForEach(Array(pages.enumerated()), id: \.offset) { index, pageEntries in
+                            gridPage(pageEntries)
+                                .frame(maxHeight: .infinity, alignment: .top)
+                                .tag(index)
+                        }
+                    }
+                    .tabViewStyle(.page(indexDisplayMode: .never))
+                    .frame(height: square * 2 + spacing)
+                    indicator
+                }
             }
         }
+        .frame(maxWidth: .infinity)
+        .background(
+            GeometryReader { geo in
+                Color.clear.preference(key: GridWidthKey.self, value: geo.size.width)
+            }
+        )
+        .onPreferenceChange(GridWidthKey.self) { w in
+            if w > 0, abs(w - width) > 0.5 { width = w }
+        }
+        .onChange(of: pages.count) { _, count in
+            if page >= count { page = max(0, count - 1) }
+        }
+    }
+
+    /// `displayEntries` split into pages of `perPage`.
+    private var pages: [[GridEntry]] {
+        let all = displayEntries
+        return stride(from: 0, to: all.count, by: perPage).map {
+            Array(all[$0 ..< min($0 + perPage, all.count)])
+        }
+    }
+
+    /// Square edge from the measured content width (two columns + spacing).
+    private var square: CGFloat {
+        let w = width > 0 ? width : UIScreen.main.bounds.width - 64
+        return max(60, (w - spacing) / 2)
+    }
+
+    /// One page: up to four squares in a fixed 2-column grid, left-anchored so
+    /// a partial last page keeps the top-left "you" position.
+    private func gridPage(_ pageEntries: [GridEntry]) -> some View {
+        let cols = [GridItem(.fixed(square), spacing: spacing),
+                    GridItem(.fixed(square), spacing: spacing)]
+        return LazyVGrid(columns: cols, spacing: spacing) {
+            ForEach(pageEntries) { entry in
+                cell(entry).frame(width: square, height: square)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Page dots + friend count, so it's clear how many more there are.
+    private var indicator: some View {
+        HStack(spacing: 6) {
+            ForEach(pages.indices, id: \.self) { i in
+                Capsule()
+                    .fill(i == page ? Theme.green : Theme.mist.opacity(0.55))
+                    .frame(width: i == page ? 16 : 6, height: 6)
+                    .animation(Theme.spring, value: page)
+            }
+            Spacer(minLength: 8)
+            Text("\(friendCount) friends · swipe")
+                .font(Theme.sans(11, .semibold))
+                .foregroundStyle(Theme.inkMuted)
+        }
+    }
+
+    private var friendCount: Int {
+        displayEntries.filter { !$0.member.isYou }.count
     }
 
     /// v3.2 ordering per design session: YOUR square top-left, then the rest
@@ -308,6 +385,15 @@ struct LiveCircleGrid: View {
     private func isPosted(_ entry: GridEntry) -> Bool {
         if case .posted = entry.state { return true }
         return false
+    }
+}
+
+/// Measures the circle grid's available width so the paged carousel can size
+/// its square cells (and fixed page height) precisely.
+private struct GridWidthKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }
 
