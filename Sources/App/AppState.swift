@@ -202,10 +202,15 @@ final class AppState: ObservableObject {
     }
 
     func undoLog(_ prayer: Prayer) {
-        // Prefer the live target day (handles the past-midnight isha case),
-        // else fall back to a log made today.
+        // Prefer the live target day, else fall back to a log made today.
         let dayKey = targetWindow(for: prayer)?.dayKey ?? todayKey
-        guard let index = logs.lastIndex(where: { $0.prayer == prayer && ($0.dayKey == dayKey || $0.dayKey == todayKey) })
+        var candidateDayKeys: Set<String> = [dayKey, todayKey]
+        // §6.8: an isha logged past midnight carries YESTERDAY's dayKey, and
+        // once that log exists targetWindow no longer points at the previous
+        // window (its hasLog check trips and it falls through to today), so
+        // the yesterday-keyed log must be matched explicitly.
+        if prayer == .isha { candidateDayKeys.insert(previousDayKey) }
+        guard let index = logs.lastIndex(where: { $0.prayer == prayer && candidateDayKeys.contains($0.dayKey) })
         else { return }
         let removed = logs[index]
 

@@ -247,6 +247,18 @@ final class V2CoreTests: XCTestCase {
         XCTAssertEqual(ChallengeEngine.current(for: def, ctx: context(myLogs: logs)), 2)
     }
 
+    func testFullDayAwardedWhenFifthPrayerIsAfterMidnightIsha() {
+        let def = ChallengeEngine.definition(id: "fullday")!
+        // All 5 in-window on d07; isha was posted after midnight, so todayKey
+        // has already rolled to d08 while the log still carries d07 (§6.6).
+        let fullYesterday = Prayer.allCases.map { log($0, .onTime, dayKey: "d07") }
+        let ctx = context(myLogs: fullYesterday, todayKey: "d08",
+                          recentDayKeys: (1...8).map { String(format: "d%02d", $0) })
+        XCTAssertEqual(ChallengeEngine.current(for: def, ctx: ctx), 5,
+                       "yesterday's completed full day must be visible at log time")
+        XCTAssertTrue(ChallengeEngine.newlyCompleted(ctx).map(\.key).contains("fullday"))
+    }
+
     func testGoal3OnlyWhenHardestPrayerSet() {
         let logs = ["d05", "d06", "d07"].map { log(.asr, .onTime, dayKey: $0) }
         let without = ChallengeEngine.progressList(context(myLogs: logs))

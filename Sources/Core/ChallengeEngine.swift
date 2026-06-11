@@ -87,7 +87,14 @@ enum ChallengeEngine {
     static func current(for def: Definition, ctx: Context) -> Int {
         switch def.id {
         case "fullday":
-            return inWindowCount(logs: ctx.myLogs, dayKey: ctx.todayKey)
+            // §6.6: an after-midnight isha carries YESTERDAY's dayKey, so the
+            // 5th in-window prayer of a day can land once todayKey has already
+            // rolled over. Take the best of the last two days so the award
+            // check sees the just-completed day at log time (and later).
+            let lastTwoDays = ctx.recentDayKeys.suffix(2)
+            return lastTwoDays
+                .map { inWindowCount(logs: ctx.myLogs, dayKey: $0) }
+                .max() ?? inWindowCount(logs: ctx.myLogs, dayKey: ctx.todayKey)
         case "fajr3":
             return consecutiveRun(dayKeys: ctx.recentDayKeys, todayKey: ctx.todayKey) { key in
                 hasInWindowLog(ctx.myLogs, prayer: .fajr, dayKey: key)
