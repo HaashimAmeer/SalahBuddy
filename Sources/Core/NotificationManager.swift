@@ -2,7 +2,8 @@ import Foundation
 import UserNotifications
 
 /// Schedules the next 48h of local prayer notifications:
-/// - at each prayer's window start: "Time for {Prayer} {emoji}" + streak nudge
+/// - at each prayer's window start: "📸 {Prayer} just came in — be the first
+///   in your circle to post!"
 /// - 30 minutes before a window closes, if that prayer is still unlogged:
 ///   "Last call for {Prayer}!"
 ///
@@ -100,11 +101,10 @@ final class NotificationManager {
                                center: UNUserNotificationCenter) {
         guard window.start > now, window.start <= horizon else { return }
 
+        // v2 copy: "📸 {Prayer} just came in — be the first in your circle to post!"
         let content = UNMutableNotificationContent()
-        content.title = "Time for \(window.prayer.displayName) \(window.prayer.emoji)"
-        content.body = streak > 0
-            ? "Keep your \(streak)-day streak alive!"
-            : "Log it and start a new streak!"
+        content.title = "📸 \(window.prayer.displayName) just came in"
+        content.body = "Be the first in your circle to post!"
         content.sound = .default
 
         add(content: content,

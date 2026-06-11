@@ -38,7 +38,7 @@ struct BadgeIcon: View {
             .animation(Theme.spring, value: earned)
 
             Text(badge.name)
-                .font(Theme.rounded(12, earned ? .bold : .semibold))
+                .font(Theme.sans(12, earned ? .bold : .semibold))
                 .foregroundStyle(earned ? Theme.ink : Theme.inkSoft)
                 .lineLimit(1)
                 .minimumScaleFactor(0.75)
@@ -52,7 +52,7 @@ struct BadgeIcon: View {
                 colors: [Color(hex: 0xFFD66B), Theme.gold],
                 startPoint: .topLeading, endPoint: .bottomTrailing))
         } else {
-            AnyShapeStyle(Color(hex: 0xE9E4DA))
+            AnyShapeStyle(Color(hex: 0xDCE8E0))   // v2 mint-neutral locked state
         }
     }
 }

@@ -3,8 +3,8 @@ import UserNotifications
 import UIKit
 
 /// Settings tab — profile name, prayer-time calculation, location,
-/// notifications (incl. denied state), About, and a DEBUG developer section
-/// with time-travel controls.
+/// notifications (incl. denied state), excused-days counter, About, and a
+/// DEBUG developer section with time-travel controls. Styled per SPEC-V2 §2.
 struct SettingsView: View {
     @EnvironmentObject private var state: AppState
     @Environment(\.scenePhase) private var scenePhase
@@ -16,7 +16,7 @@ struct SettingsView: View {
 
     var body: some View {
         ZStack {
-            Theme.cream.ignoresSafeArea()
+            Theme.bg.ignoresSafeArea()
             ScrollView {
                 VStack(spacing: 16) {
                     header
@@ -68,10 +68,14 @@ struct SettingsView: View {
     }
 
     private var header: some View {
-        HStack {
+        HStack(spacing: 8) {
             Text("Settings")
-                .font(Theme.rounded(30))
-                .foregroundStyle(Theme.ink)
+                .font(Theme.sans(30, .bold))
+                .foregroundStyle(Theme.inkDeep)
+            Image(systemName: "moon.stars.fill")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(Theme.green.opacity(0.55))
+                .offset(y: -6)
             Spacer()
         }
         .padding(.top, 8)
@@ -84,17 +88,37 @@ struct SettingsView: View {
             sectionTitle("Profile", symbol: "person.fill", color: Theme.green)
 
             TextField("Your name", text: $name)
-                .font(Theme.rounded(17, .semibold))
-                .foregroundStyle(Theme.ink)
+                .font(Theme.sans(17, .semibold))
+                .foregroundStyle(Theme.inkDeep)
                 .textInputAutocapitalization(.words)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 12)
                 .background(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Theme.cream)
+                        .fill(Theme.bg)
                 )
                 .onSubmit { commitName() }
                 .onChange(of: name) { _, _ in commitName() }
+
+            Divider()
+
+            // v2: excused-day allowance for the current calendar month.
+            HStack(spacing: 8) {
+                Image(systemName: "moon.fill")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(Theme.lilac)
+                Text("Excused days this month")
+                    .font(Theme.sans(15, .semibold))
+                    .foregroundStyle(Theme.inkDeep)
+                Spacer()
+                Text("\(state.excusedUsedThisMonth)/\(GameEngine.maxExcusedPerMonth)")
+                    .font(Theme.sans(15, .bold))
+                    .foregroundStyle(state.excusedUsedThisMonth >= GameEngine.maxExcusedPerMonth
+                                     ? Theme.lilac : Theme.inkDeep)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    .background(Capsule().fill(Theme.lilac.opacity(0.15)))
+            }
         }
         .padding(18)
         .frame(maxWidth: .infinity)
@@ -111,12 +135,12 @@ struct SettingsView: View {
 
     private var calculationCard: some View {
         VStack(alignment: .leading, spacing: 14) {
-            sectionTitle("Prayer times", symbol: "clock.fill", color: Theme.sky)
+            sectionTitle("Prayer times", symbol: "clock.fill", color: Theme.qadaBlue)
 
             HStack {
                 Text("Method")
-                    .font(Theme.rounded(15, .semibold))
-                    .foregroundStyle(Theme.ink)
+                    .font(Theme.sans(15, .semibold))
+                    .foregroundStyle(Theme.inkDeep)
                 Spacer()
                 Picker("Method", selection: $state.settings.calcMethod) {
                     ForEach(CalcMethod.allCases, id: \.self) { method in
@@ -129,8 +153,8 @@ struct SettingsView: View {
 
             VStack(alignment: .leading, spacing: 8) {
                 Text("Asr madhab")
-                    .font(Theme.rounded(15, .semibold))
-                    .foregroundStyle(Theme.ink)
+                    .font(Theme.sans(15, .semibold))
+                    .foregroundStyle(Theme.inkDeep)
                 Picker("Asr madhab", selection: $state.settings.madhab) {
                     Text("Shafi (standard)").tag(AsrMadhab.shafi)
                     Text("Hanafi (later)").tag(AsrMadhab.hanafi)
@@ -147,31 +171,31 @@ struct SettingsView: View {
 
     private var locationCard: some View {
         VStack(alignment: .leading, spacing: 12) {
-            sectionTitle("Location", symbol: "location.fill", color: Theme.coral)
+            sectionTitle("Location", symbol: "location.fill", color: Theme.amber)
 
             Toggle(isOn: locationBinding) {
                 Text("Use my location")
-                    .font(Theme.rounded(15, .semibold))
-                    .foregroundStyle(Theme.ink)
+                    .font(Theme.sans(15, .semibold))
+                    .foregroundStyle(Theme.inkDeep)
             }
             .tint(Theme.green)
 
             HStack(spacing: 6) {
                 Image(systemName: state.isUsingDeviceLocation ? "location.fill" : "mappin.circle.fill")
                     .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(Theme.inkSoft)
+                    .foregroundStyle(Theme.inkMuted)
                 Text(state.isUsingDeviceLocation
                      ? "Using device location — \(state.activeLocationName)"
                      : "Using fixed location — \(state.activeLocationName)")
-                    .font(Theme.rounded(13, .semibold))
-                    .foregroundStyle(Theme.inkSoft)
+                    .font(Theme.sans(13, .semibold))
+                    .foregroundStyle(Theme.inkMuted)
             }
 
             Divider()
 
             Text("Today's times")
-                .font(Theme.rounded(14, .heavy))
-                .foregroundStyle(Theme.inkSoft)
+                .font(Theme.sans(14, .heavy))
+                .foregroundStyle(Theme.inkMuted)
                 .tracking(0.5)
 
             if let schedule = state.todaySchedule {
@@ -183,19 +207,19 @@ struct SettingsView: View {
                                 .foregroundStyle(Theme.color(for: window.prayer))
                                 .frame(width: 24)
                             Text(window.prayer.displayName)
-                                .font(Theme.rounded(15, .semibold))
-                                .foregroundStyle(Theme.ink)
+                                .font(Theme.sans(15, .semibold))
+                                .foregroundStyle(Theme.inkDeep)
                             Spacer()
                             Text(window.start, format: .dateTime.hour().minute())
-                                .font(Theme.rounded(15, .bold))
-                                .foregroundStyle(Theme.ink)
+                                .font(Theme.sans(15, .bold))
+                                .foregroundStyle(Theme.inkDeep)
                         }
                     }
                 }
             } else {
                 Text("Couldn't compute prayer times for this location.")
-                    .font(Theme.rounded(13, .semibold))
-                    .foregroundStyle(Theme.coral)
+                    .font(Theme.sans(13, .semibold))
+                    .foregroundStyle(Theme.amber)
             }
         }
         .padding(18)
@@ -223,8 +247,8 @@ struct SettingsView: View {
 
             Toggle(isOn: notificationsBinding) {
                 Text("Prayer notifications")
-                    .font(Theme.rounded(15, .semibold))
-                    .foregroundStyle(Theme.ink)
+                    .font(Theme.sans(15, .semibold))
+                    .foregroundStyle(Theme.inkDeep)
             }
             .tint(Theme.green)
 
@@ -236,16 +260,16 @@ struct SettingsView: View {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .font(.system(size: 13, weight: .bold))
                         Text("Notifications are disabled in system Settings — tap to fix")
-                            .font(Theme.rounded(13, .bold))
+                            .font(Theme.sans(13, .bold))
                             .multilineTextAlignment(.leading)
                     }
-                    .foregroundStyle(Theme.coral)
+                    .foregroundStyle(Theme.amber)
                 }
                 .buttonStyle(.plain)
             } else {
-                Text("A nudge at each prayer's start, plus a last call 30 minutes before its window closes.")
-                    .font(Theme.rounded(13, .semibold))
-                    .foregroundStyle(Theme.inkSoft)
+                Text("A nudge the moment each prayer comes in, plus a last call 30 minutes before its window closes.")
+                    .font(Theme.sans(13, .semibold))
+                    .foregroundStyle(Theme.inkMuted)
             }
         }
         .padding(18)
@@ -318,8 +342,8 @@ struct SettingsView: View {
                 .formatted(.dateTime.month(.abbreviated).day().year()))
 
             Text("Made with 🤲 to help you keep all five, every day.")
-                .font(Theme.rounded(13, .semibold))
-                .foregroundStyle(Theme.inkSoft)
+                .font(Theme.sans(13, .semibold))
+                .foregroundStyle(Theme.inkMuted)
                 .padding(.top, 4)
         }
         .padding(18)
@@ -335,12 +359,12 @@ struct SettingsView: View {
     private func aboutRow(label: String, value: String) -> some View {
         HStack {
             Text(label)
-                .font(Theme.rounded(15, .semibold))
-                .foregroundStyle(Theme.inkSoft)
+                .font(Theme.sans(15, .semibold))
+                .foregroundStyle(Theme.inkMuted)
             Spacer()
             Text(value)
-                .font(Theme.rounded(15, .bold))
-                .foregroundStyle(Theme.ink)
+                .font(Theme.sans(15, .bold))
+                .foregroundStyle(Theme.inkDeep)
         }
     }
 
@@ -349,12 +373,12 @@ struct SettingsView: View {
     #if DEBUG
     private var developerCard: some View {
         VStack(alignment: .leading, spacing: 14) {
-            sectionTitle("Developer", symbol: "wrench.and.screwdriver.fill", color: Theme.inkSoft)
+            sectionTitle("Developer", symbol: "wrench.and.screwdriver.fill", color: Theme.inkMuted)
 
             VStack(alignment: .leading, spacing: 8) {
                 Text("Time travel")
-                    .font(Theme.rounded(14, .heavy))
-                    .foregroundStyle(Theme.inkSoft)
+                    .font(Theme.sans(14, .heavy))
+                    .foregroundStyle(Theme.inkMuted)
                 HStack(spacing: 8) {
                     timeTravelButton("+1h", seconds: 3600)
                     timeTravelButton("+6h", seconds: 6 * 3600)
@@ -365,17 +389,17 @@ struct SettingsView: View {
                         NotificationManager.shared.reschedule()
                     } label: {
                         Text("Reset")
-                            .font(Theme.rounded(14, .bold))
-                            .foregroundStyle(Theme.coral)
+                            .font(Theme.sans(14, .bold))
+                            .foregroundStyle(Theme.amber)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 8)
-                            .background(Capsule().fill(Theme.coral.opacity(0.12)))
+                            .background(Capsule().fill(Theme.amber.opacity(0.12)))
                     }
                     .buttonStyle(.plain)
                 }
                 Text(offsetDescription)
-                    .font(Theme.rounded(12, .semibold))
-                    .foregroundStyle(Theme.inkSoft)
+                    .font(Theme.sans(12, .semibold))
+                    .foregroundStyle(Theme.inkMuted)
             }
 
             Divider()
@@ -388,8 +412,8 @@ struct SettingsView: View {
                     Image(systemName: "wand.and.stars")
                     Text("Fill 3-week demo history")
                 }
-                .font(Theme.rounded(15, .bold))
-                .foregroundStyle(Theme.sky)
+                .font(Theme.sans(15, .bold))
+                .foregroundStyle(Theme.qadaBlue)
             }
             .buttonStyle(.plain)
 
@@ -400,8 +424,8 @@ struct SettingsView: View {
                     Image(systemName: "trash.fill")
                     Text("Reset all data")
                 }
-                .font(Theme.rounded(15, .bold))
-                .foregroundStyle(Theme.coral)
+                .font(Theme.sans(15, .bold))
+                .foregroundStyle(Theme.amber)
             }
             .buttonStyle(.plain)
         }
@@ -417,12 +441,12 @@ struct SettingsView: View {
             NotificationManager.shared.reschedule()
         } label: {
             Text(label)
-                .font(Theme.rounded(14, .bold))
-                .foregroundStyle(Theme.ink)
+                .font(Theme.sans(14, .bold))
+                .foregroundStyle(Theme.inkDeep)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
-                .background(Capsule().fill(Theme.cream))
-                .overlay(Capsule().strokeBorder(Theme.inkSoft.opacity(0.3), lineWidth: 1))
+                .background(Capsule().fill(Theme.bg))
+                .overlay(Capsule().strokeBorder(Theme.inkMuted.opacity(0.3), lineWidth: 1))
         }
         .buttonStyle(.plain)
     }
@@ -444,8 +468,8 @@ struct SettingsView: View {
                 .font(.system(size: 16, weight: .bold))
                 .foregroundStyle(color)
             Text(title)
-                .font(Theme.rounded(18))
-                .foregroundStyle(Theme.ink)
+                .font(Theme.sans(18, .bold))
+                .foregroundStyle(Theme.inkDeep)
             Spacer()
         }
     }

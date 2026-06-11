@@ -16,13 +16,13 @@ struct XPChip: View {
                 .shadow(color: Theme.gold.opacity(0.4), radius: 2)
 
             Text("\(xp)")
-                .font(Theme.rounded(16, .heavy))
+                .font(Theme.sans(16, .heavy))
                 .foregroundStyle(Theme.ink)
                 .contentTransition(.numericText(value: Double(xp)))
                 .animation(Theme.spring, value: xp)
 
             Text("XP")
-                .font(Theme.rounded(11, .heavy))
+                .font(Theme.sans(11, .heavy))
                 .foregroundStyle(Theme.gold)
                 .baselineOffset(1)
         }

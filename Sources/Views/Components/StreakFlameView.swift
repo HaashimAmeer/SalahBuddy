@@ -22,7 +22,7 @@ struct StreakFlameView: View {
             }
 
             Text("\(streak)")
-                .font(Theme.rounded(20, .heavy))
+                .font(Theme.sans(20, .heavy))
                 .foregroundStyle(isLit ? Theme.ink : Theme.inkSoft)
                 .contentTransition(.numericText(value: Double(streak)))
                 .animation(Theme.spring, value: streak)

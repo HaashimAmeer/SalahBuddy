@@ -1,20 +1,35 @@
 import SwiftUI
 
-/// Today screen — greeting bar, daily-goal ring, mascot, the 5 prayer cards,
-/// and the celebration overlay. Owned by the home agent.
+/// Today screen (v2) — compact header + prayer-times strip, the live current
+/// prayer block (photo grid + camera CTA), make-up rows, earlier-today
+/// collapsed blocks, dimmed upcoming list, and the quiet excused-day flow.
+/// Owned by the home agent. No mascot here in v2.
 struct HomeView: View {
     @EnvironmentObject private var state: AppState
+    @Environment(\.appNow) private var now
+
+    @State private var cameraTarget: CameraTarget?
 
     var body: some View {
         ZStack {
-            Theme.cream.ignoresSafeArea()
+            Theme.bg.ignoresSafeArea()
 
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 16) {
-                    HomeGreetingBar()
-                    HomeGoalCard()
-                    HomeMascotSection()
-                    prayerCards
+                    TodayHeader()
+                    PrayerTimesStrip(currentPrayer: state.currentTodayBlock(now: now)?
+                        .isYesterdayIsha == false ? state.currentTodayBlock(now: now)?.prayer : nil)
+
+                    if let block = state.currentTodayBlock(now: now) {
+                        CurrentPrayerBlock(block: block) {
+                            cameraTarget = CameraTarget(prayer: block.prayer, dayKey: block.dayKey)
+                        }
+                    }
+
+                    MakeUpSection()
+                    EarlierTodaySection()
+                    UpcomingSection()
+                    ExcusedTodayFooter()
                 }
                 .padding(.horizontal, 16)
                 .padding(.top, 10)
@@ -28,36 +43,41 @@ struct HomeView: View {
             }
         }
         .animation(Theme.spring, value: state.celebration != nil)
-    }
-
-    private var prayerCards: some View {
-        VStack(spacing: 12) {
-            ForEach(Prayer.allCases) { prayer in
-                PrayerCardView(prayer: prayer)
-            }
+        .sheet(item: $cameraTarget) { target in
+            CameraFlowSheet(target: target)
         }
     }
 }
 
-// MARK: - Greeting bar
+// MARK: - Header
 
-/// "Assalamu alaikum, {name}" + streak flame + XP chip.
-struct HomeGreetingBar: View {
+/// Compact header: date line + greeting on the left, streak flame + XP chip
+/// on the right. A faint crescent accent sits behind the greeting.
+struct TodayHeader: View {
     @EnvironmentObject private var state: AppState
+    @Environment(\.appNow) private var now
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(alignment: .center, spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("Assalamu alaikum,")
-                    .font(Theme.rounded(14, .semibold))
-                    .foregroundStyle(Theme.inkSoft)
-                Text(displayName)
-                    .font(Theme.rounded(26))
-                    .foregroundStyle(Theme.ink)
+                Text(HomeTimeFormat.dayLine(now))
+                    .font(Theme.sans(12, .semibold))
+                    .foregroundStyle(Theme.inkMuted)
+                Text("Salam, \(displayName)")
+                    .font(Theme.sans(24, .bold))
+                    .foregroundStyle(Theme.inkDeep)
                     .lineLimit(1)
                     .minimumScaleFactor(0.6)
             }
+            .overlay(alignment: .topTrailing) {
+                Image(systemName: "moon.stars.fill")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Theme.green.opacity(0.25))
+                    .offset(x: 20, y: -2)
+            }
+
             Spacer(minLength: 8)
+
             StreakFlameView(streak: state.profile.streak, isLitToday: streakLitToday)
             XPChip(xp: state.profile.totalXP)
         }
@@ -68,72 +88,64 @@ struct HomeGreetingBar: View {
         return trimmed.isEmpty ? "friend" : trimmed
     }
 
-    /// The flame is "lit" once today's streak increment has landed
-    /// (all 5 prayers logged today).
     private var streakLitToday: Bool {
         state.profile.lastStreakDayKey == state.todayKey
     }
 }
 
-// MARK: - Daily goal card
+// MARK: - Prayer-times strip
 
-/// Daily-goal progress ring (todayXP / dailyGoal) + level pill.
-struct HomeGoalCard: View {
+/// Slim at-a-glance strip: 5 chips (name + start time); the current prayer
+/// is highlighted in soft green.
+struct PrayerTimesStrip: View {
+    let currentPrayer: Prayer?
+
     @EnvironmentObject private var state: AppState
 
     var body: some View {
-        HStack(spacing: 18) {
-            ZStack {
-                ProgressRing(progress: goalProgress, lineWidth: 10, color: Theme.gold)
-                VStack(spacing: 0) {
-                    Text("\(state.todayXP)")
-                        .font(Theme.rounded(24, .heavy))
-                        .foregroundStyle(Theme.ink)
-                        .contentTransition(.numericText())
-                    Text("XP")
-                        .font(Theme.rounded(11, .heavy))
-                        .foregroundStyle(Theme.inkSoft)
-                }
-            }
-            .frame(width: 86, height: 86)
-            .animation(Theme.spring, value: state.todayXP)
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Daily goal")
-                    .font(Theme.rounded(13, .heavy))
-                    .foregroundStyle(Theme.inkSoft)
-                    .textCase(.uppercase)
-                Text("\(state.todayXP) / \(state.settings.dailyGoal) XP")
-                    .font(Theme.rounded(20))
-                    .foregroundStyle(goalReached ? Theme.green : Theme.ink)
-                levelPill
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(16)
-        .cardStyle()
-    }
-
-    private var goalProgress: Double {
-        let goal = max(1, state.settings.dailyGoal)
-        return min(1.0, Double(state.todayXP) / Double(goal))
-    }
-
-    private var goalReached: Bool { state.todayXP >= state.settings.dailyGoal }
-
-    private var levelPill: some View {
         HStack(spacing: 6) {
-            Image(systemName: "rosette")
-                .font(.system(size: 11, weight: .bold))
-            Text("Lv \(state.level) · \(state.levelTitle)")
-                .font(Theme.rounded(13, .heavy))
-            Text("\(state.xpIntoLevel)/\(state.xpNeededForLevel)")
-                .font(Theme.rounded(11, .bold))
-                .foregroundStyle(Theme.greenDark.opacity(0.7))
+            ForEach(Prayer.allCases) { prayer in
+                chip(for: prayer)
+            }
         }
-        .foregroundStyle(Theme.greenDark)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(Capsule().fill(Theme.green.opacity(0.14)))
     }
+
+    private func chip(for prayer: Prayer) -> some View {
+        let isCurrent = prayer == currentPrayer
+        return VStack(spacing: 1) {
+            Text(prayer.displayName)
+                .font(Theme.sans(11, .bold))
+                .foregroundStyle(isCurrent ? Theme.inkDeep : Theme.inkMuted)
+            Text(startText(for: prayer))
+                .font(Theme.sans(11, .semibold))
+                .foregroundStyle(isCurrent ? Theme.inkDeep : Theme.inkMuted.opacity(0.8))
+        }
+        .lineLimit(1)
+        .minimumScaleFactor(0.7)
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 7)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(isCurrent ? Theme.greenSoft : Theme.surface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(isCurrent ? Theme.green.opacity(0.45) : .clear, lineWidth: 1.5)
+        )
+    }
+
+    private func startText(for prayer: Prayer) -> String {
+        guard let window = state.todaySchedule?.window(for: prayer) else { return "—" }
+        return HomeTimeFormat.clock(window.start)
+    }
+}
+
+// MARK: - Camera sheet routing
+
+/// Identifiable target for the camera sheet (prayer + the schedule day the
+/// log will attach to — yesterday's dayKey for the pre-fajr isha block).
+struct CameraTarget: Identifiable, Equatable {
+    let prayer: Prayer
+    let dayKey: String
+    var id: String { "\(dayKey)|\(prayer.rawValue)" }
 }

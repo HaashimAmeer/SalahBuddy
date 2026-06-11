@@ -234,7 +234,7 @@ private struct HilalFigure: View {
         ForEach(0..<3, id: \.self) { i in
             let cycle = fmod(t * 0.45 + Double(i) * 0.33, 1.0)
             Text("z")
-                .font(Theme.rounded(size * (0.1 + 0.04 * CGFloat(i)), .heavy))
+                .font(Theme.sans(size * (0.1 + 0.04 * CGFloat(i)), .heavy))
                 .foregroundStyle(Theme.inkSoft)
                 .opacity(1 - cycle)
                 .position(p(0.8 + 0.05 * CGFloat(i), 0.28))
