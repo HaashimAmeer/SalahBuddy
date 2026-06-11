@@ -18,8 +18,12 @@
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
+	<key>NSCameraUsageDescription</key>
+	<string>SalahBuddy uses the camera so you can snap a quick photo when you pray and share it with your circle.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>SalahBuddy uses your location to calculate accurate prayer times.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>SalahBuddy lets you pick a photo from your library for your prayer post.</string>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UISupportedInterfaceOrientations</key>

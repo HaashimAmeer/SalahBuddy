@@ -39,8 +39,8 @@ struct RootView: View {
         TabView {
             HomeView()
                 .tabItem { Label("Today", systemImage: "house.fill") }
-            LeagueView()
-                .tabItem { Label("League", systemImage: "trophy.fill") }
+            CircleView()
+                .tabItem { Label("Circle", systemImage: "person.2.fill") }
             StatsView()
                 .tabItem { Label("Journey", systemImage: "map.fill") }
             SettingsView()

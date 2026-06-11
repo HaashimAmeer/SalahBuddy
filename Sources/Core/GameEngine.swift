@@ -27,6 +27,8 @@ enum GameEngine {
     static let dailyGoalDefault = 100
     static let perfectDayBonus = 25
     static let maxStreakFreezes = 2
+    static let jamaatBonus = 5            // v2: optional "prayed in jamaat" bonus
+    static let maxExcusedPerMonth = 10    // v2: excused-day cap per calendar month
 
     static let levelTitles = ["Seeker", "Committed", "Consistent", "Devoted",
                               "Steadfast", "Radiant", "Luminous"]
@@ -77,16 +79,55 @@ enum GameEngine {
     }
 
     /// All 5 prayers logged IN-WINDOW (onTime/prayed/lastCall). Qada disqualifies.
-    static func isPerfectDay(logs: [PrayerLog], dayKey: String) -> Bool {
+    /// v2: an excused day can never be a perfect day.
+    static func isPerfectDay(logs: [PrayerLog], dayKey: String,
+                             excusedDayKeys: Set<String> = []) -> Bool {
+        guard !excusedDayKeys.contains(dayKey) else { return false }
         let dayLogs = logs.filter { $0.dayKey == dayKey }
         guard Set(dayLogs.map(\.prayer)).count == Prayer.allCases.count else { return false }
         return dayLogs.allSatisfy { $0.tier.isInWindow }
     }
 
     /// Raw log XP + perfect-day bonus for one day.
-    static func xp(forDay dayKey: String, logs: [PrayerLog]) -> Int {
+    static func xp(forDay dayKey: String, logs: [PrayerLog],
+                   excusedDayKeys: Set<String> = []) -> Int {
         let base = logs.lazy.filter { $0.dayKey == dayKey }.reduce(0) { $0 + $1.xp }
-        return base + (isPerfectDay(logs: logs, dayKey: dayKey) ? perfectDayBonus : 0)
+        let perfect = isPerfectDay(logs: logs, dayKey: dayKey, excusedDayKeys: excusedDayKeys)
+        return base + (perfect ? perfectDayBonus : 0)
+    }
+
+    // MARK: - Excused days (v2)
+
+    /// Excused days used in the calendar month of `dayKey` ("yyyy-MM-dd").
+    static func excusedCount(in excusedDayKeys: Set<String>, monthOf dayKey: String) -> Int {
+        let monthPrefix = String(dayKey.prefix(7))   // "yyyy-MM"
+        return excusedDayKeys.filter { $0.hasPrefix(monthPrefix) }.count
+    }
+
+    /// Whether another day in `dayKey`'s month can still be excused (10/month cap).
+    static func canExcuse(dayKey: String, excusedDayKeys: Set<String>) -> Bool {
+        guard !excusedDayKeys.contains(dayKey) else { return true }   // already excused — no-op allowed
+        return excusedCount(in: excusedDayKeys, monthOf: dayKey) < maxExcusedPerMonth
+    }
+
+    /// XP the user missed out on today: for every window that fully passed
+    /// without an in-window log, the onTime XP was foregone (minus whatever a
+    /// qada recovered). Positive-tone copy; excused days forgo nothing.
+    static func missedOutXP(logs: [PrayerLog], schedule: DaySchedule, now: Date,
+                            isExcused: Bool) -> Int {
+        guard !isExcused else { return 0 }
+        var total = 0
+        for window in schedule.windows where now >= window.end {
+            let log = logs.first { $0.dayKey == schedule.dayKey && $0.prayer == window.prayer }
+            if let log {
+                if !log.tier.isInWindow {
+                    total += max(0, LogTier.onTime.xp - log.xp)   // qada recovered some
+                }
+            } else {
+                total += LogTier.onTime.xp
+            }
+        }
+        return total
     }
 
     // MARK: - Streak
@@ -122,10 +163,17 @@ enum GameEngine {
     /// ordered list of (dayKey, isComplete) from the day after
     /// `lastReconciledDayKey` through yesterday. Incomplete day → consume a
     /// freeze if available, else streak resets to 0.
+    /// v2: excused days are SKIPPED entirely — streak preserved, no freeze
+    /// consumed, no increment; the walk just advances past them.
     static func reconcile(profile: UserProfile,
-                          elapsedDays: [(dayKey: String, isComplete: Bool)]) -> UserProfile {
+                          elapsedDays: [(dayKey: String, isComplete: Bool)],
+                          excusedDayKeys: Set<String> = []) -> UserProfile {
         var p = profile
         for day in elapsedDays {
+            if excusedDayKeys.contains(day.dayKey) {
+                p.lastReconciledDayKey = day.dayKey
+                continue
+            }
             if !day.isComplete {
                 if p.streakFreezes > 0 {
                     p.streakFreezes -= 1
@@ -138,11 +186,12 @@ enum GameEngine {
         return p
     }
 
-    // MARK: - Weekly XP (league)
+    // MARK: - Weekly XP (circle scoreboard)
 
     /// Your real XP earned in [weekStart, weekStart + 7d): logs + perfect-day
     /// bonuses whose dayKey falls inside the week.
-    static func weeklyXP(logs: [PrayerLog], weekStart: Date, calendar: Calendar = .current) -> Int {
+    static func weeklyXP(logs: [PrayerLog], weekStart: Date, calendar: Calendar = .current,
+                         excusedDayKeys: Set<String> = []) -> Int {
         guard let weekEnd = calendar.date(byAdding: .day, value: 7, to: weekStart) else { return 0 }
         var dayKeys: Set<String> = []
         var day = weekStart
@@ -154,7 +203,7 @@ enum GameEngine {
         return dayKeys.reduce(0) { total, key in
             let dayLogs = logs.filter { $0.dayKey == key }
             guard !dayLogs.isEmpty else { return total }
-            return total + xp(forDay: key, logs: logs)
+            return total + xp(forDay: key, logs: logs, excusedDayKeys: excusedDayKeys)
         }
     }
 }

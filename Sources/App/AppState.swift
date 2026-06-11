@@ -23,6 +23,11 @@ final class AppState: ObservableObject {
     private var previousIshaWindow: PrayerWindow?
     private var previousDayKey: String = ""
 
+    /// Per-dayKey schedule cache for circle grids/weeks. Cleared on refresh()
+    /// so settings/location changes recompute. Pure function of dayKey —
+    /// time-travel safe.
+    private var scheduleCache: [String: DaySchedule] = [:]
+
     let location = LocationProvider.shared
 
     // MARK: - Init
@@ -43,12 +48,19 @@ final class AppState: ObservableObject {
     var todayLogs: [PrayerLog] { logs.filter { $0.dayKey == todayKey } }
 
     /// Logs + bonuses earned today (perfect-day bonus included).
-    var todayXP: Int { GameEngine.xp(forDay: todayKey, logs: logs) }
+    var todayXP: Int { GameEngine.xp(forDay: todayKey, logs: logs, excusedDayKeys: profile.excusedDayKeys) }
 
     var level: Int { GameEngine.level(forTotalXP: profile.totalXP) }
     var levelTitle: String { GameEngine.title(forLevel: level) }
     var xpIntoLevel: Int { GameEngine.xpIntoLevel(forTotalXP: profile.totalXP) }
     var xpNeededForLevel: Int { GameEngine.xpToAdvance(from: level) }
+
+    /// Foregone XP from missed windows today ("You missed out on +N XP").
+    var missedOutXPToday: Int {
+        guard let schedule = todaySchedule else { return 0 }
+        return GameEngine.missedOutXP(logs: logs, schedule: schedule,
+                                      now: AppClock.now, isExcused: isTodayExcused)
+    }
 
     /// Coordinates currently in use (device fix or fixed fallback).
     var activeCoordinates: (latitude: Double, longitude: Double) {
@@ -116,30 +128,43 @@ final class AppState: ObservableObject {
         logs.contains { $0.prayer == prayer && $0.dayKey == dayKey }
     }
 
-    // MARK: - Logging
+    // MARK: - Logging (v2)
 
-    func log(_ prayer: Prayer) {
+    /// In-window logging path. The UI guarantees a photo; nil is tolerated
+    /// (photo-save failure must never lose the prayer). If the window already
+    /// passed this also handles the qada path (photo/jamaat are dropped).
+    func log(_ prayer: Prayer, photoFilename: String? = nil, jamaat: Bool = false) {
         guard let target = targetWindow(for: prayer) else { return }            // not computable / upcoming
         guard !hasLog(prayer: prayer, dayKey: target.dayKey) else { return }    // double-log = no-op
         guard let tier = GameEngine.tier(for: target.window, at: AppClock.now) else { return } // window not open yet
 
-        // Qada only for the current schedule day — targetWindow() already
-        // restricts us to today's (or the still-open yesterday-isha) windows,
-        // so a qada tier here is always same-schedule-day.
+        // Qada (after window, same schedule day): tap-only, no photo, no jamaat.
+        let inWindow = tier.isInWindow
+        let normalizedPhoto: String? = {
+            guard inWindow, let name = photoFilename, !name.isEmpty else { return nil }
+            return name
+        }()
+        let countsJamaat = inWindow && jamaat
+        let xp = tier.xp + (countsJamaat ? GameEngine.jamaatBonus : 0)
 
+        let excused = profile.excusedDayKeys.contains(target.dayKey)
         let levelBefore = GameEngine.level(forTotalXP: profile.totalXP)
-        let wasPerfect = GameEngine.isPerfectDay(logs: logs, dayKey: target.dayKey)
+        let wasPerfect = GameEngine.isPerfectDay(logs: logs, dayKey: target.dayKey,
+                                                 excusedDayKeys: profile.excusedDayKeys)
 
         let entry = PrayerLog(id: UUID(), prayer: prayer, dayKey: target.dayKey,
-                              loggedAt: AppClock.now, tier: tier, xp: tier.xp)
+                              loggedAt: AppClock.now, tier: tier, xp: xp,
+                              photoFilename: normalizedPhoto, jamaat: countsJamaat)
         logs.append(entry)
 
         var newProfile = profile
-        newProfile.totalXP += tier.xp
+        newProfile.totalXP += xp
 
         var bonusXP = 0
         var perfectDay = false
-        if !wasPerfect, GameEngine.isPerfectDay(logs: logs, dayKey: target.dayKey) {
+        if !wasPerfect,
+           GameEngine.isPerfectDay(logs: logs, dayKey: target.dayKey,
+                                   excusedDayKeys: profile.excusedDayKeys) {
             perfectDay = true
             bonusXP = GameEngine.perfectDayBonus
             newProfile.totalXP += bonusXP
@@ -147,7 +172,8 @@ final class AppState: ObservableObject {
         }
 
         var streakExtended = false
-        if GameEngine.isDayComplete(logs: logs, dayKey: target.dayKey),
+        if !excused,
+           GameEngine.isDayComplete(logs: logs, dayKey: target.dayKey),
            newProfile.lastStreakDayKey != target.dayKey {
             newProfile = GameEngine.applyStreakIncrement(to: newProfile, dayKey: target.dayKey)
             streakExtended = true
@@ -160,12 +186,19 @@ final class AppState: ObservableObject {
 
         profile = newProfile
         persist()
+        awardNewlyCompletedChallenges()
         // The just-logged prayer's pending "Last call" must be dropped.
         NotificationManager.shared.reschedule()
 
-        celebration = LogResult(prayer: prayer, tier: tier, xpEarned: tier.xp, bonusXP: bonusXP,
+        celebration = LogResult(prayer: prayer, tier: tier, xpEarned: xp, bonusXP: bonusXP,
                                 newBadgeIDs: newBadgeIDs, leveledUp: leveledUp,
                                 perfectDay: perfectDay, streakExtended: streakExtended)
+    }
+
+    /// Make-up path: tap-only, no photo, 10 XP. Only effective once the
+    /// window has passed (same schedule day).
+    func logQada(_ prayer: Prayer) {
+        log(prayer, photoFilename: nil, jamaat: false)
     }
 
     func undoLog(_ prayer: Prayer) {
@@ -176,13 +209,19 @@ final class AppState: ObservableObject {
         else { return }
         let removed = logs[index]
 
-        let wasPerfect = GameEngine.isPerfectDay(logs: logs, dayKey: removed.dayKey)
+        let wasPerfect = GameEngine.isPerfectDay(logs: logs, dayKey: removed.dayKey,
+                                                 excusedDayKeys: profile.excusedDayKeys)
         let wasComplete = GameEngine.isDayComplete(logs: logs, dayKey: removed.dayKey)
 
         logs.remove(at: index)
 
+        // Undo removes the photo file too — the grid returns to its CTA state.
+        if let photo = removed.photoFilename {
+            PhotoStore.delete(photo)
+        }
+
         var newProfile = profile
-        newProfile.totalXP = max(0, newProfile.totalXP - removed.xp)
+        newProfile.totalXP = max(0, newProfile.totalXP - removed.xp)   // includes any jamaat bonus
         if wasPerfect {
             newProfile.totalXP = max(0, newProfile.totalXP - GameEngine.perfectDayBonus)
             newProfile.perfectDayCount = max(0, newProfile.perfectDayCount - 1)
@@ -198,19 +237,220 @@ final class AppState: ObservableObject {
         NotificationManager.shared.reschedule()
     }
 
-    // MARK: - League
+    // MARK: - Excused days (v2)
 
-    func leaderboard() -> [LeaderboardEntry] {
-        let now = AppClock.now
-        var entries = FriendSimulator.entries(at: now)
-        let myXP = GameEngine.weeklyXP(logs: logs, weekStart: FriendSimulator.weekStart(for: now))
-        let myName = profile.name.isEmpty ? "You" : profile.name
-        entries.append(LeaderboardEntry(id: "you", name: myName, avatar: "😄", xp: myXP, isYou: true))
-        return entries.sorted { $0.xp > $1.xp }
+    var isTodayExcused: Bool { profile.excusedDayKeys.contains(todayKey) }
+
+    var excusedUsedThisMonth: Int {
+        GameEngine.excusedCount(in: profile.excusedDayKeys, monthOf: todayKey)
     }
 
-    func leagueResetDate() -> Date {
-        FriendSimulator.weekEnd(for: AppClock.now)
+    /// Mark/unmark today as excused. Silently no-ops at the 10/month cap.
+    func setTodayExcused(_ on: Bool) {
+        let key = todayKey
+        if on {
+            guard !profile.excusedDayKeys.contains(key) else { return }
+            guard excusedUsedThisMonth < GameEngine.maxExcusedPerMonth else { return }
+            profile.excusedDayKeys.insert(key)
+        } else {
+            profile.excusedDayKeys.remove(key)
+        }
+        persistProfile()
+    }
+
+    // MARK: - Circle (v2)
+
+    /// Grid order: buddies first, you LAST (isYou flag set).
+    var circleMembers: [CircleMember] {
+        BuddySimulator.buddies.map { BuddySimulator.member(for: $0) } + [youMember]
+    }
+
+    private var youMember: CircleMember {
+        CircleMember(id: "you", name: profile.name.isEmpty ? "You" : profile.name,
+                     emoji: "😄", isYou: true)
+    }
+
+    /// The circle's squares for one prayer on one schedule day, filling in
+    /// live: a buddy's post appears only once AppClock.now >= its loggedAt.
+    func gridEntries(for prayer: Prayer, dayKey: String) -> [GridEntry] {
+        let now = AppClock.now
+        let window = schedule(forDayKey: dayKey)?.window(for: prayer)
+        var entries: [GridEntry] = []
+
+        for buddy in BuddySimulator.buddies {
+            let member = BuddySimulator.member(for: buddy)
+            var state: GridEntryState = .waiting
+            if let window {
+                switch BuddySimulator.outcome(for: buddy, dayKey: dayKey, window: window) {
+                case .inWindow(let tier, let loggedAt, let seed):
+                    if now >= loggedAt {
+                        state = .posted(.illustration(seed: seed), tier: tier, at: loggedAt)
+                    }
+                case .qada(let at):
+                    if now >= at { state = .qada(at: at) }
+                case .missed:
+                    if now >= window.end { state = .missed }
+                }
+            }
+            entries.append(GridEntry(id: "\(member.id)|\(dayKey)|\(prayer.rawValue)",
+                                     member: member, state: state))
+        }
+
+        let myState: GridEntryState
+        if let myLog = logs.first(where: { $0.dayKey == dayKey && $0.prayer == prayer }) {
+            if myLog.tier.isInWindow {
+                let content: PostContent = myLog.photoFilename.map { .photo(filename: $0) }
+                    ?? .illustration(seed: BuddySimulator.seed(name: "you", dayKey: dayKey, prayer: prayer))
+                myState = .posted(content, tier: myLog.tier, at: myLog.loggedAt)
+            } else {
+                myState = .qada(at: myLog.loggedAt)
+            }
+        } else if profile.excusedDayKeys.contains(dayKey) {
+            myState = .excused
+        } else if let window, now >= window.end {
+            myState = .missed
+        } else {
+            myState = .waiting
+        }
+        entries.append(GridEntry(id: "you|\(dayKey)|\(prayer.rawValue)",
+                                 member: youMember, state: myState))
+        return entries
+    }
+
+    /// Weekly circle scores (current Mon-start week), sorted descending.
+    /// Computed from the same simulated logs the grid shows.
+    func weeklyScores() -> [(member: CircleMember, xp: Int)] {
+        let now = AppClock.now
+        let days = currentWeekDays()
+        var scores: [(member: CircleMember, xp: Int)] = BuddySimulator.buddies.map { buddy in
+            (BuddySimulator.member(for: buddy), BuddySimulator.weeklyXP(for: buddy, days: days, asOf: now))
+        }
+        let myXP = GameEngine.weeklyXP(logs: logs, weekStart: BuddySimulator.weekStart(for: now),
+                                       excusedDayKeys: profile.excusedDayKeys)
+        scores.append((youMember, myXP))
+        return scores.sorted { $0.xp > $1.xp }
+    }
+
+    /// Current-week group data grid: one row per member, 7 day-columns of
+    /// 5 prayer cells each (Mon-first).
+    func weekRows() -> [MemberWeekRow] {
+        let now = AppClock.now
+        let dayKeys = BuddySimulator.weekDayKeys(for: now)
+
+        var rows: [MemberWeekRow] = []
+        for buddy in BuddySimulator.buddies {
+            let member = BuddySimulator.member(for: buddy)
+            let days: [[GridCellState]] = dayKeys.map { key in
+                let schedule = self.schedule(forDayKey: key)
+                return Prayer.allCases.map { prayer in
+                    buddyCell(buddy: buddy, dayKey: key, window: schedule?.window(for: prayer), now: now)
+                }
+            }
+            rows.append(MemberWeekRow(id: member.id, member: member, days: days))
+        }
+
+        let myDays: [[GridCellState]] = dayKeys.map { key in
+            let schedule = self.schedule(forDayKey: key)
+            return Prayer.allCases.map { prayer in
+                myCell(dayKey: key, prayer: prayer, window: schedule?.window(for: prayer), now: now)
+            }
+        }
+        rows.append(MemberWeekRow(id: "you", member: youMember, days: myDays))
+        return rows
+    }
+
+    private func buddyCell(buddy: BuddySimulator.Buddy, dayKey: String,
+                           window: PrayerWindow?, now: Date) -> GridCellState {
+        guard let window, now >= window.start else { return .future }
+        switch BuddySimulator.outcome(for: buddy, dayKey: dayKey, window: window) {
+        case .inWindow(let tier, let loggedAt, _):
+            return now >= loggedAt ? .inWindow(tier) : .future
+        case .qada(let at):
+            return now >= at ? .qada : .future
+        case .missed:
+            return now >= window.end ? .missed : .future
+        }
+    }
+
+    private func myCell(dayKey: String, prayer: Prayer,
+                        window: PrayerWindow?, now: Date) -> GridCellState {
+        if let log = logs.first(where: { $0.dayKey == dayKey && $0.prayer == prayer }) {
+            return log.tier.isInWindow ? .inWindow(log.tier) : .qada
+        }
+        if profile.excusedDayKeys.contains(dayKey) { return .excused }
+        guard let window else { return .future }
+        return now >= window.end ? .missed : .future
+    }
+
+    // MARK: - Challenges (v2)
+
+    /// Personal + group challenge progress (stateless, computed from logs).
+    func challenges() -> [ChallengeProgress] {
+        ChallengeEngine.progressList(challengeContext())
+    }
+
+    private func challengeContext() -> ChallengeEngine.Context {
+        let now = AppClock.now
+        let calendar = Calendar.current
+        let todayStart = calendar.startOfDay(for: now)
+        let recentDayKeys: [String] = stride(from: 29, through: 0, by: -1).compactMap { offset in
+            calendar.date(byAdding: .day, value: -offset, to: todayStart).map { AppClock.dayKey(for: $0) }
+        }
+        let weekDayKeys = BuddySimulator.weekDayKeys(for: now)
+        let weekDayKeySet = Set(weekDayKeys)
+        let days = currentWeekDays()
+
+        var memberWeekLogs: [(member: CircleMember, logs: [PrayerLog])] = BuddySimulator.buddies.map { buddy in
+            (BuddySimulator.member(for: buddy),
+             BuddySimulator.visibleLogs(for: buddy, days: days, asOf: now))
+        }
+        memberWeekLogs.append((youMember, logs.filter { weekDayKeySet.contains($0.dayKey) }))
+
+        return ChallengeEngine.Context(myLogs: logs,
+                                       memberWeekLogs: memberWeekLogs,
+                                       todayKey: todayKey,
+                                       recentDayKeys: recentDayKeys,
+                                       weekDayKeys: weekDayKeys,
+                                       weekKey: BuddySimulator.weekKey(for: now),
+                                       hardestPrayer: settings.hardestPrayer,
+                                       completions: profile.challengeCompletions)
+    }
+
+    /// Award XP for any challenge that just completed (once per key).
+    /// Called from refresh + log paths; LogResult/celebration are unchanged.
+    private func awardNewlyCompletedChallenges() {
+        let completed = ChallengeEngine.newlyCompleted(challengeContext())
+        guard !completed.isEmpty else { return }
+        var newProfile = profile
+        for item in completed {
+            newProfile.challengeCompletions[item.key] = AppClock.now
+            newProfile.totalXP += item.definition.rewardXP
+        }
+        profile = newProfile
+        persistProfile()
+    }
+
+    // MARK: - Photo summaries (v2)
+
+    /// Days of `date`'s month that have at least one photo, oldest first.
+    func photoSummaries(monthOf date: Date) -> [DayPhotoSummary] {
+        let calendar = Calendar.current
+        guard let interval = calendar.dateInterval(of: .month, for: date) else { return [] }
+        var result: [DayPhotoSummary] = []
+        var day = interval.start
+        while day < interval.end {
+            let key = AppClock.dayKey(for: day)
+            let dayLogs = logs.filter { $0.dayKey == key }.sorted { $0.loggedAt < $1.loggedAt }
+            let photos = dayLogs.compactMap(\.photoFilename)
+            if !photos.isEmpty {
+                result.append(DayPhotoSummary(id: key, date: day,
+                                              photoFilenames: photos,
+                                              recap: recap(forDayKey: key, date: day)))
+            }
+            guard let next = calendar.date(byAdding: .day, value: 1, to: day) else { break }
+            day = next
+        }
+        return result
     }
 
     // MARK: - Recaps
@@ -222,16 +462,20 @@ final class AppState: ObservableObject {
         var result: [DayRecap] = []
         for offset in stride(from: daysBack - 1, through: 0, by: -1) {
             guard let date = calendar.date(byAdding: .day, value: -offset, to: todayStart) else { continue }
-            let key = AppClock.dayKey(for: date)
-            let dayLogs = logs.filter { $0.dayKey == key }
-            result.append(DayRecap(dayKey: key,
-                                   date: date,
-                                   loggedCount: dayLogs.count,
-                                   inWindowCount: dayLogs.filter { $0.tier.isInWindow }.count,
-                                   xp: GameEngine.xp(forDay: key, logs: logs),
-                                   isPerfect: GameEngine.isPerfectDay(logs: logs, dayKey: key)))
+            result.append(recap(forDayKey: AppClock.dayKey(for: date), date: date))
         }
         return result
+    }
+
+    private func recap(forDayKey key: String, date: Date) -> DayRecap {
+        let dayLogs = logs.filter { $0.dayKey == key }
+        return DayRecap(dayKey: key,
+                        date: date,
+                        loggedCount: dayLogs.count,
+                        inWindowCount: dayLogs.filter { $0.tier.isInWindow }.count,
+                        xp: GameEngine.xp(forDay: key, logs: logs, excusedDayKeys: profile.excusedDayKeys),
+                        isPerfect: GameEngine.isPerfectDay(logs: logs, dayKey: key,
+                                                           excusedDayKeys: profile.excusedDayKeys))
     }
 
     // MARK: - Refresh (schedule + streak reconcile)
@@ -243,32 +487,55 @@ final class AppState: ObservableObject {
         let coords = activeCoordinates
         let calendar = Calendar.current
 
+        scheduleCache.removeAll()
+
         todaySchedule = PrayerTimeService.schedule(for: now,
                                                    latitude: coords.latitude,
                                                    longitude: coords.longitude,
                                                    method: settings.calcMethod,
                                                    madhab: settings.madhab)
+        if let schedule = todaySchedule {
+            scheduleCache[schedule.dayKey] = schedule
+        }
 
         if let yesterday = calendar.date(byAdding: .day, value: -1, to: now) {
             previousDayKey = AppClock.dayKey(for: yesterday)
-            previousIshaWindow = PrayerTimeService.schedule(for: yesterday,
-                                                            latitude: coords.latitude,
-                                                            longitude: coords.longitude,
-                                                            method: settings.calcMethod,
-                                                            madhab: settings.madhab)?
-                .window(for: .isha)
+            previousIshaWindow = schedule(forDayKey: previousDayKey)?.window(for: .isha)
         }
 
         reconcileStreakIfNeeded(now: now, calendar: calendar)
+        awardNewlyCompletedChallenges()
 
         if settings.useDeviceLocation {
             location.refreshLocation()
         }
     }
 
+    /// Schedule for an arbitrary dayKey (cached until next refresh).
+    private func schedule(forDayKey key: String) -> DaySchedule? {
+        if let cached = scheduleCache[key] { return cached }
+        guard let dayStart = AppClock.date(fromDayKey: key) else { return nil }
+        let coords = activeCoordinates
+        let schedule = PrayerTimeService.schedule(for: dayStart.addingTimeInterval(12 * 3600),
+                                                  latitude: coords.latitude,
+                                                  longitude: coords.longitude,
+                                                  method: settings.calcMethod,
+                                                  madhab: settings.madhab)
+        if let schedule { scheduleCache[key] = schedule }
+        return schedule
+    }
+
+    /// The current Mon-start week's (dayKey, schedule) pairs.
+    private func currentWeekDays() -> [(dayKey: String, schedule: DaySchedule)] {
+        BuddySimulator.weekDayKeys(for: AppClock.now).compactMap { key in
+            schedule(forDayKey: key).map { (key, $0) }
+        }
+    }
+
     /// Walk every elapsed day from the day after `lastReconciledDayKey`
-    /// through the last *decided* day. Incomplete day → consume a freeze,
-    /// else streak → 0. Never touches today.
+    /// through the last *decided* day. Excused days are skipped (streak
+    /// preserved, no freeze). Incomplete day → consume a freeze, else
+    /// streak → 0. Never touches today.
     ///
     /// "Last decided day" is normally yesterday, BUT yesterday's isha window
     /// stays open past midnight (it ends at today's fajr). While that window
@@ -309,7 +576,8 @@ final class AppState: ObservableObject {
             day = next
         }
         guard !elapsed.isEmpty else { return }
-        profile = GameEngine.reconcile(profile: profile, elapsedDays: elapsed)
+        profile = GameEngine.reconcile(profile: profile, elapsedDays: elapsed,
+                                       excusedDayKeys: profile.excusedDayKeys)
         persistProfile()
     }
 
@@ -335,6 +603,8 @@ final class AppState: ObservableObject {
 
     /// 21 days of plausible history ending yesterday; profile is rebuilt from
     /// the generated logs so XP/streak/badges/perfect days stay consistent.
+    /// ~70% of in-window logs get demo photos (PhotoStore.demoImage, "demo-"
+    /// prefixed). Buddy history needs no filling — BuddySimulator derives it.
     func fillDemoHistory() {
         let calendar = Calendar.current
         let todayStart = calendar.startOfDay(for: AppClock.now)
@@ -353,8 +623,13 @@ final class AppState: ObservableObject {
                     : tierRoll < 0.90 ? .lastCall
                     : .qada
                 let loggedAt = dayStart.addingTimeInterval(Double(6 + i * 3) * 3600 + rng.uniform() * 1800)
+                var photo: String?
+                if tier.isInWindow, rng.uniform() < 0.7 {
+                    photo = PhotoStore.saveDemo(seed: rng.next(), dayKey: key, prayer: prayer)
+                }
                 generated.append(PrayerLog(id: UUID(), prayer: prayer, dayKey: key,
-                                           loggedAt: loggedAt, tier: tier, xp: tier.xp))
+                                           loggedAt: loggedAt, tier: tier, xp: tier.xp,
+                                           photoFilename: photo, jamaat: false))
             }
         }
 
@@ -399,6 +674,7 @@ final class AppState: ObservableObject {
         logs = []
         profile = UserProfile.fresh(now: AppClock.now)
         settings = AppSettings()       // didSet persists + refreshes
+        PhotoStore.deleteAll()
         Store.delete(Store.logsFile)
         Store.delete(Store.profileFile)
         persist()

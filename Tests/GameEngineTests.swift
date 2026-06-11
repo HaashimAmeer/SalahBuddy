@@ -52,7 +52,7 @@ final class GameEngineTests: XCTestCase {
         XCTAssertEqual(LogTier.onTime.xp, 30)
         XCTAssertEqual(LogTier.prayed.xp, 20)
         XCTAssertEqual(LogTier.lastCall.xp, 10)
-        XCTAssertEqual(LogTier.qada.xp, 5)
+        XCTAssertEqual(LogTier.qada.xp, 10)   // v2: qada = half points
     }
 
     // MARK: - Levels
@@ -217,60 +217,32 @@ final class GameEngineTests: XCTestCase {
 
         var imperfect = logs
         imperfect[0] = log(.fajr, .qada, dayKey: dayKey)
-        XCTAssertEqual(GameEngine.xp(forDay: dayKey, logs: imperfect), 5 + 4 * 30)
+        XCTAssertEqual(GameEngine.xp(forDay: dayKey, logs: imperfect), 10 + 4 * 30)
     }
 
-    // MARK: - FriendSimulator
-
-    func testFriendSimulatorDeterminism() {
-        let instant = date(2026, 6, 10, 15, 30) // mid-week
-        for persona in FriendSimulator.personas {
-            let a = FriendSimulator.weeklyXP(for: persona, at: instant)
-            let b = FriendSimulator.weeklyXP(for: persona, at: instant)
-            XCTAssertEqual(a, b, "\(persona.name): same week + instant must give identical XP")
-        }
-
-        let entriesA = FriendSimulator.entries(at: instant).map { "\($0.id):\($0.xp)" }
-        let entriesB = FriendSimulator.entries(at: instant).map { "\($0.id):\($0.xp)" }
-        XCTAssertEqual(entriesA, entriesB)
-
-        // Different weeks → different seeds (overwhelmingly different boards).
-        let nextWeek = date(2026, 6, 17, 15, 30)
-        XCTAssertNotEqual(FriendSimulator.weekKey(for: instant), FriendSimulator.weekKey(for: nextWeek))
-        XCTAssertNotEqual(FriendSimulator.seed(name: "Ahmed", weekKey: "2026-W24"),
-                          FriendSimulator.seed(name: "Ahmed", weekKey: "2026-W25"))
-        XCTAssertNotEqual(FriendSimulator.seed(name: "Ahmed", weekKey: "2026-W24"),
-                          FriendSimulator.seed(name: "Fatima", weekKey: "2026-W24"))
-    }
-
-    func testFriendSimulatorMonotonicAccrual() {
-        // Walk through one week in 6h steps — XP must never decrease.
-        let weekStart = FriendSimulator.weekStart(for: date(2026, 6, 10, 12, 0))
-        for persona in FriendSimulator.personas {
-            var last = -1
-            for step in 0..<(7 * 4) {   // every 6h, staying strictly inside the week
-                let t = weekStart.addingTimeInterval(Double(step) * 6 * 3600)
-                let xp = FriendSimulator.weeklyXP(for: persona, at: t)
-                XCTAssertGreaterThanOrEqual(xp, last,
-                    "\(persona.name): weekly XP must accrue monotonically within the week")
-                last = xp
-            }
-        }
-    }
+    // MARK: - Week math (BuddySimulator)
 
     func testWeekMath() {
         let wed = date(2026, 6, 10, 15, 0)
-        let start = FriendSimulator.weekStart(for: wed)
+        let start = BuddySimulator.weekStart(for: wed)
         let weekday = Calendar.current.component(.weekday, from: start)
         XCTAssertEqual(weekday, 2, "week starts on Monday")
         XCTAssertEqual(Calendar.current.startOfDay(for: start), start, "week starts at 00:00")
-        XCTAssertEqual(FriendSimulator.weekEnd(for: wed).timeIntervalSince(start), 7 * 86400, accuracy: 3700)
-        XCTAssertTrue(start <= wed && wed < FriendSimulator.weekEnd(for: wed))
+        XCTAssertEqual(BuddySimulator.weekEnd(for: wed).timeIntervalSince(start), 7 * 86400, accuracy: 3700)
+        XCTAssertTrue(start <= wed && wed < BuddySimulator.weekEnd(for: wed))
+
+        let keys = BuddySimulator.weekDayKeys(for: wed)
+        XCTAssertEqual(keys.count, 7)
+        XCTAssertEqual(keys.first, AppClock.dayKey(for: start), "Mon-first")
+
+        // Different weeks → different week keys.
+        XCTAssertNotEqual(BuddySimulator.weekKey(for: wed),
+                          BuddySimulator.weekKey(for: date(2026, 6, 17, 15, 0)))
     }
 
     func testWeeklyXPFromRealLogs() {
         let wed = date(2026, 6, 10, 12, 0)
-        let weekStart = FriendSimulator.weekStart(for: wed)
+        let weekStart = BuddySimulator.weekStart(for: wed)
         let inWeekKey = AppClock.dayKey(for: weekStart.addingTimeInterval(2 * 86400 + 3600))
         let beforeWeekKey = AppClock.dayKey(for: weekStart.addingTimeInterval(-86400))
 
