@@ -67,12 +67,36 @@ enum ChallengeEngine {
         let weekKey: String
         let hardestPrayer: Prayer?
         let completions: [String: Date]
+        var customChallenges: [CustomChallenge] = []   // v3.2: circle-made group challenges
+    }
+
+    /// v3.2: Race target escalates each time the race is won — first goal is
+    /// 300, then +100 per past win ("once they reach that, the next is higher").
+    static func raceTarget(completions: [String: Date]) -> Int {
+        300 + 100 * completions.keys.filter { $0.hasPrefix("race300|") }.count
+    }
+
+    /// Hard-coded definitions adjusted for context: race target escalates,
+    /// custom circle challenges are appended as group definitions.
+    static func activeDefinitions(_ ctx: Context) -> [Definition] {
+        let target = raceTarget(completions: ctx.completions)
+        var defs = definitions.map { def -> Definition in
+            guard def.id == "race300" else { return def }
+            return Definition(id: def.id, title: "Race to \(target)",
+                              detail: "Be first in your circle to \(target) weekly XP",
+                              emoji: def.emoji, isGroup: true, target: target, rewardXP: def.rewardXP)
+        }
+        defs += ctx.customChallenges.map { c in
+            Definition(id: c.id, title: c.title, detail: c.detail,
+                       emoji: "🤝", isGroup: true, target: c.days, rewardXP: c.rewardXP)
+        }
+        return defs
     }
 
     // MARK: - Progress
 
     static func progressList(_ ctx: Context) -> [ChallengeProgress] {
-        definitions.compactMap { def in
+        activeDefinitions(ctx).compactMap { def in
             if def.id == "goal3", ctx.hardestPrayer == nil { return nil }
             let key = completionKey(for: def, weekKey: ctx.weekKey)
             let current = current(for: def, ctx: ctx)
@@ -131,12 +155,21 @@ enum ChallengeEngine {
             }
             return best
         default:
+            // v3.2 custom group challenge: everyone logs <prayer> N days in a row.
+            if let custom = ctx.customChallenges.first(where: { $0.id == def.id }) {
+                let weekSoFar = weekDayKeysThroughToday(ctx)
+                return consecutiveRun(dayKeys: weekSoFar, todayKey: weekSoFar.last ?? ctx.todayKey) { key in
+                    ctx.memberWeekLogs.allSatisfy { entry in
+                        entry.logs.contains { $0.prayer == custom.prayer && $0.dayKey == key }
+                    }
+                }
+            }
             return 0
         }
     }
 
     /// Whether the challenge is satisfied RIGHT NOW (used for awarding).
-    /// race300 requires actually winning the race, not just reaching 300.
+    /// race300 requires actually winning the race, not just reaching the target.
     static func isCompletedNow(_ def: Definition, ctx: Context) -> Bool {
         if def.id == "race300" {
             guard let youID = ctx.memberWeekLogs.first(where: { $0.member.isYou })?.member.id
@@ -149,7 +182,7 @@ enum ChallengeEngine {
     /// Challenges completed now but not yet recorded — AppState records the
     /// key and awards the XP exactly once.
     static func newlyCompleted(_ ctx: Context) -> [(key: String, definition: Definition)] {
-        definitions.compactMap { def in
+        activeDefinitions(ctx).compactMap { def in
             if def.id == "goal3", ctx.hardestPrayer == nil { return nil }
             let key = completionKey(for: def, weekKey: ctx.weekKey)
             guard ctx.completions[key] == nil, isCompletedNow(def, ctx: ctx) else { return nil }

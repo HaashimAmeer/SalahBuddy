@@ -8,18 +8,20 @@ enum GameEngine {
 
     /// Tier earned if `prayer` is logged at `now` against its window.
     /// - nil        → window hasn't opened yet (can't log)
-    /// - onTime     → first ⅓ of the window
-    /// - prayed     → second ⅓
-    /// - lastCall   → final ⅓
+    /// - onTime     → first ¼ of the window (v3.2: quarters, was thirds)
+    /// - prayed     → second ¼
+    /// - lastCall   → third ¼
+    /// - closeCall  → final ¼
     /// - qada       → at/after window end (caller enforces same-schedule-day rule)
     static func tier(for window: PrayerWindow, at now: Date) -> LogTier? {
         guard now >= window.start else { return nil }
         guard now < window.end else { return .qada }
         let duration = window.end.timeIntervalSince(window.start)
         let elapsed = now.timeIntervalSince(window.start)
-        if elapsed < duration / 3 { return .onTime }
-        if elapsed < duration * 2 / 3 { return .prayed }
-        return .lastCall
+        if elapsed < duration / 4 { return .onTime }
+        if elapsed < duration / 2 { return .prayed }
+        if elapsed < duration * 3 / 4 { return .lastCall }
+        return .closeCall
     }
 
     // MARK: - Levels
@@ -28,7 +30,20 @@ enum GameEngine {
     static let perfectDayBonus = 25
     static let maxStreakFreezes = 2
     static let jamaatBonus = 5            // v2: optional "prayed in jamaat" bonus
-    static let maxExcusedPerMonth = 10    // v2: excused-day cap per calendar month
+    static let jummaBonus = 10            // v3.2: Friday Dhuhr in congregation = Jumma
+    static let dhikrXP = 5                // v3.2: per dhikr session while excused (private XP)
+    static let maxDhikrPerDay = 5
+    static let maxExcusedPerMonth = 10    // legacy v2 cap — no longer enforced (excused is a mode now)
+
+    /// Friday in the user's current calendar → the Dhuhr jamaat toggle becomes
+    /// "Prayed Jumma" and earns the bigger bonus.
+    static func isJumma(prayer: Prayer, date: Date, calendar: Calendar = .current) -> Bool {
+        prayer == .dhuhr && calendar.component(.weekday, from: date) == 6
+    }
+
+    static func congregationBonus(prayer: Prayer, date: Date, calendar: Calendar = .current) -> Int {
+        isJumma(prayer: prayer, date: date, calendar: calendar) ? jummaBonus : jamaatBonus
+    }
 
     static let levelTitles = ["Seeker", "Committed", "Consistent", "Devoted",
                               "Steadfast", "Radiant", "Luminous"]

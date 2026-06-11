@@ -148,7 +148,9 @@ final class AppState: ObservableObject {
         let countsJamaat = inWindow && jamaat
         let countsPlace: PlaceTag? = inWindow ? placeTag : nil
         if let tag = countsPlace { rememberPlaceIfNeeded(tag) }
-        let xp = tier.xp + (countsJamaat ? GameEngine.jamaatBonus : 0)
+        // v3.2: Friday Dhuhr in congregation is Jumma — bigger bonus.
+        let congregationBonus = GameEngine.congregationBonus(prayer: prayer, date: AppClock.now)
+        let xp = tier.xp + (countsJamaat ? congregationBonus : 0)
 
         let excused = profile.excusedDayKeys.contains(target.dayKey)
         let levelBefore = GameEngine.level(forTotalXP: profile.totalXP)
@@ -247,7 +249,7 @@ final class AppState: ObservableObject {
         NotificationManager.shared.reschedule()
     }
 
-    // MARK: - Excused days (v2)
+    // MARK: - Excused days (v2) / "Can't pray" break mode (v3.2)
 
     var isTodayExcused: Bool { profile.excusedDayKeys.contains(todayKey) }
 
@@ -255,16 +257,53 @@ final class AppState: ObservableObject {
         GameEngine.excusedCount(in: profile.excusedDayKeys, monthOf: todayKey)
     }
 
-    /// Mark/unmark today as excused. Silently no-ops at the 10/month cap.
+    /// v3.2: excused is now a MODE — start a break, every day while it's
+    /// active is auto-marked excused, then "Resume prayers" ends it. No
+    /// monthly cap; the accountability is that the circle sees the break.
+    var isOnBreak: Bool { profile.excusedModeSince != nil }
+
+    func startBreak() {
+        guard !isOnBreak else { return }
+        profile.excusedModeSince = todayKey
+        profile.excusedDayKeys.insert(todayKey)
+        persistProfile()
+        NotificationManager.shared.scheduleBreakReminder(daysFromNow: 5)
+        objectWillChange.send()
+    }
+
+    /// End the break. Today is un-excused so prayers count again immediately.
+    func resumePrayers() {
+        guard isOnBreak else { return }
+        profile.excusedModeSince = nil
+        profile.excusedDayKeys.remove(todayKey)
+        persistProfile()
+        NotificationManager.shared.cancelBreakReminder()
+        NotificationManager.shared.reschedule()
+        objectWillChange.send()
+    }
+
+    /// Legacy single-day toggle (kept for the pre-mode UI path); no cap.
     func setTodayExcused(_ on: Bool) {
         let key = todayKey
         if on {
             guard !profile.excusedDayKeys.contains(key) else { return }
-            guard excusedUsedThisMonth < GameEngine.maxExcusedPerMonth else { return }
             profile.excusedDayKeys.insert(key)
         } else {
             profile.excusedDayKeys.remove(key)
         }
+        persistProfile()
+    }
+
+    // MARK: - Dhikr (v3.2 — private XP while on a break)
+
+    var dhikrToday: Int { profile.dhikrByDay[todayKey] ?? 0 }
+
+    /// Log a dhikr session: +5 XP, up to 5/day. Counts toward your level but
+    /// is deliberately NOT part of weekly circle scores — it's just for you.
+    func logDhikr() {
+        guard dhikrToday < GameEngine.maxDhikrPerDay else { return }
+        profile.dhikrByDay[todayKey] = dhikrToday + 1
+        profile.totalXP += GameEngine.dhikrXP
         persistProfile()
     }
 
@@ -482,7 +521,26 @@ final class AppState: ObservableObject {
                                        weekDayKeys: weekDayKeys,
                                        weekKey: BuddySimulator.weekKey(for: now),
                                        hardestPrayer: settings.hardestPrayer,
-                                       completions: profile.challengeCompletions)
+                                       completions: profile.challengeCompletions,
+                                       customChallenges: profile.customChallenges)
+    }
+
+    // MARK: - Custom group challenges (v3.2)
+
+    func createCustomChallenge(prayer: Prayer, days: Int) {
+        let challenge = CustomChallenge(id: "custom-\(UUID().uuidString)",
+                                        prayer: prayer,
+                                        days: max(2, min(7, days)),
+                                        createdAt: AppClock.now)
+        profile.customChallenges.append(challenge)
+        persistProfile()
+        objectWillChange.send()
+    }
+
+    func deleteCustomChallenge(id: String) {
+        profile.customChallenges.removeAll { $0.id == id }
+        persistProfile()
+        objectWillChange.send()
     }
 
     /// Award XP for any challenge that just completed (once per key).
@@ -570,6 +628,24 @@ final class AppState: ObservableObject {
         if let yesterday = calendar.date(byAdding: .day, value: -1, to: now) {
             previousDayKey = AppClock.dayKey(for: yesterday)
             previousIshaWindow = schedule(forDayKey: previousDayKey)?.window(for: .isha)
+        }
+
+        // v3.2: while a "can't pray" break is active, every day it touches is
+        // auto-excused (incl. days that elapsed since the last open).
+        if let since = profile.excusedModeSince {
+            var changed = false
+            var day = AppClock.date(fromDayKey: since) ?? now
+            let todayStart = calendar.startOfDay(for: now)
+            while day <= todayStart {
+                let key = AppClock.dayKey(for: day)
+                if !profile.excusedDayKeys.contains(key) {
+                    profile.excusedDayKeys.insert(key)
+                    changed = true
+                }
+                guard let next = calendar.date(byAdding: .day, value: 1, to: day) else { break }
+                day = next
+            }
+            if changed { persistProfile() }
         }
 
         reconcileStreakIfNeeded(now: now, calendar: calendar)

@@ -75,20 +75,80 @@ struct CurrentPrayerBlock: View {
         }
     }
 
+    /// v3.2: during a break this becomes the engagement card — dhikr for
+    /// private XP and a one-tap resume. Otherwise the quiet excused note.
+    @ViewBuilder
     private var excusedBanner: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "moon.fill")
-                .font(.system(size: 13, weight: .semibold))
-            Text("Resting today — your streak is safe 💜")
-                .font(Theme.sans(13, .semibold))
+        if state.isOnBreak {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Image(systemName: "moon.fill")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("On a break — your streak is safe 💜")
+                        .font(Theme.sans(14, .bold))
+                }
+                .foregroundStyle(Theme.lilac)
+
+                Text("Stay connected with a little dhikr — those points are just for you, never shown to your circle.")
+                    .font(Theme.sans(12.5, .semibold))
+                    .foregroundStyle(Theme.inkMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack(spacing: 10) {
+                    Button {
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        withAnimation(Theme.spring) { state.logDhikr() }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Text("📿 Log dhikr")
+                                .font(Theme.sans(14, .bold))
+                            Text("+\(GameEngine.dhikrXP) XP · \(state.dhikrToday)/\(GameEngine.maxDhikrPerDay)")
+                                .font(Theme.sans(12, .semibold))
+                                .opacity(0.85)
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 9)
+                        .background(Capsule().fill(
+                            state.dhikrToday < GameEngine.maxDhikrPerDay ? Theme.lilac : Theme.mist))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(state.dhikrToday >= GameEngine.maxDhikrPerDay)
+
+                    Button {
+                        withAnimation(Theme.spring) { state.resumePrayers() }
+                    } label: {
+                        Text("Resume prayers")
+                            .font(Theme.sans(14, .bold))
+                            .foregroundStyle(Theme.green)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 9)
+                            .background(Capsule().strokeBorder(Theme.green, lineWidth: 1.5))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(12)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Theme.lilac.opacity(0.12))
+            )
+        } else {
+            HStack(spacing: 8) {
+                Image(systemName: "moon.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("Resting today — your streak is safe 💜")
+                    .font(Theme.sans(13, .semibold))
+            }
+            .foregroundStyle(Theme.lilac)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(12)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Theme.lilac.opacity(0.12))
+            )
         }
-        .foregroundStyle(Theme.lilac)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Theme.lilac.opacity(0.12))
-        )
     }
 
     /// Window still open by the clock (independent of whether I logged).
@@ -138,10 +198,29 @@ struct LiveCircleGrid: View {
 
     var body: some View {
         LazyVGrid(columns: columns, spacing: 12) {
-            ForEach(entries) { entry in
+            ForEach(displayEntries) { entry in
                 cell(entry)
                     .aspectRatio(1, contentMode: .fit)
             }
+        }
+    }
+
+    /// v3.2 ordering per design session: YOUR square top-left, then the rest
+    /// by most recent post first. On a break your square is removed entirely
+    /// ("just remove their photo") — the break card explains your absence.
+    private var displayEntries: [GridEntry] {
+        let visible = entries.filter { !($0.member.isYou && $0.state == .excused) }
+        let you = visible.filter(\.member.isYou)
+        let others = visible.filter { !$0.member.isYou }
+            .sorted { recency($0) > recency($1) }
+        return you + others
+    }
+
+    private func recency(_ entry: GridEntry) -> Date {
+        switch entry.state {
+        case .posted(_, _, let at): return at
+        case .qada(let at): return at
+        default: return .distantPast
         }
     }
 
@@ -324,12 +403,62 @@ struct EarlierTodayBlock: View {
             .buttonStyle(.plain)
 
             if isExpanded {
-                PrayerPhotoGrid(entries: state.gridEntries(for: prayer, dayKey: state.todayKey),
-                                compact: true)
+                // v3.2: status only, no photos — past photos live in YOUR
+                // Journey memories; here it's just who prayed and who didn't.
+                statusRows(state.gridEntries(for: prayer, dayKey: state.todayKey))
             }
         }
         .padding(14)
         .cardStyle()
+    }
+
+    private func statusRows(_ entries: [GridEntry]) -> some View {
+        VStack(spacing: 6) {
+            ForEach(entries) { entry in
+                HStack(spacing: 8) {
+                    Text(entry.member.emoji)
+                        .font(.system(size: 14))
+                    Text(entry.member.isYou ? "You" : entry.member.name)
+                        .font(Theme.sans(13, entry.member.isYou ? .bold : .semibold))
+                        .foregroundStyle(Theme.inkDeep)
+                    Spacer(minLength: 8)
+                    statusChip(entry.state)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func statusChip(_ entryState: GridEntryState) -> some View {
+        switch entryState {
+        case .posted(_, let tier, let at):
+            HStack(spacing: 4) {
+                Circle().fill(Theme.color(for: .inWindow(tier)))
+                    .frame(width: 8, height: 8)
+                Text("Prayed · \(at.formatted(date: .omitted, time: .shortened))")
+            }
+            .font(Theme.sans(12, .semibold))
+            .foregroundStyle(Theme.inkMuted)
+        case .qada:
+            Text("Made up")
+                .font(Theme.sans(12, .bold))
+                .foregroundStyle(Theme.qadaBlue)
+        case .missed:
+            Text("Not yet")
+                .font(Theme.sans(12, .semibold))
+                .foregroundStyle(Theme.inkMuted.opacity(0.7))
+        case .excused:
+            HStack(spacing: 3) {
+                Image(systemName: "moon.fill").font(.system(size: 9, weight: .bold))
+                Text("Excused")
+            }
+            .font(Theme.sans(12, .bold))
+            .foregroundStyle(Theme.lilac)
+        case .waiting:
+            Text("…")
+                .font(Theme.sans(12, .semibold))
+                .foregroundStyle(Theme.inkMuted.opacity(0.5))
+        }
     }
 
     @ViewBuilder
@@ -402,56 +531,51 @@ struct ExcusedTodayFooter: View {
 
     var body: some View {
         Group {
-            if state.isTodayExcused {
-                excusedBanner
-            } else if state.excusedUsedThisMonth >= GameEngine.maxExcusedPerMonth {
-                Text("Can't pray today? \(state.excusedUsedThisMonth)/\(GameEngine.maxExcusedPerMonth) excused days used this month")
-                    .font(Theme.sans(12, .semibold))
-                    .foregroundStyle(Theme.inkMuted.opacity(0.7))
-                    .multilineTextAlignment(.center)
+            if state.isOnBreak {
+                breakBanner
             } else {
                 Button {
                     confirming = true
                 } label: {
-                    Text("Can't pray today?")
+                    Text("Can't pray right now?")
                         .font(Theme.sans(13, .semibold))
                         .foregroundStyle(Theme.inkMuted)
                         .underline()
                 }
                 .buttonStyle(.plain)
-                .confirmationDialog("Mark today as excused?",
+                .confirmationDialog("Take a break?",
                                     isPresented: $confirming, titleVisibility: .visible) {
-                    Button("Yes, excuse today 🌙") {
-                        withAnimation(Theme.spring) { state.setTodayExcused(true) }
+                    Button("Start a break 🌙") {
+                        withAnimation(Theme.spring) { state.startBreak() }
                     }
                     Button("Not now", role: .cancel) {}
                 } message: {
-                    Text("Sickness, travel, or any reason — your streak is preserved and the day is skipped gently. \(state.excusedUsedThisMonth)/\(GameEngine.maxExcusedPerMonth) used this month.")
+                    Text("Sickness, travel, your period — whatever the reason, your streak is safe until you tap Resume. Your circle sees a gentle \"excused\", never the details. Dhikr earns you private XP meanwhile.")
                 }
             }
         }
         .padding(.top, 6)
     }
 
-    private var excusedBanner: some View {
+    private var breakBanner: some View {
         HStack(spacing: 10) {
             Image(systemName: "moon.fill")
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(Theme.lilac)
             VStack(alignment: .leading, spacing: 2) {
-                Text("Today is excused — streak safe")
+                Text("On a break — streak safe")
                     .font(Theme.sans(14, .bold))
                     .foregroundStyle(Theme.inkDeep)
-                Text("\(state.excusedUsedThisMonth)/\(GameEngine.maxExcusedPerMonth) excused days this month")
+                Text("Resume whenever you're ready 💜")
                     .font(Theme.sans(12, .semibold))
                     .foregroundStyle(Theme.inkMuted)
             }
             Spacer(minLength: 8)
-            Button("Undo") {
-                withAnimation(Theme.spring) { state.setTodayExcused(false) }
+            Button("Resume") {
+                withAnimation(Theme.spring) { state.resumePrayers() }
             }
             .font(Theme.sans(13, .bold))
-            .foregroundStyle(Theme.lilac)
+            .foregroundStyle(Theme.green)
             .buttonStyle(.plain)
         }
         .padding(14)

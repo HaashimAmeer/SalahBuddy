@@ -68,6 +68,16 @@ struct TodayHeader: View {
                     .foregroundStyle(Theme.inkDeep)
                     .lineLimit(1)
                     .minimumScaleFactor(0.6)
+                // v3.2: level lives under the greeting (design session) — the
+                // right side keeps just the flame, less crowded.
+                HStack(spacing: 6) {
+                    Text("Level \(state.level) · \(state.levelTitle)")
+                        .font(Theme.sans(12, .bold))
+                        .foregroundStyle(Theme.inkMuted)
+                    ProgressRing(progress: levelProgress, lineWidth: 2.5, color: Theme.gold)
+                        .frame(width: 13, height: 13)
+                }
+                .padding(.top, 1)
             }
             .overlay(alignment: .topTrailing) {
                 Image(systemName: "moon.stars.fill")
@@ -79,8 +89,12 @@ struct TodayHeader: View {
             Spacer(minLength: 8)
 
             StreakFlameView(streak: state.profile.streak, isLitToday: streakLitToday)
-            LevelPill()
         }
+    }
+
+    private var levelProgress: Double {
+        guard state.xpNeededForLevel > 0 else { return 1 }
+        return min(1, Double(state.xpIntoLevel) / Double(state.xpNeededForLevel))
     }
 
     private var displayName: String {
@@ -90,45 +104,6 @@ struct TodayHeader: View {
 
     private var streakLitToday: Bool {
         state.profile.lastStreakDayKey == state.todayKey
-    }
-}
-
-/// v3: always-visible level — ring of progress toward the next level around
-/// the level number, with "Lv N · Title" beside it. Lives in the Today header
-/// so you never have to dig into Journey to know where you stand.
-struct LevelPill: View {
-    @EnvironmentObject private var state: AppState
-
-    var body: some View {
-        HStack(spacing: 7) {
-            ZStack {
-                ProgressRing(progress: progress, lineWidth: 3, color: Theme.gold)
-                    .frame(width: 28, height: 28)
-                Text("\(state.level)")
-                    .font(Theme.sans(12, .heavy))
-                    .foregroundStyle(Theme.inkDeep)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.6)
-            }
-            VStack(alignment: .leading, spacing: 0) {
-                Text("Lv \(state.level)")
-                    .font(Theme.sans(13, .bold))
-                    .foregroundStyle(Theme.inkDeep)
-                Text(state.levelTitle)
-                    .font(Theme.sans(9, .semibold))
-                    .foregroundStyle(Theme.inkMuted)
-                    .lineLimit(1)
-            }
-        }
-        .padding(.vertical, 5)
-        .padding(.horizontal, 9)
-        .background(Theme.surface, in: Capsule())
-        .shadow(color: .black.opacity(0.05), radius: 6, x: 0, y: 2)
-    }
-
-    private var progress: Double {
-        guard state.xpNeededForLevel > 0 else { return 1 }
-        return min(1, Double(state.xpIntoLevel) / Double(state.xpNeededForLevel))
     }
 }
 

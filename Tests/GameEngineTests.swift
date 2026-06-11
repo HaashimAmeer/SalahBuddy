@@ -27,32 +27,51 @@ final class GameEngineTests: XCTestCase {
     func testTierBoundaries() {
         let start = date(2026, 6, 10, 12, 0)
         let window = PrayerWindow(prayer: .dhuhr, start: start,
-                                  end: start.addingTimeInterval(90 * 60)) // 90 min → thirds of 30 min
+                                  end: start.addingTimeInterval(120 * 60)) // 120 min → quarters of 30 min
 
         // Before start → nil (can't log).
         XCTAssertNil(GameEngine.tier(for: window, at: start.addingTimeInterval(-1)))
         // Exactly at start → onTime.
         XCTAssertEqual(GameEngine.tier(for: window, at: start), .onTime)
-        // Just inside first third.
+        // Just inside first quarter.
         XCTAssertEqual(GameEngine.tier(for: window, at: start.addingTimeInterval(30 * 60 - 1)), .onTime)
-        // Exactly at ⅓ boundary → second tier.
+        // Exactly at ¼ boundary → second tier.
         XCTAssertEqual(GameEngine.tier(for: window, at: start.addingTimeInterval(30 * 60)), .prayed)
-        // Just inside second third.
+        // Just inside second quarter.
         XCTAssertEqual(GameEngine.tier(for: window, at: start.addingTimeInterval(60 * 60 - 1)), .prayed)
-        // Exactly at ⅔ boundary → lastCall.
+        // Exactly at ½ boundary → lastCall.
         XCTAssertEqual(GameEngine.tier(for: window, at: start.addingTimeInterval(60 * 60)), .lastCall)
-        // Just before end → lastCall.
+        // Just inside third quarter.
         XCTAssertEqual(GameEngine.tier(for: window, at: start.addingTimeInterval(90 * 60 - 1)), .lastCall)
+        // Exactly at ¾ boundary → closeCall.
+        XCTAssertEqual(GameEngine.tier(for: window, at: start.addingTimeInterval(90 * 60)), .closeCall)
+        // Just before end → closeCall.
+        XCTAssertEqual(GameEngine.tier(for: window, at: start.addingTimeInterval(120 * 60 - 1)), .closeCall)
         // At/after end → qada.
-        XCTAssertEqual(GameEngine.tier(for: window, at: start.addingTimeInterval(90 * 60)), .qada)
+        XCTAssertEqual(GameEngine.tier(for: window, at: start.addingTimeInterval(120 * 60)), .qada)
         XCTAssertEqual(GameEngine.tier(for: window, at: start.addingTimeInterval(5 * 3600)), .qada)
     }
 
     func testTierXPValues() {
         XCTAssertEqual(LogTier.onTime.xp, 30)
         XCTAssertEqual(LogTier.prayed.xp, 20)
-        XCTAssertEqual(LogTier.lastCall.xp, 10)
-        XCTAssertEqual(LogTier.qada.xp, 10)   // v2: qada = half points
+        XCTAssertEqual(LogTier.lastCall.xp, 15)
+        XCTAssertEqual(LogTier.closeCall.xp, 12)
+        XCTAssertEqual(LogTier.qada.xp, 10)
+        // In-window must always beat making up later.
+        XCTAssertGreaterThan(LogTier.closeCall.xp, LogTier.qada.xp)
+    }
+
+    func testJummaBonus() {
+        // 2026-06-12 is a Friday.
+        let friday = date(2026, 6, 12, 13, 0)
+        let thursday = date(2026, 6, 11, 13, 0)
+        XCTAssertTrue(GameEngine.isJumma(prayer: .dhuhr, date: friday))
+        XCTAssertFalse(GameEngine.isJumma(prayer: .asr, date: friday))
+        XCTAssertFalse(GameEngine.isJumma(prayer: .dhuhr, date: thursday))
+        XCTAssertEqual(GameEngine.congregationBonus(prayer: .dhuhr, date: friday), GameEngine.jummaBonus)
+        XCTAssertEqual(GameEngine.congregationBonus(prayer: .dhuhr, date: thursday), GameEngine.jamaatBonus)
+        XCTAssertEqual(GameEngine.congregationBonus(prayer: .isha, date: friday), GameEngine.jamaatBonus)
     }
 
     // MARK: - Levels

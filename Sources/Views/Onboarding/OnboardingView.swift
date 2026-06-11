@@ -11,6 +11,7 @@ struct OnboardingView: View {
 
     @State private var step = 0
     @State private var name = ""
+    @State private var kind: String?      // v3.2: "brother" / "sister" (optional)
     @State private var hardest: Prayer?
     @State private var pickedGoal = false
     @State private var notifGranted = false
@@ -29,7 +30,8 @@ struct OnboardingView: View {
                     Group {
                         switch step {
                         case 0: welcomeStep
-                        case 1: goalStep
+                        case 1: kindStep
+                        case 2: goalStep
                         default: permissionsStep
                         }
                     }
@@ -78,7 +80,7 @@ struct OnboardingView: View {
 
     private var stepDots: some View {
         HStack(spacing: 8) {
-            ForEach(0..<3, id: \.self) { i in
+            ForEach(0..<4, id: \.self) { i in
                 Capsule()
                     .fill(i == step ? Theme.green : Theme.greenSoft)
                     .frame(width: i == step ? 22 : 8, height: 8)
@@ -88,7 +90,7 @@ struct OnboardingView: View {
 
     private var footer: some View {
         VStack(spacing: 10) {
-            ChunkyButton(title: step == 2 ? "Let's go! 🚀" : "Continue",
+            ChunkyButton(title: step == 3 ? "Let's go! 🚀" : "Continue",
                          color: Theme.green, isEnabled: true) {
                 advance()
             }
@@ -106,7 +108,7 @@ struct OnboardingView: View {
     }
 
     private func advance() {
-        if step < 2 {
+        if step < 3 {
             withAnimation(Theme.spring) { step += 1 }
         } else {
             finish()
@@ -160,6 +162,61 @@ struct OnboardingView: View {
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
         .cardStyle()
+    }
+
+    // MARK: - Step 1: brother / sister (v3.2, optional)
+
+    private var kindStep: some View {
+        VStack(spacing: 18) {
+            Text("A little about you")
+                .font(Theme.sans(26, .bold))
+                .foregroundStyle(Theme.inkDeep)
+            Text("Totally optional — it just helps us tailor things, like Jumma on Fridays or taking gentle breaks when you can't pray.")
+                .font(Theme.sans(14, .semibold))
+                .foregroundStyle(Theme.inkMuted)
+                .multilineTextAlignment(.center)
+
+            HStack(spacing: 12) {
+                kindChip("brother", emoji: "🤵", label: "Brother")
+                kindChip("sister", emoji: "🧕", label: "Sister")
+            }
+
+            Button {
+                kind = nil
+                withAnimation(Theme.spring) { step += 1 }
+            } label: {
+                Text("Prefer not to say")
+                    .font(Theme.sans(13, .semibold))
+                    .foregroundStyle(Theme.inkMuted)
+                    .underline()
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.top, 30)
+    }
+
+    private func kindChip(_ value: String, emoji: String, label: String) -> some View {
+        let selected = kind == value
+        return Button {
+            kind = selected ? nil : value
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        } label: {
+            VStack(spacing: 8) {
+                Text(emoji).font(.system(size: 40))
+                Text(label)
+                    .font(Theme.sans(16, selected ? .bold : .semibold))
+                    .foregroundStyle(selected ? Theme.inkDeep : Theme.inkMuted)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 22)
+            .background(selected ? Theme.greenSoft : Theme.surface,
+                        in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .strokeBorder(selected ? Theme.green : Theme.mist.opacity(0.5), lineWidth: 1.5)
+            )
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: - Step 1: goal setting
@@ -331,6 +388,7 @@ struct OnboardingView: View {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty { state.setName(trimmed) }
         var s = state.settings
+        s.memberKind = kind
         s.hardestPrayer = hardest          // seeds the goal3 challenge
         s.hasOnboarded = true
         state.settings = s                 // single write: didSet persists + refreshes

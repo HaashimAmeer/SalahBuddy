@@ -40,15 +40,19 @@ enum Prayer: String, CaseIterable, Codable, Identifiable {
 
 // MARK: - Log tier
 
+/// v3.2: window split into QUARTERS (was thirds) — a steeper early-bird curve
+/// so there's always a real pull to pray sooner. Old logs keep their stored
+/// xp and old tier rawValues still decode.
 enum LogTier: String, Codable {
-    case onTime, prayed, lastCall, qada
+    case onTime, prayed, lastCall, closeCall, qada
 
     var xp: Int {
         switch self {
-        case .onTime: return 30
-        case .prayed: return 20
-        case .lastCall: return 10
-        case .qada: return 10      // v2: "half points" (was 5). Old logs keep their stored xp.
+        case .onTime: return 30    // 1st quarter
+        case .prayed: return 20    // 2nd quarter
+        case .lastCall: return 15  // 3rd quarter
+        case .closeCall: return 12 // 4th quarter — still beats making up later
+        case .qada: return 10      // "half points". Old logs keep their stored xp.
         }
     }
 
@@ -56,12 +60,13 @@ enum LogTier: String, Codable {
         switch self {
         case .onTime: return "On time! ⚡"
         case .prayed: return "Prayed"
-        case .lastCall: return "Just made it"
+        case .lastCall: return "Getting late"
+        case .closeCall: return "Just made it"
         case .qada: return "Made up (Qada)"
         }
     }
 
-    /// onTime / prayed / lastCall — logged within the window.
+    /// Logged within the window (anything but qada).
     var isInWindow: Bool { self != .qada }
 }
 
@@ -170,11 +175,16 @@ struct UserProfile: Codable {
     var joinedAt: Date
     var excusedDayKeys: Set<String>            // v2: days marked "Can't pray today"
     var challengeCompletions: [String: Date]   // v2: challenge id (or "id|weekKey") → completion date
+    var excusedModeSince: String?              // v3.2: dayKey the "can't pray" break started (nil = not on a break)
+    var dhikrByDay: [String: Int]              // v3.2: dayKey → dhikr sessions logged (private XP)
+    var customChallenges: [CustomChallenge]    // v3.2: group challenges the circle created
 
     init(name: String, totalXP: Int, streak: Int, longestStreak: Int, streakFreezes: Int,
          lastStreakDayKey: String?, lastReconciledDayKey: String?, earnedBadges: [String: Date],
          perfectDayCount: Int, joinedAt: Date,
-         excusedDayKeys: Set<String> = [], challengeCompletions: [String: Date] = [:]) {
+         excusedDayKeys: Set<String> = [], challengeCompletions: [String: Date] = [:],
+         excusedModeSince: String? = nil, dhikrByDay: [String: Int] = [:],
+         customChallenges: [CustomChallenge] = []) {
         self.name = name
         self.totalXP = totalXP
         self.streak = streak
@@ -187,6 +197,9 @@ struct UserProfile: Codable {
         self.joinedAt = joinedAt
         self.excusedDayKeys = excusedDayKeys
         self.challengeCompletions = challengeCompletions
+        self.excusedModeSince = excusedModeSince
+        self.dhikrByDay = dhikrByDay
+        self.customChallenges = customChallenges
     }
 
     // Migration-safe decoding: v1 profiles lack the v2 fields.
@@ -194,6 +207,7 @@ struct UserProfile: Codable {
         case name, totalXP, streak, longestStreak, streakFreezes
         case lastStreakDayKey, lastReconciledDayKey, earnedBadges, perfectDayCount, joinedAt
         case excusedDayKeys, challengeCompletions
+        case excusedModeSince, dhikrByDay, customChallenges
     }
 
     init(from decoder: Decoder) throws {
@@ -210,6 +224,9 @@ struct UserProfile: Codable {
         joinedAt = try c.decode(Date.self, forKey: .joinedAt)
         excusedDayKeys = (try? c.decodeIfPresent(Set<String>.self, forKey: .excusedDayKeys)) ?? []
         challengeCompletions = (try? c.decodeIfPresent([String: Date].self, forKey: .challengeCompletions)) ?? [:]
+        excusedModeSince = (try? c.decodeIfPresent(String.self, forKey: .excusedModeSince)) ?? nil
+        dhikrByDay = (try? c.decodeIfPresent([String: Int].self, forKey: .dhikrByDay)) ?? [:]
+        customChallenges = (try? c.decodeIfPresent([CustomChallenge].self, forKey: .customChallenges)) ?? []
     }
 
     static func fresh(now: Date) -> UserProfile {
@@ -283,6 +300,7 @@ struct AppSettings: Codable {
     var hasOnboarded: Bool = false
     var hardestPrayer: Prayer? = nil   // v2: onboarding goal-setting → seeds goal3 challenge
     var savedPlaces: [String: SavedPlace] = [:]   // v3: PlaceTag.rawValue → remembered spot
+    var memberKind: String? = nil      // v3.2: "brother" / "sister" (onboarding, optional) — tailors copy
 
     init() {}
 
@@ -300,6 +318,7 @@ struct AppSettings: Codable {
         hasOnboarded = (try? c.decode(Bool.self, forKey: .hasOnboarded)) ?? false
         hardestPrayer = (try? c.decodeIfPresent(Prayer.self, forKey: .hardestPrayer)) ?? nil
         savedPlaces = (try? c.decode([String: SavedPlace].self, forKey: .savedPlaces)) ?? [:]
+        memberKind = (try? c.decodeIfPresent(String.self, forKey: .memberKind)) ?? nil
     }
 }
 
@@ -383,6 +402,19 @@ struct MemberWeekRow: Identifiable {
     let id: String
     let member: CircleMember
     let days: [[GridCellState]]   // 7 days × 5 prayers, Mon-first
+}
+
+/// v3.2: a group challenge the circle defined themselves — "everyone logs
+/// <prayer> for <days> days in a row". Reward scales with length.
+struct CustomChallenge: Codable, Identifiable, Equatable {
+    var id: String          // "custom-<uuid>"
+    var prayer: Prayer
+    var days: Int
+    var createdAt: Date
+
+    var rewardXP: Int { days * 15 }
+    var title: String { "Everyone: \(prayer.displayName) ×\(days)" }
+    var detail: String { "The whole circle logs \(prayer.displayName) \(days) days in a row" }
 }
 
 struct ChallengeProgress: Identifiable {

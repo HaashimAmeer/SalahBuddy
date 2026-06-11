@@ -38,6 +38,29 @@ final class NotificationManager {
         }
     }
 
+    // MARK: - Break reminder (v3.2)
+
+    private static let breakReminderID = idPrefix + "breakReminder"
+
+    /// One gentle nudge a few days into a "can't pray" break — dhikr keeps
+    /// you connected, and resuming is one tap away.
+    func scheduleBreakReminder(daysFromNow days: Int) {
+        let content = UNMutableNotificationContent()
+        content.title = "We miss you 💜"
+        content.body = "No pressure — log some dhikr for a few XP, and tap Resume whenever you're ready."
+        content.sound = .default
+        let trigger = UNTimeIntervalNotificationTrigger(
+            timeInterval: TimeInterval(days) * 24 * 3600, repeats: false)
+        let request = UNNotificationRequest(identifier: Self.breakReminderID,
+                                            content: content, trigger: trigger)
+        UNUserNotificationCenter.current().add(request)
+    }
+
+    func cancelBreakReminder() {
+        UNUserNotificationCenter.current()
+            .removePendingNotificationRequests(withIdentifiers: [Self.breakReminderID])
+    }
+
     /// Ask the system for notification permission. Returns true if granted.
     func requestPermission() async -> Bool {
         let center = UNUserNotificationCenter.current()
@@ -55,13 +78,19 @@ final class NotificationManager {
     private func rescheduleAsync() async {
         let center = UNUserNotificationCenter.current()
 
-        // Always start from a clean slate (only our own requests).
+        // Always start from a clean slate (only our own requests; the break
+        // reminder survives reschedules — it has its own lifecycle).
         let pending = await center.pendingNotificationRequests()
-        let ours = pending.map(\.identifier).filter { $0.hasPrefix(Self.idPrefix) }
+        let ours = pending.map(\.identifier)
+            .filter { $0.hasPrefix(Self.idPrefix) && $0 != Self.breakReminderID }
         center.removePendingNotificationRequests(withIdentifiers: ours)
 
         let settings = Store.load(Store.settingsFile, default: AppSettings())
         guard settings.notificationsEnabled else { return }
+
+        // v3.2: no prayer nags during a "can't pray" break.
+        let breakProfile = Store.load(Store.profileFile, default: UserProfile.fresh(now: AppClock.now))
+        guard breakProfile.excusedModeSince == nil else { return }
 
         let status = await center.notificationSettings().authorizationStatus
         guard status == .authorized || status == .provisional else { return }

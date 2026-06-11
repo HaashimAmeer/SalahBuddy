@@ -18,13 +18,12 @@ struct StatsView: View {
                 VStack(spacing: 16) {
                     header
                     levelCard
+                    badgeStrip
                     weeklyXPCard
                     photoCalendarCard
-                    heatmapCard
                     statTiles
                     placesCard
                     challengesCard
-                    badgeCard
                 }
                 .padding(.horizontal, 16)
                 .padding(.bottom, 24)
@@ -56,62 +55,66 @@ struct StatsView: View {
 
     // MARK: - Level card
 
+    /// v3.2: condensed per the design session — one small row ("Level 1 ·
+    /// Seeker · 20/100 XP" + progress bar), still tappable for the level road.
     private var levelCard: some View {
-        VStack(spacing: 14) {
-            HStack(alignment: .firstTextBaseline, spacing: 14) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("LEVEL")
-                        .font(Theme.sans(13, .heavy))
-                        .foregroundStyle(Theme.inkMuted)
-                        .tracking(1.5)
-                    Text("\(state.level)")
-                        .font(Theme.sans(56, .heavy))
-                        .foregroundStyle(Theme.inkDeep)
-                        .contentTransition(.numericText())
-                }
-                Spacer()
+        VStack(spacing: 8) {
+            HStack(spacing: 8) {
+                Text("Level \(state.level)")
+                    .font(Theme.sans(17, .heavy))
+                    .foregroundStyle(Theme.inkDeep)
+                    .contentTransition(.numericText())
                 Text(state.levelTitle)
-                    .font(Theme.sans(16, .bold))
+                    .font(Theme.sans(12, .bold))
                     .foregroundStyle(.white)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 3)
                     .background(Capsule().fill(Theme.green))
-            }
-
-            VStack(spacing: 6) {
-                GeometryReader { geo in
-                    ZStack(alignment: .leading) {
-                        Capsule()
-                            .fill(Theme.greenSoft)
-                        Capsule()
-                            .fill(LinearGradient(colors: [Theme.gold, Theme.green],
-                                                 startPoint: .leading, endPoint: .trailing))
-                            .frame(width: max(12, geo.size.width * levelProgress))
-                            .animation(Theme.spring, value: levelProgress)
-                    }
-                }
-                .frame(height: 14)
-
-                HStack {
-                    Text("\(state.xpIntoLevel) / \(state.xpNeededForLevel) XP")
-                        .font(Theme.sans(13, .bold))
-                        .foregroundStyle(Theme.inkMuted)
-                    Spacer()
-                    HStack(spacing: 3) {
-                        Text("See all levels")
-                            .font(Theme.sans(13, .bold))
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 11, weight: .bold))
-                    }
+                Spacer()
+                Text("\(state.xpIntoLevel)/\(state.xpNeededForLevel) XP")
+                    .font(Theme.sans(12, .bold))
+                    .foregroundStyle(Theme.inkMuted)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .bold))
                     .foregroundStyle(Theme.gold)
+            }
+
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(Theme.greenSoft)
+                    Capsule()
+                        .fill(LinearGradient(colors: [Theme.gold, Theme.green],
+                                             startPoint: .leading, endPoint: .trailing))
+                        .frame(width: max(8, geo.size.width * levelProgress))
+                        .animation(Theme.spring, value: levelProgress)
                 }
             }
+            .frame(height: 8)
         }
-        .padding(18)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
         .frame(maxWidth: .infinity)
         .cardStyle()
         .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         .onTapGesture { showLevelRoad = true }
+    }
+
+    /// v3.2: badges out of hiding — a horizontal strip right under the level
+    /// row, earned first.
+    private var badgeStrip: some View {
+        let earned = Badges.all.filter { state.profile.earnedBadges[$0.id] != nil }
+        let unearned = Badges.all.filter { state.profile.earnedBadges[$0.id] == nil }
+        return ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 14) {
+                ForEach(earned + unearned) { badge in
+                    BadgeIcon(badge: badge, earned: state.profile.earnedBadges[badge.id] != nil)
+                        .frame(width: 64)
+                }
+            }
+            .padding(.horizontal, 4)
+            .padding(.vertical, 2)
+        }
     }
 
     private var levelProgress: Double {
@@ -219,12 +222,14 @@ struct StatsView: View {
                 }
             }
 
+            memoriesLegend
+
             if summaries.isEmpty {
                 HStack(spacing: 6) {
                     Image(systemName: "sparkles")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(Theme.gold)
-                    Text("No photos this month yet — post a prayer to start your memories!")
+                    Text("No photos this month yet — post a prayer, then tap a day to relive it!")
                         .font(Theme.sans(13, .semibold))
                         .foregroundStyle(Theme.inkMuted)
                 }
@@ -236,53 +241,80 @@ struct StatsView: View {
         .cardStyle()
     }
 
+    /// v3.2: the memories calendar IS the color calendar now (the separate
+    /// 5-week heatmap is gone). Cells are colored by how the day went —
+    /// distinct hues, not shades — and tapping a day with photos opens its
+    /// carousel.
     @ViewBuilder
     private func calendarCell(day: (dayKey: String, date: Date, dayNumber: Int),
                               summary: DayPhotoSummary?) -> some View {
         let isFuture = day.date > AppClock.now
         let isExcused = state.profile.excusedDayKeys.contains(day.dayKey)
+        let logged = loggedCount(dayKey: day.dayKey)
+        let hasPhotos = (summary?.photoFilenames.isEmpty == false)
 
-        Group {
-            if let summary, let first = summary.photoFilenames.first {
-                Button { selectedSummary = summary } label: {
-                    PhotoThumb(filename: first)
-                        .aspectRatio(1, contentMode: .fit)
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                        .overlay(alignment: .topLeading) {
-                            Text("\(day.dayNumber)")
-                                .font(Theme.sans(9, .heavy))
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 4)
-                                .padding(.vertical, 1)
-                                .background(Capsule().fill(Theme.inkDeep.opacity(0.55)))
-                                .padding(3)
-                        }
-                }
-                .buttonStyle(.plain)
-            } else {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(isExcused ? Theme.lilac.opacity(0.35)
-                          : isFuture ? Theme.greenSoft.opacity(0.25)
-                          : Theme.greenSoft.opacity(0.5))
-                    .aspectRatio(1, contentMode: .fit)
-                    .overlay {
-                        if isExcused {
-                            Image(systemName: "moon.fill")
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(Theme.lilac)
-                        } else {
-                            Text("\(day.dayNumber)")
-                                .font(Theme.sans(11, .semibold))
-                                .foregroundStyle(Theme.inkMuted.opacity(isFuture ? 0.4 : 0.8))
-                        }
+        Button {
+            if let summary, hasPhotos { selectedSummary = summary }
+        } label: {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(dayColor(logged: logged, excused: isExcused, future: isFuture))
+                .aspectRatio(1, contentMode: .fit)
+                .overlay {
+                    if isExcused {
+                        Image(systemName: "moon.fill")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.white)
+                    } else {
+                        Text("\(day.dayNumber)")
+                            .font(Theme.sans(11, logged > 0 ? .bold : .semibold))
+                            .foregroundStyle(logged > 0 ? .white : Theme.inkMuted.opacity(isFuture ? 0.4 : 0.8))
                     }
-            }
+                }
+                .overlay(alignment: .bottomTrailing) {
+                    if hasPhotos {
+                        Image(systemName: "camera.fill")
+                            .font(.system(size: 7, weight: .bold))
+                            .foregroundStyle(.white.opacity(0.95))
+                            .padding(3)
+                    }
+                }
         }
+        .buttonStyle(.plain)
+        .disabled(!hasPhotos)
         .overlay {
             if day.dayKey == todayKey {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .strokeBorder(Theme.green, lineWidth: 2)
+                    .strokeBorder(Theme.inkDeep.opacity(0.6), lineWidth: 2)
             }
+        }
+    }
+
+    /// Distinct prayers logged that day (in-window or made up).
+    private func loggedCount(dayKey: String) -> Int {
+        Set(state.logs.lazy.filter { $0.dayKey == dayKey }.map(\.prayer)).count
+    }
+
+    /// Distinct hues for separation (design session): green = all 5,
+    /// amber = 3–4, gold = 1–2, mist = none, lilac = excused. Never red.
+    private func dayColor(logged: Int, excused: Bool, future: Bool) -> Color {
+        if excused { return Theme.lilac }
+        if future { return Theme.greenSoft.opacity(0.25) }
+        switch logged {
+        case 5: return Theme.green
+        case 3...4: return Theme.amber
+        case 1...2: return Theme.gold.opacity(0.85)
+        default: return Theme.mist.opacity(0.6)
+        }
+    }
+
+    private var memoriesLegend: some View {
+        HStack(spacing: 10) {
+            legendSwatch(Theme.green, "All 5")
+            legendSwatch(Theme.amber, "3–4")
+            legendSwatch(Theme.gold.opacity(0.85), "1–2")
+            legendSwatch(Theme.lilac, "Excused")
+            legendSwatch(Theme.mist.opacity(0.6), "None")
+            Spacer()
         }
     }
 
@@ -327,54 +359,6 @@ struct StatsView: View {
         }
     }
 
-    // MARK: - 5-week heatmap (v2 grid color language)
-
-    private var heatmapCard: some View {
-        let recaps = state.recaps(daysBack: 35)
-        let columns = Array(repeating: GridItem(.flexible(), spacing: 6), count: 7)
-        return VStack(alignment: .leading, spacing: 12) {
-            sectionTitle("Last 5 weeks", symbol: "calendar", color: Theme.green)
-
-            LazyVGrid(columns: columns, spacing: 6) {
-                ForEach(recaps, id: \.dayKey) { recap in
-                    let excused = state.profile.excusedDayKeys.contains(recap.dayKey)
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(heatColor(recap: recap, excused: excused))
-                        .aspectRatio(1, contentMode: .fit)
-                        .overlay {
-                            if excused {
-                                Image(systemName: "moon.fill")
-                                    .font(.system(size: 9, weight: .semibold))
-                                    .foregroundStyle(.white.opacity(0.9))
-                            } else if recap.isPerfect {
-                                Image(systemName: "star.fill")
-                                    .font(.system(size: 9))
-                                    .foregroundStyle(.white.opacity(0.9))
-                            }
-                        }
-                        .overlay {
-                            if recap.dayKey == todayKey {
-                                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                    .strokeBorder(Theme.inkDeep.opacity(0.5), lineWidth: 2)
-                            }
-                        }
-                }
-            }
-
-            // Legend — the §2 grid color language.
-            HStack(spacing: 10) {
-                legendSwatch(Color(hex: 0x1F8A50), "In window")
-                legendSwatch(Theme.qadaBlue, "Made up")
-                legendSwatch(Theme.lilac, "Excused")
-                legendSwatch(Theme.mist, "Missed")
-                Spacer()
-            }
-        }
-        .padding(18)
-        .frame(maxWidth: .infinity)
-        .cardStyle()
-    }
-
     private func legendSwatch(_ color: Color, _ label: String) -> some View {
         HStack(spacing: 4) {
             RoundedRectangle(cornerRadius: 3, style: .continuous)
@@ -386,56 +370,41 @@ struct StatsView: View {
         }
     }
 
-    /// §2 grid language per day: lilac = excused, greens scale with in-window
-    /// count (deep green at 5), blue = made-up-only day, mist = missed.
-    private func heatColor(recap: DayRecap, excused: Bool) -> Color {
-        if excused { return Theme.lilac }
-        if recap.inWindowCount > 0 {
-            switch min(5, recap.inWindowCount) {
-            case 1: return Theme.green.opacity(0.30)
-            case 2: return Theme.green.opacity(0.50)
-            case 3: return Theme.green.opacity(0.70)
-            case 4: return Theme.green.opacity(0.88)
-            default: return Color(hex: 0x1F8A50)   // deep green — all 5 in window
-            }
-        }
-        if recap.loggedCount > 0 { return Theme.qadaBlue }          // qada-only day
-        if recap.dayKey == todayKey { return Theme.greenSoft.opacity(0.5) }  // today, nothing yet
-        return Theme.mist                                            // missed (never red)
-    }
-
-    // MARK: - Stat tiles
+    // MARK: - All-time stats (v3.2: one compact card, explicit names)
 
     private var statTiles: some View {
-        let tiles: [(symbol: String, color: Color, value: String, label: String)] = [
-            ("flame.fill", Theme.amber, "\(state.profile.longestStreak)", "Longest streak"),
-            ("star.fill", Theme.gold, "\(state.profile.perfectDayCount)", "Perfect days"),
-            ("hands.sparkles.fill", Theme.qadaBlue, "\(state.logs.count)", "Prayers logged"),
-            ("bolt.fill", Theme.lilac, "\(state.profile.totalXP)", "Total XP"),
+        let rows: [(symbol: String, color: Color, value: String, label: String)] = [
+            ("flame.fill", Theme.amber, "\(state.profile.longestStreak) days", "Longest streak ever"),
+            ("star.fill", Theme.gold, "\(state.profile.perfectDayCount)", "Perfect days — all time"),
+            ("hands.sparkles.fill", Theme.qadaBlue, "\(state.logs.count)", "Prayers logged — all time"),
+            ("bolt.fill", Theme.lilac, "\(state.profile.totalXP)", "Total XP — all time"),
         ]
-        let columns = Array(repeating: GridItem(.flexible(), spacing: 12), count: 2)
-        return LazyVGrid(columns: columns, spacing: 12) {
-            ForEach(tiles, id: \.label) { tile in
-                VStack(spacing: 6) {
-                    Image(systemName: tile.symbol)
-                        .font(.system(size: 22, weight: .bold))
-                        .foregroundStyle(tile.color)
-                    Text(tile.value)
-                        .font(Theme.sans(28, .heavy))
+        return VStack(alignment: .leading, spacing: 0) {
+            sectionTitle("All-time stats", symbol: "chart.bar.fill", color: Theme.lilac)
+                .padding(.bottom, 6)
+            ForEach(Array(rows.enumerated()), id: \.element.label) { i, row in
+                HStack(spacing: 10) {
+                    Image(systemName: row.symbol)
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(row.color)
+                        .frame(width: 26)
+                    Text(row.label)
+                        .font(Theme.sans(14, .semibold))
+                        .foregroundStyle(Theme.inkMuted)
+                    Spacer()
+                    Text(row.value)
+                        .font(Theme.sans(16, .heavy))
                         .foregroundStyle(Theme.inkDeep)
                         .contentTransition(.numericText())
-                        .minimumScaleFactor(0.6)
-                        .lineLimit(1)
-                    Text(tile.label)
-                        .font(Theme.sans(13, .semibold))
-                        .foregroundStyle(Theme.inkMuted)
                 }
-                .padding(.vertical, 18)
-                .padding(.horizontal, 10)
-                .frame(maxWidth: .infinity)
-                .cardStyle()
+                .padding(.vertical, 9)
+                if i < rows.count - 1 { Divider() }
             }
         }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity)
+        .cardStyle()
     }
 
     // MARK: - Places (v3)
@@ -508,38 +477,6 @@ struct StatsView: View {
                 VStack(spacing: 10) {
                     ForEach(personal) { progress in
                         ChallengeCard(progress: progress)
-                    }
-                }
-            }
-        }
-        .padding(18)
-        .frame(maxWidth: .infinity)
-        .cardStyle()
-    }
-
-    // MARK: - Badge grid
-
-    private var badgeCard: some View {
-        let columns = Array(repeating: GridItem(.flexible(), spacing: 12), count: 4)
-        return VStack(alignment: .leading, spacing: 14) {
-            sectionTitle("Badges", symbol: "rosette", color: Theme.gold)
-
-            LazyVGrid(columns: columns, spacing: 16) {
-                ForEach(Badges.all) { badge in
-                    let earnedDate = state.profile.earnedBadges[badge.id]
-                    VStack(spacing: 4) {
-                        BadgeIcon(badge: badge, earned: earnedDate != nil)
-                        if let date = earnedDate {
-                            Text(date, format: .dateTime.month(.abbreviated).day())
-                                .font(Theme.sans(10, .semibold))
-                                .foregroundStyle(Theme.gold)
-                        } else {
-                            Text(badge.detail)
-                                .font(Theme.sans(9, .medium))
-                                .foregroundStyle(Theme.inkMuted.opacity(0.8))
-                                .multilineTextAlignment(.center)
-                                .lineLimit(2)
-                        }
                     }
                 }
             }

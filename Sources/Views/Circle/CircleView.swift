@@ -13,6 +13,8 @@ import SwiftUI
 struct CircleView: View {
     @EnvironmentObject private var state: AppState
 
+    @State private var creatingChallenge = false
+
     var body: some View {
         ZStack {
             Theme.bg.ignoresSafeArea()
@@ -21,6 +23,11 @@ struct CircleView: View {
             TimelineView(.periodic(from: .now, by: 30)) { _ in
                 content
             }
+        }
+        .sheet(isPresented: $creatingChallenge) {
+            CreateChallengeSheet()
+                .environmentObject(state)
+                .presentationDetents([.medium])
         }
     }
 
@@ -42,10 +49,31 @@ struct CircleView: View {
                     WeekGridView(rows: state.weekRows())
                 }
 
-                SectionHeader(title: "Group challenges", accent: "✦")
+                HStack {
+                    SectionHeader(title: "Group challenges", accent: "✦")
+                    Spacer()
+                    // v3.2: circles can make their own challenges.
+                    Button {
+                        creatingChallenge = true
+                    } label: {
+                        Image(systemName: "plus.circle.fill")
+                            .font(.system(size: 24, weight: .semibold))
+                            .foregroundStyle(Theme.green)
+                    }
+                    .buttonStyle(.plain)
+                }
                 VStack(spacing: 12) {
                     ForEach(state.challenges().filter(\.isGroup)) { progress in
                         ChallengeCard(progress: progress)
+                            .contextMenu {
+                                if progress.id.hasPrefix("custom-") {
+                                    Button(role: .destructive) {
+                                        state.deleteCustomChallenge(id: progress.id)
+                                    } label: {
+                                        Label("Remove challenge", systemImage: "trash")
+                                    }
+                                }
+                            }
                     }
                 }
             }
@@ -246,5 +274,68 @@ extension AppState {
             memberWeekLogs.append((you, logs.filter { weekKeySet.contains($0.dayKey) }))
         }
         return ChallengeEngine.raceWinnerID(memberWeekLogs: memberWeekLogs, threshold: 300)
+    }
+}
+
+// MARK: - Create challenge (v3.2)
+
+/// Wheel-picker pop-up from the design session: pick the prayer and the
+/// number of days; everyone in the circle has to log it that many days in a
+/// row. Reward scales with length.
+struct CreateChallengeSheet: View {
+    @EnvironmentObject private var state: AppState
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var prayer: Prayer = .fajr
+    @State private var days = 3
+
+    var body: some View {
+        VStack(spacing: 18) {
+            Capsule()
+                .fill(Theme.mist.opacity(0.6))
+                .frame(width: 38, height: 5)
+                .padding(.top, 10)
+
+            Text("New group challenge 🤝")
+                .font(Theme.sans(20, .bold))
+                .foregroundStyle(Theme.inkDeep)
+
+            Text("Everyone in the circle logs…")
+                .font(Theme.sans(13, .semibold))
+                .foregroundStyle(Theme.inkMuted)
+
+            HStack(spacing: 0) {
+                Picker("Prayer", selection: $prayer) {
+                    ForEach(Prayer.allCases) { p in
+                        Text("\(p.emoji) \(p.displayName)").tag(p)
+                    }
+                }
+                .pickerStyle(.wheel)
+                .frame(maxWidth: .infinity)
+
+                Picker("Days", selection: $days) {
+                    ForEach(2...7, id: \.self) { d in
+                        Text("\(d) days").tag(d)
+                    }
+                }
+                .pickerStyle(.wheel)
+                .frame(maxWidth: .infinity)
+            }
+            .frame(height: 130)
+
+            Text("Reward: +\(days * 15) XP each")
+                .font(Theme.sans(14, .bold))
+                .foregroundStyle(Theme.gold)
+
+            ChunkyButton(title: "Start the challenge", color: Theme.green, isEnabled: true) {
+                state.createCustomChallenge(prayer: prayer, days: days)
+                dismiss()
+            }
+            .padding(.horizontal, 20)
+
+            Spacer(minLength: 8)
+        }
+        .frame(maxWidth: .infinity)
+        .background(Theme.bg)
     }
 }

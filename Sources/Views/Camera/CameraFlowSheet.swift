@@ -82,7 +82,7 @@ struct PostConfirmView: View {
                 placePicker
 
                 if let tier = state.potentialTier(for: prayer), tier.isInWindow {
-                    Text("+\(tier.xp + (jamaat ? GameEngine.jamaatBonus : 0)) XP — \(tier.label)")
+                    Text("+\(tier.xp + (jamaat ? congregationBonus : 0)) XP — \(tier.label)")
                         .font(Theme.sans(15, .bold))
                         .foregroundStyle(Theme.gold)
                         .animation(Theme.spring, value: jamaat)
@@ -143,6 +143,14 @@ struct PostConfirmView: View {
             .shadow(color: .black.opacity(0.05), radius: 10, x: 0, y: 2)
     }
 
+    /// v3.2: on Fridays the Dhuhr toggle becomes Jumma with a bigger bonus.
+    private var isJumma: Bool {
+        GameEngine.isJumma(prayer: prayer, date: AppClock.now)
+    }
+    private var congregationBonus: Int {
+        GameEngine.congregationBonus(prayer: prayer, date: AppClock.now)
+    }
+
     /// v3: the whole card is the tap target — a big selectable chip instead
     /// of a small iOS toggle nobody noticed.
     private var jamaatToggle: some View {
@@ -154,10 +162,12 @@ struct PostConfirmView: View {
                 Text("🕌")
                     .font(.system(size: 26))
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("Prayed in jamaat")
+                    Text(isJumma ? "Prayed Jumma" : "Prayed in jamaat")
                         .font(Theme.sans(16, .bold))
                         .foregroundStyle(Theme.inkDeep)
-                    Text("Tap if you prayed in congregation · +\(GameEngine.jamaatBonus) XP")
+                    Text(isJumma
+                         ? "It's Friday! Jumma earns +\(congregationBonus) XP"
+                         : "Tap if you prayed in congregation · +\(congregationBonus) XP")
                         .font(Theme.sans(12, .semibold))
                         .foregroundStyle(Theme.inkMuted)
                 }

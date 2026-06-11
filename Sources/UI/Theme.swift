@@ -57,6 +57,7 @@ enum Theme {
             case .onTime: return Color(hex: 0x1F8A50)   // deep green
             case .prayed: return green                  // mid green
             case .lastCall: return amber
+            case .closeCall: return amber.opacity(0.8)  // 4th quarter
             case .qada: return qadaBlue                 // defensive (shouldn't occur)
             }
         case .qada: return qadaBlue

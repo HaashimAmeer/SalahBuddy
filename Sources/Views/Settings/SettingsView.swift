@@ -13,6 +13,7 @@ struct SettingsView: View {
     @State private var notificationStatus: UNAuthorizationStatus = .notDetermined
     @State private var showDeniedAlert = false
     @State private var showResetConfirm = false
+    @State private var showScoring = false
 
     var body: some View {
         ZStack {
@@ -102,27 +103,52 @@ struct SettingsView: View {
 
             Divider()
 
-            // v2: excused-day allowance for the current calendar month.
+            // v3.2: excused is a break MODE now — no monthly cap, just a count.
             HStack(spacing: 8) {
                 Image(systemName: "moon.fill")
                     .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(Theme.lilac)
-                Text("Excused days this month")
+                Text(state.isOnBreak ? "On a break — excused days this month" : "Excused days this month")
                     .font(Theme.sans(15, .semibold))
                     .foregroundStyle(Theme.inkDeep)
                 Spacer()
-                Text("\(state.excusedUsedThisMonth)/\(GameEngine.maxExcusedPerMonth)")
+                Text("\(state.excusedUsedThisMonth)")
                     .font(Theme.sans(15, .bold))
-                    .foregroundStyle(state.excusedUsedThisMonth >= GameEngine.maxExcusedPerMonth
-                                     ? Theme.lilac : Theme.inkDeep)
+                    .foregroundStyle(Theme.inkDeep)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 4)
                     .background(Capsule().fill(Theme.lilac.opacity(0.15)))
             }
+
+            Divider()
+
+            // v3.2: how scoring works — the explainer from the design session.
+            Button {
+                showScoring = true
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "questionmark.circle.fill")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(Theme.gold)
+                    Text("How scoring works")
+                        .font(Theme.sans(15, .semibold))
+                        .foregroundStyle(Theme.inkDeep)
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(Theme.inkMuted)
+                }
+            }
+            .buttonStyle(.plain)
         }
         .padding(18)
         .frame(maxWidth: .infinity)
         .cardStyle()
+        .sheet(isPresented: $showScoring) {
+            ScoringExplainerSheet()
+                .presentationDetents([.large, .medium])
+                .presentationDragIndicator(.visible)
+        }
     }
 
     private func commitName() {
@@ -502,6 +528,101 @@ struct SettingsView: View {
                 .font(Theme.sans(18, .bold))
                 .foregroundStyle(Theme.inkDeep)
             Spacer()
+        }
+    }
+}
+
+// MARK: - Scoring explainer (v3.2)
+
+/// Plain-English walkthrough of the point system — mirrors SCORING.md.
+struct ScoringExplainerSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        ZStack {
+            Theme.bg.ignoresSafeArea()
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 16) {
+                    HStack {
+                        Text("How scoring works ⚡")
+                            .font(Theme.sans(24, .bold))
+                            .foregroundStyle(Theme.inkDeep)
+                        Spacer()
+                        Button { dismiss() } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 24))
+                                .foregroundStyle(Theme.inkMuted.opacity(0.5))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.top, 18)
+
+                    card("⏱ Pray early, earn more") {
+                        row("First quarter of the window", "+30 XP", Theme.green)
+                        row("Second quarter", "+20 XP", Theme.green)
+                        row("Third quarter", "+15 XP", Theme.amber)
+                        row("Final quarter", "+12 XP", Theme.amber)
+                        row("Made up later (Qada)", "+10 XP", Theme.qadaBlue)
+                    }
+
+                    card("🎁 Bonuses") {
+                        row("Perfect day — all 5 in their windows", "+25 XP", Theme.gold)
+                        row("Prayed in jamaat", "+5 XP", Theme.gold)
+                        row("Jumma on Friday", "+10 XP", Theme.gold)
+                        row("Dhikr while on a break (up to 5/day, private)", "+5 XP", Theme.lilac)
+                    }
+
+                    card("🔥 Streaks") {
+                        bullet("Log all 5 prayers in a day to extend your streak.")
+                        bullet("Every 7-day streak banks a streak freeze (max 2) that covers a missed day.")
+                        bullet("Breaks (\"Can't pray right now\") pause everything — your streak is safe until you resume.")
+                    }
+
+                    card("🏆 The circle") {
+                        bullet("Weekly scores reset every Monday and count prayer XP + bonuses.")
+                        bullet("Dhikr XP is private — it levels you up but never appears on the scoreboard.")
+                        bullet("Win the weekly race and the next target gets higher.")
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.bottom, 30)
+            }
+        }
+    }
+
+    private func card(_ title: String, @ViewBuilder content: () -> some View) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title)
+                .font(Theme.sans(16, .bold))
+                .foregroundStyle(Theme.inkDeep)
+            content()
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .cardStyle()
+    }
+
+    private func row(_ label: String, _ value: String, _ color: Color) -> some View {
+        HStack {
+            Text(label)
+                .font(Theme.sans(14, .semibold))
+                .foregroundStyle(Theme.inkMuted)
+            Spacer()
+            Text(value)
+                .font(Theme.sans(14, .heavy))
+                .foregroundStyle(color)
+        }
+    }
+
+    private func bullet(_ text: String) -> some View {
+        HStack(alignment: .top, spacing: 7) {
+            Text("•")
+                .font(Theme.sans(14, .bold))
+                .foregroundStyle(Theme.green)
+            Text(text)
+                .font(Theme.sans(14, .semibold))
+                .foregroundStyle(Theme.inkMuted)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }

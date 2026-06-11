@@ -219,12 +219,14 @@ final class V2CoreTests: XCTestCase {
                          weekDayKeys: [String] = ["d01", "d02", "d03", "d04", "d05", "d06", "d07"],
                          weekKey: String = "2026-W24",
                          hardestPrayer: Prayer? = nil,
-                         completions: [String: Date] = [:]) -> ChallengeEngine.Context {
+                         completions: [String: Date] = [:],
+                         customChallenges: [CustomChallenge] = []) -> ChallengeEngine.Context {
         let recent = recentDayKeys ?? (1...7).map { String(format: "d%02d", $0) }
         return ChallengeEngine.Context(myLogs: myLogs, memberWeekLogs: memberWeekLogs,
                                        todayKey: todayKey, recentDayKeys: recent,
                                        weekDayKeys: weekDayKeys, weekKey: weekKey,
-                                       hardestPrayer: hardestPrayer, completions: completions)
+                                       hardestPrayer: hardestPrayer, completions: completions,
+                                       customChallenges: customChallenges)
     }
 
     func testFajr3ConsecutiveLogicWithGapReset() {
@@ -351,6 +353,70 @@ final class V2CoreTests: XCTestCase {
                               weekKey: "2026-W24",
                               completions: ["isha3|2026-W24": Date()])
         XCTAssertFalse(ChallengeEngine.newlyCompleted(blocked).map(\.key).contains("isha3|2026-W24"))
+    }
+
+    func testCustomChallengeProgressRequiresAllMembers() {
+        let custom = CustomChallenge(id: "custom-test", prayer: .fajr, days: 3,
+                                     createdAt: date(2026, 6, 8, 0, 0))
+        let a = member("a"), you = member("you", isYou: true)
+        func fajrLogs(_ days: [String]) -> [PrayerLog] { days.map { log(.fajr, .prayed, dayKey: $0) } }
+
+        var ctx = context(memberWeekLogs: [(a, fajrLogs(["d05", "d06", "d07"])),
+                                           (you, fajrLogs(["d05", "d06", "d07"]))],
+                          customChallenges: [custom])
+        let def = ChallengeEngine.activeDefinitions(ctx).first { $0.id == "custom-test" }!
+        XCTAssertEqual(def.target, 3)
+        XCTAssertEqual(def.rewardXP, 45)   // 15 × days
+        XCTAssertTrue(def.isGroup)
+        XCTAssertEqual(ChallengeEngine.current(for: def, ctx: ctx), 3)
+        XCTAssertTrue(ChallengeEngine.isCompletedNow(def, ctx: ctx))
+        XCTAssertTrue(ChallengeEngine.newlyCompleted(ctx).map(\.key).contains("custom-test|2026-W24"))
+
+        // One member missing a day breaks the run.
+        ctx = context(memberWeekLogs: [(a, fajrLogs(["d05", "d07"])),
+                                       (you, fajrLogs(["d05", "d06", "d07"]))],
+                      customChallenges: [custom])
+        XCTAssertEqual(ChallengeEngine.current(for: def, ctx: ctx), 1)
+    }
+
+    func testRaceTargetEscalatesAfterWins() {
+        XCTAssertEqual(ChallengeEngine.raceTarget(completions: [:]), 300)
+        XCTAssertEqual(ChallengeEngine.raceTarget(completions: ["race300|2026-W22": Date()]), 400)
+        XCTAssertEqual(ChallengeEngine.raceTarget(completions: ["race300|2026-W22": Date(),
+                                                                "race300|2026-W23": Date(),
+                                                                "fullday": Date()]), 500)
+        // The adjusted definition carries the escalated target.
+        let ctx = context(completions: ["race300|2026-W22": Date()])
+        let def = ChallengeEngine.activeDefinitions(ctx).first { $0.id == "race300" }!
+        XCTAssertEqual(def.target, 400)
+        XCTAssertEqual(def.title, "Race to 400")
+    }
+
+    func testBreakModeProfileFieldsDecode() throws {
+        // v3.1 profile JSON without break/dhikr/custom fields still decodes.
+        let json = """
+        {"name":"H","totalXP":10,"streak":1,"longestStreak":1,"streakFreezes":0,
+         "earnedBadges":{},"perfectDayCount":0,"joinedAt":"2026-06-01T00:00:00Z",
+         "excusedDayKeys":[],"challengeCompletions":{}}
+        """.data(using: .utf8)!
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let profile = try decoder.decode(UserProfile.self, from: json)
+        XCTAssertNil(profile.excusedModeSince)
+        XCTAssertTrue(profile.dhikrByDay.isEmpty)
+        XCTAssertTrue(profile.customChallenges.isEmpty)
+
+        // Round-trip with the new fields survives.
+        var p = profile
+        p.excusedModeSince = "2026-06-10"
+        p.dhikrByDay["2026-06-10"] = 3
+        p.customChallenges = [CustomChallenge(id: "custom-x", prayer: .isha, days: 4,
+                                              createdAt: Date(timeIntervalSince1970: 0))]
+        let data = try JSONEncoder().encode(p)
+        let decoded = try JSONDecoder().decode(UserProfile.self, from: data)
+        XCTAssertEqual(decoded.excusedModeSince, "2026-06-10")
+        XCTAssertEqual(decoded.dhikrByDay["2026-06-10"], 3)
+        XCTAssertEqual(decoded.customChallenges.first?.days, 4)
     }
 
     func testAllEightDefinitionsExist() {
