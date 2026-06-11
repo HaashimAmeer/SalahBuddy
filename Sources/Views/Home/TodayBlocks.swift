@@ -127,26 +127,28 @@ struct CurrentPrayerBlock: View {
                     .foregroundStyle(Theme.inkMuted)
                     .fixedSize(horizontal: false, vertical: true)
 
+                Text("Dhikr today · \(state.dhikrToday)/\(GameEngine.maxDhikrPerDay) · +\(GameEngine.dhikrXP) XP each")
+                    .font(Theme.sans(11, .semibold))
+                    .foregroundStyle(Theme.inkMuted.opacity(0.85))
+
+                // Equal-width, single-line, same-height buttons so they line up.
                 HStack(spacing: 10) {
+                    let dhikrMaxed = state.dhikrToday >= GameEngine.maxDhikrPerDay
                     Button {
                         UIImpactFeedbackGenerator(style: .light).impactOccurred()
                         withAnimation(Theme.spring) { state.logDhikr() }
                     } label: {
-                        HStack(spacing: 6) {
-                            Text("📿 Log dhikr")
-                                .font(Theme.sans(14, .bold))
-                            Text("+\(GameEngine.dhikrXP) XP · \(state.dhikrToday)/\(GameEngine.maxDhikrPerDay)")
-                                .font(Theme.sans(12, .semibold))
-                                .opacity(0.85)
-                        }
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 9)
-                        .background(Capsule().fill(
-                            state.dhikrToday < GameEngine.maxDhikrPerDay ? Theme.lilac : Theme.mist))
+                        Text("📿 Log dhikr")
+                            .font(Theme.sans(14, .bold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 11)
+                            .background(Capsule().fill(dhikrMaxed ? Theme.mist : Theme.lilac))
                     }
                     .buttonStyle(.plain)
-                    .disabled(state.dhikrToday >= GameEngine.maxDhikrPerDay)
+                    .disabled(dhikrMaxed)
 
                     Button {
                         withAnimation(Theme.spring) { state.resumePrayers() }
@@ -154,8 +156,10 @@ struct CurrentPrayerBlock: View {
                         Text("Resume prayers")
                             .font(Theme.sans(14, .bold))
                             .foregroundStyle(Theme.green)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 9)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 11)
                             .background(Capsule().strokeBorder(Theme.green, lineWidth: 1.5))
                     }
                     .buttonStyle(.plain)
@@ -771,7 +775,7 @@ struct ExcusedTodayFooter: View {
         .buttonStyle(.plain)
         // Sisters: period leads, framed as completely normal.
         .confirmationDialog("Need a break?", isPresented: $sisterConfirm, titleVisibility: .visible) {
-            Button("On my period 🌸") { withAnimation(Theme.spring) { state.startBreak(reason: "period") } }
+            Button("Monthly break 🌸") { withAnimation(Theme.spring) { state.startBreak(reason: "period") } }
             Button("Another reason") { withAnimation(Theme.spring) { state.startBreak(reason: "other") } }
             Button("Not now", role: .cancel) {}
         } message: {
