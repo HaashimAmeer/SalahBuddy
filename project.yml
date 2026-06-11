@@ -7,7 +7,7 @@ packages:
   Adhan: { url: https://github.com/batoulapps/adhan-swift, from: "1.4.0" }
 settings:
   base:
-    DEVELOPMENT_TEAM: DWNR6L5744
+    DEVELOPMENT_TEAM: 852AXZ2B57
 targets:
   SalahBuddy:
     type: application
