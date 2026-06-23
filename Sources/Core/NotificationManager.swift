@@ -121,14 +121,53 @@ final class NotificationManager {
             else { continue }
 
             for window in schedule.windows {
-                scheduleStart(for: window, dayKey: schedule.dayKey,
-                              now: now, horizon: horizon, streak: profile.streak,
-                              center: center)
-                scheduleLastCall(for: window, dayKey: schedule.dayKey,
-                                 now: now, horizon: horizon, logs: logs,
-                                 center: center)
+                // v3.6: each kind is its own toggle (design session).
+                if settings.notifyPrayerStart {
+                    scheduleStart(for: window, dayKey: schedule.dayKey,
+                                  now: now, horizon: horizon, streak: profile.streak,
+                                  center: center)
+                }
+                if settings.notifyLastCall {
+                    scheduleLastCall(for: window, dayKey: schedule.dayKey,
+                                     now: now, horizon: horizon, logs: logs,
+                                     center: center)
+                }
+                if settings.notifyFriendActivity {
+                    scheduleFriendActivity(for: window, dayKey: schedule.dayKey,
+                                           now: now, horizon: horizon, profile: profile,
+                                           center: center)
+                }
             }
         }
+    }
+
+    /// v3.6: optional "someone in your circle just posted" ping — one per
+    /// prayer window (the FIRST friend to post), so it never spams.
+    private func scheduleFriendActivity(for window: PrayerWindow, dayKey: String,
+                                        now: Date, horizon: Date, profile: UserProfile,
+                                        center: UNUserNotificationCenter) {
+        let buddies = BuddySimulator.activeBuddies(removed: profile.removedBuddyNames,
+                                                   invited: profile.invitedBuddyNames)
+        let firstPost: (buddy: BuddySimulator.Buddy, at: Date)? = buddies
+            .compactMap { buddy in
+                if case .inWindow(_, let loggedAt, _) = BuddySimulator.outcome(for: buddy, dayKey: dayKey,
+                                                                               window: window) {
+                    return (buddy, loggedAt)
+                }
+                return nil
+            }
+            .min { $0.at < $1.at }
+        guard let firstPost, firstPost.at > now, firstPost.at <= horizon else { return }
+
+        let content = UNMutableNotificationContent()
+        content.title = "\(firstPost.buddy.emoji) \(firstPost.buddy.name) just posted \(window.prayer.displayName)"
+        content.body = "Your circle is filling in — jump in!"
+        content.sound = .default
+
+        add(content: content,
+            fireDate: firstPost.at,
+            identifier: "\(Self.idPrefix)friend.\(dayKey).\(window.prayer.rawValue)",
+            now: now, center: center)
     }
 
     private func scheduleStart(for window: PrayerWindow, dayKey: String,

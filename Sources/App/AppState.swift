@@ -199,8 +199,8 @@ final class AppState: ObservableObject {
         let countsJamaat = inWindow && jamaat
         let countsPlace: PlaceTag? = inWindow ? placeTag : nil
         if let tag = countsPlace { rememberPlaceIfNeeded(tag) }
-        let congregationBonus = GameEngine.congregationBonus(prayer: prayer, date: AppClock.now)
-        let xp = tier.xp + (countsJamaat ? congregationBonus : 0)
+        // v3.8: jamaat is a floor (counts as on-time), not an additive bonus.
+        let xp = GameEngine.prayerXP(tier: tier, jamaat: countsJamaat)
         return PrayerLog(id: UUID(), prayer: prayer, dayKey: dayKey,
                          loggedAt: AppClock.now, tier: tier, xp: xp,
                          photoFilename: normalizedPhoto, jamaat: countsJamaat,
@@ -265,10 +265,34 @@ final class AppState: ObservableObject {
                                 perfectDay: perfectDay, streakExtended: streakExtended)
     }
 
-    /// Make-up path: tap-only, no photo, 10 XP. Only effective once the
+    /// Make-up path: tap-only, no photo, qada XP (5). Only effective once the
     /// window has passed (same schedule day).
     func logQada(_ prayer: Prayer) {
         log(prayer, photoFilename: nil, jamaat: false)
+    }
+
+    // MARK: - Editing past days (v3.6 — design session)
+
+    /// "I made it up but forgot to log it": retroactively mark a PAST day's
+    /// prayer as made up, from the Journey day sheet. Recent edits (≤2 days)
+    /// still earn qada XP; older ones earn nothing — same-day logging stays
+    /// the incentive. Never touches streak history (those days were already
+    /// reconciled).
+    func logPastMakeUp(_ prayer: Prayer, dayKey: String) {
+        guard dayKey < todayKey,                                   // past days only
+              !hasLog(prayer: prayer, dayKey: dayKey),
+              !isExcused(prayer: prayer, dayKey: dayKey) else { return }
+        let xp = GameEngine.lateEditXP(dayKey: dayKey, todayKey: todayKey)
+        logs.append(PrayerLog(id: UUID(), prayer: prayer, dayKey: dayKey,
+                              loggedAt: AppClock.now, tier: .qada, xp: xp))
+        profile.totalXP += xp
+        persist()
+        objectWillChange.send()
+    }
+
+    /// XP a retroactive make-up of `dayKey` would earn right now.
+    func lateEditXP(forDayKey dayKey: String) -> Int {
+        GameEngine.lateEditXP(dayKey: dayKey, todayKey: todayKey)
     }
 
     func undoLog(_ prayer: Prayer) {
@@ -338,6 +362,21 @@ final class AppState: ObservableObject {
 
     var isTodayExcused: Bool { profile.excusedDayKeys.contains(todayKey) }
 
+    /// v3.6: per-PRAYER excuse check. A break that starts at Asr must not
+    /// repaint that morning's Fajr as excused (and a mid-day resume must let
+    /// the rest of the day count again). Day-level semantics (streak,
+    /// calendar) still use `excusedDayKeys` membership.
+    func isExcused(prayer: Prayer, dayKey: String) -> Bool {
+        guard profile.excusedDayKeys.contains(dayKey) else { return false }
+        let order = Prayer.allCases
+        guard let idx = order.firstIndex(of: prayer) else { return false }
+        if let start = profile.partialExcuseStart[dayKey],
+           let s = order.firstIndex(of: start), idx < s { return false }
+        if let end = profile.partialExcuseEnd[dayKey],
+           let e = order.firstIndex(of: end), idx >= e { return false }
+        return true
+    }
+
     var excusedUsedThisMonth: Int {
         GameEngine.excusedCount(in: profile.excusedDayKeys, monthOf: todayKey)
     }
@@ -354,25 +393,64 @@ final class AppState: ObservableObject {
     var isBrother: Bool { settings.memberKind == "brother" }
 
     /// v3.4: reason tailors copy + reminder cadence. A period break commonly
-    /// runs up to ~10 days (and its prayers are waived, never made up); other
-    /// breaks nudge sooner.
+    /// runs ~7–10 days (and its prayers are waived, never made up); other
+    /// breaks nudge sooner. v3.6: a soft reminder lands at 7 days for periods
+    /// ("max is ~10, but everyone's different").
+    ///
+    /// v3.6 partial-day rule (design session): the excuse covers prayers from
+    /// the CURRENT time block onward. Anything already logged today keeps
+    /// counting, and an earlier missed prayer is NOT retroactively excused.
     func startBreak(reason: String? = nil) {
         guard !isOnBreak else { return }
-        profile.excusedModeSince = todayKey
         profile.breakReason = reason
-        profile.excusedDayKeys.insert(todayKey)
+        if let startPrayer = breakStartPrayer() {
+            profile.excusedModeSince = todayKey
+            profile.excusedDayKeys.insert(todayKey)
+            if startPrayer != Prayer.allCases.first {
+                profile.partialExcuseStart[todayKey] = startPrayer
+            }
+        } else {
+            // Today is fully decided (everything logged/passed) — the break
+            // effectively starts tomorrow.
+            profile.excusedModeSince = AppClock.dayKey(
+                for: AppClock.now.addingTimeInterval(24 * 3600))
+        }
         persistProfile()
-        NotificationManager.shared.scheduleBreakReminder(daysFromNow: reason == "period" ? 10 : 5,
+        NotificationManager.shared.scheduleBreakReminder(daysFromNow: reason == "period" ? 7 : 5,
                                                          reason: reason)
         objectWillChange.send()
     }
 
-    /// End the break. Today is un-excused so prayers count again immediately.
-    func resumePrayers() {
+    /// First prayer of today the break should waive: the earliest unlogged
+    /// prayer whose window is still open or ahead. nil → nothing left today.
+    private func breakStartPrayer() -> Prayer? {
+        guard let schedule = todaySchedule else { return Prayer.allCases.first }
+        let now = AppClock.now
+        for window in schedule.windows.sorted(by: { $0.start < $1.start }) {
+            guard !hasLog(prayer: window.prayer, dayKey: todayKey) else { continue }
+            if now < window.end { return window.prayer }
+            // ended & unlogged — that miss predates the break; not excused.
+        }
+        return nil
+    }
+
+    /// End the break. `startingAgainAt` is the answer to "When did you start
+    /// praying again?" — prayers from that one onward count today; earlier
+    /// ones stay excused. nil (or the day's first prayer) un-excuses the
+    /// whole day.
+    func resumePrayers(startingAgainAt prayer: Prayer? = nil) {
         guard isOnBreak else { return }
         profile.excusedModeSince = nil
         profile.breakReason = nil
-        profile.excusedDayKeys.remove(todayKey)
+        if let prayer,
+           let idx = Prayer.allCases.firstIndex(of: prayer), idx > 0,
+           profile.excusedDayKeys.contains(todayKey) {
+            profile.partialExcuseEnd[todayKey] = prayer
+        } else {
+            profile.excusedDayKeys.remove(todayKey)
+            profile.partialExcuseStart[todayKey] = nil
+            profile.partialExcuseEnd[todayKey] = nil
+        }
         persistProfile()
         NotificationManager.shared.cancelBreakReminder()
         NotificationManager.shared.reschedule()
@@ -404,16 +482,38 @@ final class AppState: ObservableObject {
         persistProfile()
     }
 
-    // MARK: - Recharge: dhikr + good deeds (v3.5 — private XP while on a break)
+    // MARK: - Recharge: dhikr + good deeds (v3.8 — permanent, for everyone)
 
     var dhikrToday: Int { profile.dhikrByDay[todayKey] ?? 0 }
     var recoveryXPToday: Int { profile.recoveryXPByDay[todayKey] ?? 0 }
-    var recoveryXPRemaining: Int { max(0, GameEngine.recoveryDailyXPCap - recoveryXPToday) }
+
+    /// Today's prayer-only XP (logs + perfect-day bonus), used to size the
+    /// recovery cap for someone who CAN pray (combined ceiling of 150).
+    var prayerXPToday: Int {
+        let base = todayLogs.reduce(0) { $0 + $1.xp }
+        let perfect = GameEngine.isPerfectDay(logs: logs, dayKey: todayKey,
+                                              excusedDayKeys: profile.excusedDayKeys)
+        return base + (perfect ? GameEngine.perfectDayBonus : 0)
+    }
+
+    /// v3.8: dhikr ceiling depends on state — 200 on a break, else only enough
+    /// to top a prayed day up to 150.
+    var recoveryDailyCap: Int {
+        GameEngine.recoveryDailyCap(onBreak: isOnBreak, prayerXPToday: prayerXPToday)
+    }
+
+    /// The headline number shown on the Dhikr tab ("up to N"): the flat
+    /// ceiling for your state — 200 on a break, 150 otherwise — NOT the
+    /// prayer-adjusted remainder, which read as a confusing "135".
+    var recoveryDisplayCeiling: Int {
+        isOnBreak ? GameEngine.recoveryBreakCap : GameEngine.recoveryDayCeiling
+    }
+    var recoveryXPRemaining: Int { max(0, recoveryDailyCap - recoveryXPToday) }
     var isRecoveryCapped: Bool { recoveryXPRemaining == 0 }
     var deedsDoneToday: Set<String> { Set(profile.deedsByDay[todayKey] ?? []) }
 
     /// Tasbih tap: ALWAYS counts (unlimited, never blocked). XP accrues only up
-    /// to the gentle daily cap — past it the act continues, just without points.
+    /// to today's cap — past it the act continues, just without points.
     func tapTasbih() {
         profile.dhikrByDay[todayKey, default: 0] += 1
         awardRecoveryXP(GameEngine.dhikrXP)
@@ -421,7 +521,7 @@ final class AppState: ObservableObject {
     }
 
     /// Complete a good-deed prompt for today: once per deed per day, +deedXP
-    /// (subject to the same shared soft cap).
+    /// (subject to the same shared cap).
     func completeDeed(_ id: String) {
         guard !deedsDoneToday.contains(id) else { return }
         profile.deedsByDay[todayKey, default: []].append(id)
@@ -429,9 +529,10 @@ final class AppState: ObservableObject {
         persistProfile()
     }
 
-    /// Grant up to `amount` XP, never exceeding today's recovery cap.
+    /// Grant up to `amount` XP, never exceeding today's state-aware cap.
     private func awardRecoveryXP(_ amount: Int) {
-        let granted = GameEngine.recoveryGrant(amount: amount, earnedToday: recoveryXPToday)
+        let granted = GameEngine.recoveryGrant(amount: amount, earnedToday: recoveryXPToday,
+                                               onBreak: isOnBreak, prayerXPToday: prayerXPToday)
         guard granted > 0 else { return }
         profile.totalXP += granted
         profile.recoveryXPByDay[todayKey, default: 0] += granted
@@ -442,14 +543,94 @@ final class AppState: ObservableObject {
 
     // MARK: - Circle (v2)
 
+    /// v3.6: the circle as the user shaped it (removals + accepted invites).
+    var activeBuddies: [BuddySimulator.Buddy] {
+        BuddySimulator.activeBuddies(removed: profile.removedBuddyNames,
+                                     invited: profile.invitedBuddyNames)
+    }
+
+    /// Pool entries that can still accept an invite.
+    var invitableBuddies: [BuddySimulator.Buddy] {
+        BuddySimulator.invitablePool.filter { buddy in
+            !profile.invitedBuddyNames.contains(buddy.name)
+                && !profile.removedBuddyNames.contains(buddy.name)
+        }
+    }
+
+    var circleIsFull: Bool { activeBuddies.count >= BuddySimulator.maxFriends }
+
+    /// Demo invite acceptance: adds the friend and queues the one-time
+    /// "just joined" celebration.
+    func acceptInvite(name: String) {
+        guard !circleIsFull,
+              BuddySimulator.invitablePool.contains(where: { $0.name == name }),
+              !profile.invitedBuddyNames.contains(name) else { return }
+        profile.invitedBuddyNames.append(name)
+        profile.removedBuddyNames.removeAll { $0 == name }
+        profile.pendingNewMemberName = name
+        persistProfile()
+        objectWillChange.send()
+    }
+
+    func removeMember(name: String) {
+        if profile.invitedBuddyNames.contains(name) {
+            profile.invitedBuddyNames.removeAll { $0 == name }
+        } else {
+            guard !profile.removedBuddyNames.contains(name) else { return }
+            profile.removedBuddyNames.append(name)
+        }
+        persistProfile()
+        objectWillChange.send()
+    }
+
+    /// Dismiss the "X just joined" celebration (optionally after the welcome
+    /// XP gift — that goes to THEM, so locally it's just the warm fuzzies).
+    func clearPendingNewMember() {
+        guard profile.pendingNewMemberName != nil else { return }
+        profile.pendingNewMemberName = nil
+        persistProfile()
+        objectWillChange.send()
+    }
+
+    // MARK: - Guided tour (v3.7 — design session)
+
+    /// Current tour step index (nil = not running). Step definitions live in
+    /// `Tour.steps` (RootView.swift); RootView drives the tab switching.
+    @Published var tutorialStep: Int? = nil
+
+    func startTutorial() { tutorialStep = 0 }
+
+    /// Finish or skip: either way the tour doesn't auto-run again (it stays
+    /// replayable from Settings). If the app dies mid-tour, the flag is still
+    /// unset, so the tour restarts cleanly from the top next launch.
+    func endTutorial() {
+        tutorialStep = nil
+        if !settings.hasSeenTutorial {
+            settings.hasSeenTutorial = true   // didSet persists
+        }
+    }
+
+    // MARK: - Nudges (v3.6 — session-scoped demo)
+
+    /// "dayKey|prayer|memberID" keys for nudges already sent this session.
+    @Published private(set) var nudgesSent: Set<String> = []
+
+    func nudgeKey(member: CircleMember, prayer: Prayer, dayKey: String) -> String {
+        "\(dayKey)|\(prayer.rawValue)|\(member.id)"
+    }
+
+    func sendNudge(to member: CircleMember, prayer: Prayer, dayKey: String) {
+        nudgesSent.insert(nudgeKey(member: member, prayer: prayer, dayKey: dayKey))
+    }
+
     /// Grid order: buddies first, you LAST (isYou flag set).
     var circleMembers: [CircleMember] {
-        BuddySimulator.buddies.map { BuddySimulator.member(for: $0) } + [youMember]
+        activeBuddies.map { BuddySimulator.member(for: $0) } + [youMember]
     }
 
     private var youMember: CircleMember {
         CircleMember(id: "you", name: profile.name.isEmpty ? "You" : profile.name,
-                     emoji: "😄", isYou: true)
+                     emoji: "😄", isYou: true, avatarFilename: profile.avatarFilename)
     }
 
     /// The circle's squares for one prayer on one schedule day, filling in
@@ -459,7 +640,7 @@ final class AppState: ObservableObject {
         let window = schedule(forDayKey: dayKey)?.window(for: prayer)
         var entries: [GridEntry] = []
 
-        for buddy in BuddySimulator.buddies {
+        for buddy in activeBuddies {
             let member = BuddySimulator.member(for: buddy)
             var state: GridEntryState = .waiting
             var placeLabel: String? = nil
@@ -491,7 +672,7 @@ final class AppState: ObservableObject {
             } else {
                 myState = .qada(at: myLog.loggedAt)
             }
-        } else if profile.excusedDayKeys.contains(dayKey) {
+        } else if isExcused(prayer: prayer, dayKey: dayKey) {
             myState = .excused
         } else if let window, now >= window.end {
             myState = .missed
@@ -563,13 +744,22 @@ final class AppState: ObservableObject {
     func weeklyScores() -> [(member: CircleMember, xp: Int)] {
         let now = AppClock.now
         let days = currentWeekDays()
-        var scores: [(member: CircleMember, xp: Int)] = BuddySimulator.buddies.map { buddy in
+        var scores: [(member: CircleMember, xp: Int)] = activeBuddies.map { buddy in
             (BuddySimulator.member(for: buddy), BuddySimulator.weeklyXP(for: buddy, days: days, asOf: now))
         }
         let myXP = GameEngine.weeklyXP(logs: logs, weekStart: BuddySimulator.weekStart(for: now),
                                        excusedDayKeys: profile.excusedDayKeys)
-        scores.append((youMember, myXP))
+        // v3.8: dhikr/deeds XP earned this week counts on the scoreboard too,
+        // so someone who genuinely can't pray (period/illness) isn't left
+        // behind by the Monday reset. (The crown race stays prayer-only.)
+        scores.append((youMember, myXP + recoveryXPThisWeek(now: now)))
         return scores.sorted { $0.xp > $1.xp }
+    }
+
+    /// Sum of recovery (dhikr+deeds) XP earned across the current Mon-start week.
+    private func recoveryXPThisWeek(now: Date) -> Int {
+        Set(BuddySimulator.weekDayKeys(for: now))
+            .reduce(0) { $0 + (profile.recoveryXPByDay[$1] ?? 0) }
     }
 
     /// Current-week group data grid: one row per member, 7 day-columns of
@@ -579,7 +769,7 @@ final class AppState: ObservableObject {
         let dayKeys = BuddySimulator.weekDayKeys(for: now)
 
         var rows: [MemberWeekRow] = []
-        for buddy in BuddySimulator.buddies {
+        for buddy in activeBuddies {
             let member = BuddySimulator.member(for: buddy)
             let days: [[GridCellState]] = dayKeys.map { key in
                 let schedule = self.schedule(forDayKey: key)
@@ -618,7 +808,7 @@ final class AppState: ObservableObject {
         if let log = logs.first(where: { $0.dayKey == dayKey && $0.prayer == prayer }) {
             return log.tier.isInWindow ? .inWindow(log.tier) : .qada
         }
-        if profile.excusedDayKeys.contains(dayKey) { return .excused }
+        if isExcused(prayer: prayer, dayKey: dayKey) { return .excused }
         guard let window else { return .future }
         return now >= window.end ? .missed : .future
     }
@@ -641,7 +831,7 @@ final class AppState: ObservableObject {
         let weekDayKeySet = Set(weekDayKeys)
         let days = currentWeekDays()
 
-        var memberWeekLogs: [(member: CircleMember, logs: [PrayerLog])] = BuddySimulator.buddies.map { buddy in
+        var memberWeekLogs: [(member: CircleMember, logs: [PrayerLog])] = activeBuddies.map { buddy in
             (BuddySimulator.member(for: buddy),
              BuddySimulator.visibleLogs(for: buddy, days: days, asOf: now))
         }
@@ -711,6 +901,15 @@ final class AppState: ObservableObject {
             day = next
         }
         return result
+    }
+
+    /// v3.6: summary for ANY day — the Journey calendar now opens photo-less
+    /// days too (for the retroactive make-up editing).
+    func daySummary(dayKey: String, date: Date) -> DayPhotoSummary {
+        let dayLogs = logs.filter { $0.dayKey == dayKey }.sorted { $0.loggedAt < $1.loggedAt }
+        return DayPhotoSummary(id: dayKey, date: date,
+                               photoFilenames: dayLogs.compactMap(\.photoFilename),
+                               recap: recap(forDayKey: dayKey, date: date))
     }
 
     // MARK: - Recaps
@@ -875,6 +1074,17 @@ final class AppState: ObservableObject {
     func setName(_ name: String) {
         profile.name = name
         persistProfile()
+    }
+
+    /// v3.6: profile photo (settings rehaul). Stored via PhotoStore; the old
+    /// file is cleaned up on replace.
+    func setAvatar(_ image: UIImage) {
+        let filename = PhotoStore.save(image, dayKey: "avatar", prayer: .fajr)
+        guard !filename.isEmpty else { return }
+        if let old = profile.avatarFilename { PhotoStore.delete(old) }
+        profile.avatarFilename = filename
+        persistProfile()
+        objectWillChange.send()
     }
 
     // MARK: - DEBUG helpers
