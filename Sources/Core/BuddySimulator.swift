@@ -49,6 +49,27 @@ enum BuddySimulator {
         Buddy(name: "Omar", emoji: "🎧", consistency: 0.62),
     ]
 
+    /// v3.6: extra demo friends an invite can "add" (the invite flow needs a
+    /// tangible acceptance to demo the new-member celebration).
+    static let invitablePool: [Buddy] = [
+        Buddy(name: "Amira", emoji: "🌼", consistency: 0.90),
+        Buddy(name: "Zayn", emoji: "🏀", consistency: 0.72),
+        Buddy(name: "Idris", emoji: "🪶", consistency: 0.83),
+    ]
+
+    /// The circle's max FRIEND count (you don't count) — sharing five photos
+    /// a day is an intimate thing; past ~8 it stops feeling like a circle.
+    static let maxFriends = 8
+
+    /// The circle as the user shaped it: base buddies minus removals, plus
+    /// accepted invites from the pool.
+    static func activeBuddies(removed: [String], invited: [String]) -> [Buddy] {
+        let removedSet = Set(removed)
+        let base = buddies.filter { !removedSet.contains($0.name) }
+        let extras = invitablePool.filter { invited.contains($0.name) && !removedSet.contains($0.name) }
+        return base + extras
+    }
+
     static func member(for buddy: Buddy) -> CircleMember {
         CircleMember(id: "buddy.\(buddy.name)", name: buddy.name, emoji: buddy.emoji, isYou: false)
     }

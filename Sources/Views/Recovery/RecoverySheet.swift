@@ -1,26 +1,15 @@
 import SwiftUI
 import UIKit
 
-/// v3.5: the "Recharge" space, reachable from the break card. A real digital
-/// tasbih counter (unlimited) plus a few good-deed prompts. Dhikr/deeds earn
-/// private XP up to a gentle daily cap — past it the act keeps going, just
-/// without points. None of it ever touches the circle scoreboard.
+/// The break-card entry point — the Recharge space as a dismissable sheet.
 struct RecoverySheet: View {
-    @EnvironmentObject private var state: AppState
     @Environment(\.dismiss) private var dismiss
-
-    @State private var pulse = false
 
     var body: some View {
         NavigationStack {
             ScrollView(showsIndicators: false) {
-                VStack(spacing: 20) {
-                    intro
-                    tasbihCard
-                    xpNote
-                    deedsSection
-                }
-                .padding(20)
+                RechargeBody()
+                    .padding(20)
             }
             .background(Theme.bg.ignoresSafeArea())
             .navigationTitle("Recharge 🌸")
@@ -35,9 +24,63 @@ struct RecoverySheet: View {
             }
         }
     }
+}
+
+// MARK: - Dhikr tab (v3.8 — permanent, for everyone)
+
+/// The dedicated Dhikr tab: the same Recharge space, always available, with a
+/// page header instead of a sheet close button.
+struct DhikrView: View {
+    var body: some View {
+        ZStack {
+            Theme.bg.ignoresSafeArea()
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: 16) {
+                    header
+                    RechargeBody()
+                }
+                .padding(.horizontal, 20)
+                .padding(.bottom, 24)
+            }
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 8) {
+            Text("Dhikr")
+                .font(Theme.sans(30, .bold))
+                .foregroundStyle(Theme.inkDeep)
+            Text("📿").font(.system(size: 22))
+            Spacer()
+        }
+        .padding(.top, 16)
+    }
+}
+
+// MARK: - Shared Recharge body
+
+/// A real digital tasbih counter (unlimited taps) + good-deed prompts. Dhikr
+/// and deeds earn XP toward your level and the weekly scoreboard, up to a
+/// state-aware daily cap — past it the act keeps going, just without points.
+/// Shared by the Dhikr tab and the break-card sheet.
+struct RechargeBody: View {
+    @EnvironmentObject private var state: AppState
+
+    @State private var pulse = false
+
+    var body: some View {
+        VStack(spacing: 20) {
+            intro
+            tasbihCard
+            xpNote
+            deedsSection
+        }
+    }
 
     private var intro: some View {
-        Text("Worship that still counts while you rest. Take your time — none of this is timed or capped.")
+        Text(state.isOnBreak
+             ? "Worship that still counts while you rest. Take your time — none of this is timed."
+             : "A little dhikr, any time. Earn a bit of XP — and a lot more than points.")
             .font(Theme.sans(13, .semibold))
             .foregroundStyle(Theme.inkMuted)
             .multilineTextAlignment(.center)
@@ -116,9 +159,9 @@ struct RecoverySheet: View {
     private var xpNote: some View {
         Group {
             if state.isRecoveryCapped {
-                Text("You've earned today's XP — keep going for the reward that isn't points 🤍")
+                Text("You've reached today's max XP 🤍 — keep going, it's all for Allah now")
             } else {
-                Text("+\(state.recoveryXPToday) XP today · up to \(GameEngine.recoveryDailyXPCap), then it's all for Allah")
+                Text("+\(state.recoveryXPToday) XP today · up to \(state.recoveryDisplayCeiling), then it's all for Allah")
             }
         }
         .font(Theme.sans(12.5, .semibold))
@@ -180,5 +223,117 @@ struct RecoverySheet: View {
         }
         .buttonStyle(.plain)
         .disabled(done)
+    }
+}
+
+// MARK: - Resume sheet (v3.6 — design session)
+
+/// Ends a break by asking WHEN prayers actually resumed — people often start
+/// praying again and forget to log for a day, so "just now" isn't always
+/// right. Picking a prayer un-excuses today from that prayer onward; "before
+/// today" un-excuses the whole day (older days can be edited in Journey).
+struct ResumeSheet: View {
+    @EnvironmentObject private var state: AppState
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.appNow) private var now
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Capsule()
+                .fill(Theme.mist.opacity(0.6))
+                .frame(width: 38, height: 5)
+                .padding(.top, 10)
+
+            Text("Welcome back 🌙")
+                .font(Theme.sans(22, .bold))
+                .foregroundStyle(Theme.inkDeep)
+            Text("When did you start praying again? Prayers from then on count today — earlier ones stay excused.")
+                .font(Theme.sans(13, .semibold))
+                .foregroundStyle(Theme.inkMuted)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 24)
+                .fixedSize(horizontal: false, vertical: true)
+
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: 8) {
+                    option(title: "Just now", subtitle: currentPrayerSubtitle, emoji: "✨") {
+                        resume(at: state.currentTodayBlock(now: now)?
+                            .isYesterdayIsha == false
+                            ? state.currentTodayBlock(now: now)?.prayer : nil)
+                    }
+                    ForEach(startedPrayers, id: \.self) { prayer in
+                        option(title: "Since \(prayer.displayName)",
+                               subtitle: windowTime(prayer), emoji: prayer.emoji) {
+                            resume(at: prayer)
+                        }
+                    }
+                    option(title: "Before today", subtitle: "The whole day counts", emoji: "📅") {
+                        resume(at: nil)
+                    }
+                }
+                .padding(.horizontal, 20)
+            }
+
+            Button("Not yet — stay on break") { dismiss() }
+                .font(Theme.sans(13, .semibold))
+                .foregroundStyle(Theme.inkMuted)
+                .buttonStyle(.plain)
+                .padding(.bottom, 16)
+        }
+        .frame(maxWidth: .infinity)
+        .background(Theme.bg)
+    }
+
+    /// Today's prayers whose windows already opened — the plausible answers.
+    private var startedPrayers: [Prayer] {
+        guard let schedule = state.todaySchedule else { return [] }
+        return schedule.windows
+            .filter { $0.start <= now }
+            .sorted { $0.start < $1.start }
+            .map(\.prayer)
+    }
+
+    private var currentPrayerSubtitle: String {
+        if let block = state.currentTodayBlock(now: now), !block.isYesterdayIsha {
+            return "\(block.prayer.displayName) onward counts"
+        }
+        return "From here on out"
+    }
+
+    private func windowTime(_ prayer: Prayer) -> String {
+        guard let window = state.todaySchedule?.window(for: prayer) else { return "" }
+        return window.start.formatted(date: .omitted, time: .shortened)
+    }
+
+    private func resume(at prayer: Prayer?) {
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        withAnimation(Theme.spring) { state.resumePrayers(startingAgainAt: prayer) }
+        dismiss()
+    }
+
+    private func option(title: String, subtitle: String, emoji: String,
+                        action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Text(emoji).font(.system(size: 20))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title)
+                        .font(Theme.sans(15, .bold))
+                        .foregroundStyle(Theme.inkDeep)
+                    if !subtitle.isEmpty {
+                        Text(subtitle)
+                            .font(Theme.sans(12, .semibold))
+                            .foregroundStyle(Theme.inkMuted)
+                    }
+                }
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(Theme.inkMuted.opacity(0.6))
+            }
+            .padding(14)
+            .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
+        .buttonStyle(.plain)
     }
 }
