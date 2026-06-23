@@ -177,7 +177,8 @@ struct OnboardingView: View {
                 .multilineTextAlignment(.center)
 
             HStack(spacing: 12) {
-                kindChip("brother", emoji: "🤵", label: "Brother")
+                // v3.8: settled on 🧔🏽‍♂️ for brother.
+                kindChip("brother", emoji: "🧔🏽‍♂️", label: "Brother")
                 kindChip("sister", emoji: "🧕", label: "Sister")
             }
 
@@ -338,10 +339,20 @@ struct OnboardingView: View {
                 icon: "bell.fill",
                 tint: Theme.gold,
                 title: "Prayer reminders",
-                subtitle: notifGranted ? "Reminders are on" : "A nudge when each prayer opens",
+                subtitle: notifGranted ? "Reminders are on 🎉"
+                    : "A nudge when each prayer comes in + a last call before it closes",
                 granted: notifGranted
             ) {
                 requestNotifications()
+            }
+
+            // v3.6 (design session): notifications are surfaced HERE, worded
+            // strongly — they're the heartbeat of the app.
+            if !notifGranted {
+                Text("We strongly encourage turning notifications on — it's how you and your circle keep each other on time. You can fine-tune which kinds in Settings.")
+                    .font(Theme.sans(12, .semibold))
+                    .foregroundStyle(Theme.gold)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(16)

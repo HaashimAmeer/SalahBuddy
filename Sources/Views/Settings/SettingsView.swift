@@ -1,10 +1,13 @@
 import SwiftUI
 import UserNotifications
 import UIKit
+import PhotosUI
+import CoreLocation
 
-/// Settings tab — profile name, prayer-time calculation, location,
-/// notifications (incl. denied state), excused-days counter, About, and a
-/// DEBUG developer section with time-travel controls. Styled per SPEC-V2 §2.
+/// Settings tab (v3.6 rehaul) — a proper profile section (photo + name) up
+/// top, then the occasional controls: breaks & travel (moved here from Today),
+/// prayer-time calculation, location (editable when not using the device),
+/// notification options, About, and a DEBUG developer section.
 struct SettingsView: View {
     @EnvironmentObject private var state: AppState
     @Environment(\.scenePhase) private var scenePhase
@@ -13,7 +16,6 @@ struct SettingsView: View {
     @State private var notificationStatus: UNAuthorizationStatus = .notDetermined
     @State private var showDeniedAlert = false
     @State private var showResetConfirm = false
-    @State private var showScoring = false
 
     var body: some View {
         ZStack {
@@ -22,13 +24,18 @@ struct SettingsView: View {
                 VStack(spacing: 16) {
                     header
                     profileCard
+                    BreakAndTravelCard()
                     calculationCard
                     locationCard
                     notificationsCard
                     aboutCard
-                    #if DEBUG
-                    developerCard
-                    #endif
+                    // v3.6: dev tools ship in DEBUG *and* TestFlight (so
+                    // testers can time-travel / seed demo data), but auto-hide
+                    // in a real App Store release — same binary, gated by the
+                    // sandbox receipt at runtime.
+                    if BuildEnv.showsDeveloperTools {
+                        developerCard
+                    }
                 }
                 .padding(.horizontal, 16)
                 .padding(.bottom, 24)
@@ -79,75 +86,157 @@ struct SettingsView: View {
                 .offset(y: -6)
             Spacer()
         }
-        .padding(.top, 8)
+        .padding(.top, 16)
     }
 
-    // MARK: - Profile
+    // MARK: - Profile (v3.6: photo + name, more customizable)
+
+    @State private var avatarItem: PhotosPickerItem?
 
     private var profileCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 14) {
             sectionTitle("Profile", symbol: "person.fill", color: Theme.green)
 
-            TextField("Your name", text: $name)
-                .font(Theme.sans(17, .semibold))
-                .foregroundStyle(Theme.inkDeep)
-                .textInputAutocapitalization(.words)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 12)
-                .background(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Theme.bg)
-                )
-                .onSubmit { commitName() }
-                .onChange(of: name) { _, _ in commitName() }
+            HStack(spacing: 14) {
+                PhotosPicker(selection: $avatarItem, matching: .images) {
+                    avatarView
+                }
+                .buttonStyle(.plain)
 
-            Divider()
-
-            // v3.2: excused is a break MODE now — no monthly cap, just a count.
-            HStack(spacing: 8) {
-                Image(systemName: "moon.fill")
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(Theme.lilac)
-                Text(state.isOnBreak ? "On a break — excused days this month" : "Excused days this month")
-                    .font(Theme.sans(15, .semibold))
-                    .foregroundStyle(Theme.inkDeep)
-                Spacer()
-                Text("\(state.excusedUsedThisMonth)")
-                    .font(Theme.sans(15, .bold))
-                    .foregroundStyle(Theme.inkDeep)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 4)
-                    .background(Capsule().fill(Theme.lilac.opacity(0.15)))
-            }
-
-            Divider()
-
-            // v3.2: how scoring works — the explainer from the design session.
-            Button {
-                showScoring = true
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: "questionmark.circle.fill")
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(Theme.gold)
-                    Text("How scoring works")
-                        .font(Theme.sans(15, .semibold))
-                        .foregroundStyle(Theme.inkDeep)
-                    Spacer()
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 12, weight: .bold))
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Your name")
+                        .font(Theme.sans(12, .bold))
                         .foregroundStyle(Theme.inkMuted)
+                    TextField("Your name", text: $name)
+                        .font(Theme.sans(17, .semibold))
+                        .foregroundStyle(Theme.inkDeep)
+                        .textInputAutocapitalization(.words)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .background(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .fill(Theme.bg)
+                        )
+                        .onSubmit { commitName() }
+                        .onChange(of: name) { _, _ in commitName() }
                 }
             }
-            .buttonStyle(.plain)
+
+            Text("Your name and photo are what your circle sees.")
+                .font(Theme.sans(11.5, .semibold))
+                .foregroundStyle(Theme.inkMuted)
+
+            Divider()
+
+            // v3.8: onboarding answers are editable here (design session).
+            VStack(alignment: .leading, spacing: 8) {
+                Text("You are")
+                    .font(Theme.sans(12, .bold))
+                    .foregroundStyle(Theme.inkMuted)
+                HStack(spacing: 8) {
+                    genderChip(nil, "Prefer not to say", "🌙")
+                    genderChip("brother", "Brother", "🧔🏽‍♂️")
+                    genderChip("sister", "Sister", "🧕")
+                }
+            }
+
+            HStack {
+                Text("Hardest prayer")
+                    .font(Theme.sans(12, .bold))
+                    .foregroundStyle(Theme.inkMuted)
+                Spacer()
+                Picker("Hardest prayer", selection: hardestBinding) {
+                    Text("None").tag(Prayer?.none)
+                    ForEach(Prayer.allCases) { p in
+                        Text("\(p.emoji) \(p.displayName)").tag(Prayer?.some(p))
+                    }
+                }
+                .pickerStyle(.menu)
+                .tint(Theme.green)
+            }
         }
         .padding(18)
         .frame(maxWidth: .infinity)
         .cardStyle()
-        .sheet(isPresented: $showScoring) {
-            ScoringExplainerSheet()
-                .presentationDetents([.large, .medium])
-                .presentationDragIndicator(.visible)
+        .onChange(of: avatarItem) { _, item in
+            guard let item else { return }
+            Task {
+                if let data = try? await item.loadTransferable(type: Data.self),
+                   let image = UIImage(data: data) {
+                    state.setAvatar(image)
+                }
+                avatarItem = nil
+            }
+        }
+    }
+
+    /// Gender chip — updates `settings.memberKind` (tailors break copy, Jumma).
+    private func genderChip(_ value: String?, _ label: String, _ emoji: String) -> some View {
+        let selected = state.settings.memberKind == value
+        return Button {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            var s = state.settings
+            s.memberKind = value
+            state.settings = s
+        } label: {
+            VStack(spacing: 3) {
+                Text(emoji).font(.system(size: 20))
+                Text(label)
+                    .font(Theme.sans(10.5, selected ? .bold : .semibold))
+                    .foregroundStyle(selected ? Theme.inkDeep : Theme.inkMuted)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 9)
+            .background(selected ? Theme.greenSoft : Theme.bg,
+                        in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(selected ? Theme.green : .clear, lineWidth: 1.5)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var hardestBinding: Binding<Prayer?> {
+        Binding(
+            get: { state.settings.hardestPrayer },
+            set: { newValue in
+                var s = state.settings
+                s.hardestPrayer = newValue
+                state.settings = s
+            }
+        )
+    }
+
+    /// 72-pt avatar: the chosen photo, or a soft placeholder. A little pencil
+    /// badge signals it's editable.
+    private var avatarView: some View {
+        ZStack(alignment: .bottomTrailing) {
+            Group {
+                if let filename = state.profile.avatarFilename,
+                   let image = PhotoStore.load(filename) {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                } else {
+                    ZStack {
+                        Circle().fill(Theme.greenSoft)
+                        Image(systemName: "person.fill")
+                            .font(.system(size: 30, weight: .semibold))
+                            .foregroundStyle(Theme.green.opacity(0.7))
+                    }
+                }
+            }
+            .frame(width: 72, height: 72)
+            .clipShape(Circle())
+            .overlay(Circle().strokeBorder(Theme.green.opacity(0.4), lineWidth: 1.5))
+
+            Image(systemName: "pencil.circle.fill")
+                .font(.system(size: 22))
+                .foregroundStyle(Theme.green)
+                .background(Circle().fill(Theme.surface).padding(2))
         }
     }
 
@@ -201,6 +290,10 @@ struct SettingsView: View {
 
     // MARK: - Location
 
+    @State private var cityQuery = ""
+    @State private var isGeocoding = false
+    @State private var geocodeError: String?
+
     private var locationCard: some View {
         VStack(alignment: .leading, spacing: 12) {
             sectionTitle("Location", symbol: "location.fill", color: Theme.amber)
@@ -221,6 +314,46 @@ struct SettingsView: View {
                      : "Using fixed location — \(state.activeLocationName)")
                     .font(Theme.sans(13, .semibold))
                     .foregroundStyle(Theme.inkMuted)
+            }
+
+            // v3.6: the fixed location is finally editable (it was hard-coded).
+            if !state.settings.useDeviceLocation {
+                HStack(spacing: 8) {
+                    TextField("City, e.g. Seattle", text: $cityQuery)
+                        .font(Theme.sans(15, .semibold))
+                        .foregroundStyle(Theme.inkDeep)
+                        .textInputAutocapitalization(.words)
+                        .autocorrectionDisabled()
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 9)
+                        .background(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .fill(Theme.bg)
+                        )
+                        .onSubmit { searchCity() }
+                    Button {
+                        searchCity()
+                    } label: {
+                        Group {
+                            if isGeocoding {
+                                ProgressView().tint(.white)
+                            } else {
+                                Text("Set")
+                                    .font(Theme.sans(14, .bold))
+                                    .foregroundStyle(.white)
+                            }
+                        }
+                        .frame(width: 52, height: 36)
+                        .background(Capsule().fill(Theme.green))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isGeocoding || cityQuery.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+                if let geocodeError {
+                    Text(geocodeError)
+                        .font(Theme.sans(12, .semibold))
+                        .foregroundStyle(Theme.amber)
+                }
             }
 
             if !state.savedPlaceTags.isEmpty {
@@ -296,6 +429,31 @@ struct SettingsView: View {
         )
     }
 
+    /// Forward-geocode the typed city into the fixed coordinates.
+    private func searchCity() {
+        let query = cityQuery.trimmingCharacters(in: .whitespaces)
+        guard !query.isEmpty, !isGeocoding else { return }
+        isGeocoding = true
+        geocodeError = nil
+        CLGeocoder().geocodeAddressString(query) { placemarks, _ in
+            Task { @MainActor in
+                isGeocoding = false
+                guard let placemark = placemarks?.first,
+                      let location = placemark.location else {
+                    geocodeError = "Couldn't find \"\(query)\" — try a bigger city nearby."
+                    return
+                }
+                var s = state.settings
+                s.fixedLatitude = location.coordinate.latitude
+                s.fixedLongitude = location.coordinate.longitude
+                s.locationName = placemark.locality ?? placemark.name ?? query
+                state.settings = s     // didSet persists + refreshes + reschedules
+                cityQuery = ""
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            }
+        }
+    }
+
     // MARK: - Notifications
 
     private var notificationsCard: some View {
@@ -303,7 +461,7 @@ struct SettingsView: View {
             sectionTitle("Reminders", symbol: "bell.fill", color: Theme.gold)
 
             Toggle(isOn: notificationsBinding) {
-                Text("Prayer notifications")
+                Text("Notifications")
                     .font(Theme.sans(15, .semibold))
                     .foregroundStyle(Theme.inkDeep)
             }
@@ -323,8 +481,22 @@ struct SettingsView: View {
                     .foregroundStyle(Theme.amber)
                 }
                 .buttonStyle(.plain)
+            } else if state.settings.notificationsEnabled {
+                // v3.6: each kind is its own choice (design session). Prayer
+                // nudges stay available to disable, but defaulting them off
+                // would kind of defeat the purpose.
+                Divider()
+                notifOption(title: "When a prayer comes in",
+                            subtitle: "The moment each window opens",
+                            isOn: subToggle(\.notifyPrayerStart))
+                notifOption(title: "Last call",
+                            subtitle: "30 minutes before a window closes",
+                            isOn: subToggle(\.notifyLastCall))
+                notifOption(title: "Friend activity",
+                            subtitle: "When someone in your circle posts first",
+                            isOn: subToggle(\.notifyFriendActivity))
             } else {
-                Text("A nudge the moment each prayer comes in, plus a last call 30 minutes before its window closes.")
+                Text("A nudge the moment each prayer comes in, a last call before it closes, and optional friend activity.")
                     .font(Theme.sans(13, .semibold))
                     .foregroundStyle(Theme.inkMuted)
             }
@@ -332,6 +504,32 @@ struct SettingsView: View {
         .padding(18)
         .frame(maxWidth: .infinity)
         .cardStyle()
+    }
+
+    private func notifOption(title: String, subtitle: String, isOn: Binding<Bool>) -> some View {
+        Toggle(isOn: isOn) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .font(Theme.sans(14, .semibold))
+                    .foregroundStyle(Theme.inkDeep)
+                Text(subtitle)
+                    .font(Theme.sans(11.5, .semibold))
+                    .foregroundStyle(Theme.inkMuted)
+            }
+        }
+        .tint(Theme.green)
+    }
+
+    /// Binding into one of the notification sub-flags (didSet reschedules).
+    private func subToggle(_ keyPath: WritableKeyPath<AppSettings, Bool>) -> Binding<Bool> {
+        Binding(
+            get: { state.settings[keyPath: keyPath] },
+            set: { newValue in
+                var s = state.settings
+                s[keyPath: keyPath] = newValue
+                state.settings = s
+            }
+        )
     }
 
     private var notificationsBinding: Binding<Bool> {
@@ -398,6 +596,27 @@ struct SettingsView: View {
             aboutRow(label: "Praying since", value: state.profile.joinedAt
                 .formatted(.dateTime.month(.abbreviated).day().year()))
 
+            Divider()
+
+            // v3.7: the guided first-run tour, replayable any time.
+            Button {
+                state.startTutorial()
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "arrow.counterclockwise.circle.fill")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(Theme.green)
+                    Text("Replay the tour")
+                        .font(Theme.sans(15, .semibold))
+                        .foregroundStyle(Theme.inkDeep)
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(Theme.inkMuted)
+                }
+            }
+            .buttonStyle(.plain)
+
             Text("Made with 🤲 to help you keep all five, every day.")
                 .font(Theme.sans(13, .semibold))
                 .foregroundStyle(Theme.inkMuted)
@@ -425,12 +644,15 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - Developer (DEBUG only)
+    // MARK: - Developer (DEBUG + TestFlight)
 
-    #if DEBUG
     private var developerCard: some View {
         VStack(alignment: .leading, spacing: 14) {
             sectionTitle("Developer", symbol: "wrench.and.screwdriver.fill", color: Theme.inkMuted)
+
+            Text("Test-build tools — these won't appear in the public App Store release.")
+                .font(Theme.sans(11.5, .semibold))
+                .foregroundStyle(Theme.inkMuted)
 
             VStack(alignment: .leading, spacing: 8) {
                 Text("Time travel")
@@ -515,7 +737,6 @@ struct SettingsView: View {
         let minutes = (Int(offset) % 3600) / 60
         return "Clock offset: +\(hours)h \(minutes)m → now \(AppClock.now.formatted(.dateTime.month().day().hour().minute()))"
     }
-    #endif
 
     // MARK: - Shared bits
 
@@ -532,97 +753,93 @@ struct SettingsView: View {
     }
 }
 
-// MARK: - Scoring explainer (v3.2)
+// MARK: - Breaks & travel (v3.6 — moved here from Today)
 
-/// Plain-English walkthrough of the point system — mirrors SCORING.md.
-struct ScoringExplainerSheet: View {
-    @Environment(\.dismiss) private var dismiss
+/// Two simple toggles in one card: "Can't pray right now" (starts/ends a
+/// break) and "Traveling" (combine Dhuhr+Asr / Maghrib+Isha). Both are
+/// occasional and change how prayers are visualized — same toggle shape, one
+/// consistent home. Turning the break OFF asks WHEN you started praying again
+/// (ResumeSheet), so a forgotten day still logs correctly.
+struct BreakAndTravelCard: View {
+    @EnvironmentObject private var state: AppState
+
+    @State private var showResume = false
 
     var body: some View {
-        ZStack {
-            Theme.bg.ignoresSafeArea()
-            ScrollView(showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 16) {
-                    HStack {
-                        Text("How scoring works ⚡")
-                            .font(Theme.sans(24, .bold))
-                            .foregroundStyle(Theme.inkDeep)
-                        Spacer()
-                        Button { dismiss() } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .font(.system(size: 24))
-                                .foregroundStyle(Theme.inkMuted.opacity(0.5))
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    .padding(.top, 18)
-
-                    card("⏱ Pray early, earn more") {
-                        row("First quarter of the window", "+30 XP", Theme.green)
-                        row("Second quarter", "+20 XP", Theme.green)
-                        row("Third quarter", "+15 XP", Theme.amber)
-                        row("Final quarter", "+12 XP", Theme.amber)
-                        row("Made up later (Qada)", "+10 XP", Theme.qadaBlue)
-                    }
-
-                    card("🎁 Bonuses") {
-                        row("Perfect day — all 5 in their windows", "+25 XP", Theme.gold)
-                        row("Prayed in jamaat", "+5 XP", Theme.gold)
-                        row("Jumma on Friday", "+10 XP", Theme.gold)
-                        row("Dhikr while on a break (up to 5/day, private)", "+5 XP", Theme.lilac)
-                    }
-
-                    card("🔥 Streaks") {
-                        bullet("Log all 5 prayers in a day to extend your streak.")
-                        bullet("Every 7-day streak banks a streak freeze (max 2) that covers a missed day.")
-                        bullet("Breaks (\"Can't pray right now\") pause everything — your streak is safe until you resume.")
-                    }
-
-                    card("🏆 The circle") {
-                        bullet("Weekly scores reset every Monday and count prayer XP + bonuses.")
-                        bullet("Dhikr XP is private — it levels you up but never appears on the scoreboard.")
-                        bullet("Win the weekly race and the next target gets higher.")
-                    }
-                }
-                .padding(.horizontal, 20)
-                .padding(.bottom, 30)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: "moon.zzz.fill")
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(Theme.lilac)
+                Text("Breaks & travel")
+                    .font(Theme.sans(18, .bold))
+                    .foregroundStyle(Theme.inkDeep)
+                Spacer()
             }
-        }
-    }
 
-    private func card(_ title: String, @ViewBuilder content: () -> some View) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(title)
-                .font(Theme.sans(16, .bold))
-                .foregroundStyle(Theme.inkDeep)
-            content()
+            Toggle(isOn: breakBinding) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(state.isOnBreak ? "On a break — streak safe" : "Can't pray right now")
+                        .font(Theme.sans(15, .semibold))
+                        .foregroundStyle(Theme.inkDeep)
+                    Text(state.isOnBreak
+                         ? "Your circle just sees a gentle \"resting\". Turn off to resume."
+                         : "Pauses everything — your streak stays safe until you resume.")
+                        .font(Theme.sans(11.5, .semibold))
+                        .foregroundStyle(Theme.inkMuted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .tint(Theme.lilac)
+
+            Divider()
+
+            Toggle(isOn: travelBinding) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(state.isTraveling ? "Traveling — prayers combined" : "Traveling")
+                        .font(Theme.sans(15, .semibold))
+                        .foregroundStyle(Theme.inkDeep)
+                    Text("Combine Dhuhr+Asr and Maghrib+Isha (jam').")
+                        .font(Theme.sans(11.5, .semibold))
+                        .foregroundStyle(Theme.inkMuted)
+                }
+            }
+            .tint(Theme.qadaBlue)
         }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(18)
+        .frame(maxWidth: .infinity)
         .cardStyle()
-    }
-
-    private func row(_ label: String, _ value: String, _ color: Color) -> some View {
-        HStack {
-            Text(label)
-                .font(Theme.sans(14, .semibold))
-                .foregroundStyle(Theme.inkMuted)
-            Spacer()
-            Text(value)
-                .font(Theme.sans(14, .heavy))
-                .foregroundStyle(color)
+        .sheet(isPresented: $showResume) {
+            ResumeSheet()
+                .environmentObject(state)
+                .presentationDetents([.medium])
         }
     }
 
-    private func bullet(_ text: String) -> some View {
-        HStack(alignment: .top, spacing: 7) {
-            Text("•")
-                .font(Theme.sans(14, .bold))
-                .foregroundStyle(Theme.green)
-            Text(text)
-                .font(Theme.sans(14, .semibold))
-                .foregroundStyle(Theme.inkMuted)
-                .fixedSize(horizontal: false, vertical: true)
-        }
+    /// On → start a break immediately (no reason picker). Off → open the
+    /// ResumeSheet; `isOnBreak` stays true until they actually resume, so the
+    /// toggle correctly snaps back on if they dismiss without resuming.
+    private var breakBinding: Binding<Bool> {
+        Binding(
+            get: { state.isOnBreak },
+            set: { newValue in
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                if newValue {
+                    withAnimation(Theme.spring) { state.startBreak() }
+                } else {
+                    showResume = true
+                }
+            }
+        )
+    }
+
+    private var travelBinding: Binding<Bool> {
+        Binding(
+            get: { state.isTraveling },
+            set: { newValue in
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                withAnimation(Theme.spring) { state.setTraveling(newValue) }
+            }
+        )
     }
 }
