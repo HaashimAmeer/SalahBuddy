@@ -1,0 +1,20 @@
+#!/bin/sh
+# Pre-push CI: build + run the test suite before a push is allowed.
+# This is SalahBuddy's "CI" — it runs on YOUR Mac (private repo, so GitHub-
+# hosted macOS runners are intentionally avoided). Build/sign/TestFlight are
+# NOT done here; promotion to production and releases stay manual.
+#
+# Bypass for a doc-only or WIP push:  git push --no-verify
+# Activate after a fresh clone:        make hooks
+
+echo "▸ CI: running tests before push (make test)…"
+
+if ! make test; then
+	echo ""
+	echo "✗ Tests failed — push aborted."
+	echo "  Fix the failures, or bypass deliberately with: git push --no-verify"
+	exit 1
+fi
+
+echo "✓ Tests passed — pushing."
+exit 0
