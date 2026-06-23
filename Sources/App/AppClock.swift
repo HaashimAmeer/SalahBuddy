@@ -29,3 +29,26 @@ enum AppClock {
         return Calendar.current.date(from: comps)
     }
 }
+
+/// Build/runtime environment checks.
+enum BuildEnv {
+
+    /// True when the running build is a TestFlight (beta) install. TestFlight
+    /// and the public App Store share one binary; they're told apart at
+    /// runtime by the App Store receipt's filename — "sandboxReceipt" for
+    /// TestFlight, "receipt" for a production purchase.
+    static var isTestFlight: Bool {
+        Bundle.main.appStoreReceiptURL?.lastPathComponent == "sandboxReceipt"
+    }
+
+    /// Whether to surface the in-app Developer tools (time travel, demo seed,
+    /// reset). On in DEBUG and in TestFlight; off in a public App Store
+    /// release — so the very same archive auto-hides them once promoted.
+    static var showsDeveloperTools: Bool {
+        #if DEBUG
+        return true
+        #else
+        return isTestFlight
+        #endif
+    }
+}

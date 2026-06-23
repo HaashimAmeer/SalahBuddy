@@ -37,18 +37,22 @@ final class V2CoreTests: XCTestCase {
 
     // MARK: - v2 XP rules
 
-    func testQadaXPIsTen() {
-        XCTAssertEqual(LogTier.qada.xp, 10)
+    func testQadaXPIsFive() {
+        // v3.7 (design session): make-ups dropped from 10 to 5 so they clearly
+        // trail every in-window tier.
+        XCTAssertEqual(LogTier.qada.xp, 5)
     }
 
-    func testJamaatBonusAccounting() {
-        XCTAssertEqual(GameEngine.jamaatBonus, 5)
-        // A jamaat onTime log carries 35 XP; day XP sums stored values.
+    func testJamaatFloorAccounting() {
+        // v3.8: jamaat is a FLOOR to 30, not additive. A jamaat lastCall log
+        // carries 30 (not 15); day XP sums the stored, floored values.
         let dayKey = "2026-06-10"
         var logs = fullDay(dayKey: dayKey, tier: .onTime)
-        logs[0] = log(.fajr, .onTime, dayKey: dayKey,
-                      xp: LogTier.onTime.xp + GameEngine.jamaatBonus, jamaat: true)
-        XCTAssertEqual(GameEngine.xp(forDay: dayKey, logs: logs), 5 * 30 + 5 + 25)
+        // A late prayer, but in jamaat → stored XP floored to 30.
+        logs[0] = log(.fajr, .lastCall, dayKey: dayKey,
+                      xp: GameEngine.prayerXP(tier: .lastCall, jamaat: true), jamaat: true)
+        XCTAssertEqual(logs[0].xp, 30)
+        XCTAssertEqual(GameEngine.xp(forDay: dayKey, logs: logs), 5 * 30 + 25)
         XCTAssertTrue(GameEngine.isPerfectDay(logs: logs, dayKey: dayKey),
                       "jamaat doesn't affect perfect-day detection")
     }
@@ -117,10 +121,10 @@ final class V2CoreTests: XCTestCase {
         // Nothing logged: 3 fully-passed windows × 30 foregone.
         XCTAssertEqual(GameEngine.missedOutXP(logs: [], schedule: sched, now: evening,
                                               isExcused: false), 90)
-        // Qada recovers 10 of one window's 30.
+        // Qada recovers 5 of one window's 30.
         let qadaLog = [log(.fajr, .qada, dayKey: dayKey)]
         XCTAssertEqual(GameEngine.missedOutXP(logs: qadaLog, schedule: sched, now: evening,
-                                              isExcused: false), 80)
+                                              isExcused: false), 85)
         // An in-window log forgoes nothing, even at lastCall.
         let lastCall = [log(.fajr, .lastCall, dayKey: dayKey),
                         log(.dhuhr, .onTime, dayKey: dayKey),
@@ -508,16 +512,25 @@ final class V2CoreTests: XCTestCase {
         XCTAssertEqual(Recharge.position(forTotal: 100).inSet, 0)
     }
 
-    func testRecoveryGrantRespectsSoftCap() {
-        let cap = GameEngine.recoveryDailyXPCap
-        // Under the cap: full amount.
-        XCTAssertEqual(GameEngine.recoveryGrant(amount: 10, earnedToday: 0), 10)
-        XCTAssertEqual(GameEngine.recoveryGrant(amount: 1, earnedToday: cap - 1), 1)
-        // Straddling the cap: only the remainder.
-        XCTAssertEqual(GameEngine.recoveryGrant(amount: 10, earnedToday: cap - 3), 3)
-        // At/over the cap: nothing (act continues, XP doesn't).
-        XCTAssertEqual(GameEngine.recoveryGrant(amount: 10, earnedToday: cap), 0)
-        XCTAssertEqual(GameEngine.recoveryGrant(amount: 10, earnedToday: cap + 5), 0)
+    func testRecoveryGrantRespectsStateCap() {
+        // v3.8: cap depends on state. On a break → flat 200.
+        XCTAssertEqual(GameEngine.recoveryDailyCap(onBreak: true, prayerXPToday: 0), 200)
+        XCTAssertEqual(GameEngine.recoveryGrant(amount: 10, earnedToday: 0,
+                                                onBreak: true, prayerXPToday: 0), 10)
+        XCTAssertEqual(GameEngine.recoveryGrant(amount: 10, earnedToday: 198,
+                                                onBreak: true, prayerXPToday: 0), 2)
+
+        // Can pray → only enough to top prayer XP up to 150.
+        XCTAssertEqual(GameEngine.recoveryDailyCap(onBreak: false, prayerXPToday: 100), 50)
+        XCTAssertEqual(GameEngine.recoveryGrant(amount: 10, earnedToday: 0,
+                                                onBreak: false, prayerXPToday: 100), 10)
+        XCTAssertEqual(GameEngine.recoveryGrant(amount: 10, earnedToday: 48,
+                                                onBreak: false, prayerXPToday: 100), 2)
+        // A perfect/strong prayer day (≥150) leaves no dhikr room — praying
+        // early always wins.
+        XCTAssertEqual(GameEngine.recoveryDailyCap(onBreak: false, prayerXPToday: 175), 0)
+        XCTAssertEqual(GameEngine.recoveryGrant(amount: 10, earnedToday: 0,
+                                                onBreak: false, prayerXPToday: 175), 0)
     }
 
     func testAllEightDefinitionsExist() {

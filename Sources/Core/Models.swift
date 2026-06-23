@@ -52,7 +52,9 @@ enum LogTier: String, Codable {
         case .prayed: return 20    // 2nd quarter
         case .lastCall: return 15  // 3rd quarter
         case .closeCall: return 12 // 4th quarter — still beats making up later
-        case .qada: return 10      // "half points". Old logs keep their stored xp.
+        case .qada: return 5       // v3.7 (design session): dropped from 10 so a
+                                   // make-up clearly trails any in-window log.
+                                   // Old logs keep their stored xp.
         }
     }
 
@@ -181,6 +183,13 @@ struct UserProfile: Codable {
     var breakReason: String?                   // v3.4: "period" / "illness" / "other" — tailors break copy
     var recoveryXPByDay: [String: Int]         // v3.5: XP earned from dhikr+deeds per day (enforces soft cap)
     var deedsByDay: [String: [String]]         // v3.5: completed good-deed ids per day
+    // v3.6 (design session Jun 11):
+    var avatarFilename: String?                // profile photo (PhotoStore)
+    var removedBuddyNames: [String]            // circle members removed by the user
+    var invitedBuddyNames: [String]            // demo invites that "accepted" (from the invitable pool)
+    var pendingNewMemberName: String?          // shows the "X just joined!" celebration once
+    var partialExcuseStart: [String: Prayer]   // dayKey → first EXCUSED prayer that day (break started mid-day)
+    var partialExcuseEnd: [String: Prayer]     // dayKey → first prayer that COUNTS again (resumed mid-day)
 
     init(name: String, totalXP: Int, streak: Int, longestStreak: Int, streakFreezes: Int,
          lastStreakDayKey: String?, lastReconciledDayKey: String?, earnedBadges: [String: Date],
@@ -188,7 +197,10 @@ struct UserProfile: Codable {
          excusedDayKeys: Set<String> = [], challengeCompletions: [String: Date] = [:],
          excusedModeSince: String? = nil, dhikrByDay: [String: Int] = [:],
          customChallenges: [CustomChallenge] = [], breakReason: String? = nil,
-         recoveryXPByDay: [String: Int] = [:], deedsByDay: [String: [String]] = [:]) {
+         recoveryXPByDay: [String: Int] = [:], deedsByDay: [String: [String]] = [:],
+         avatarFilename: String? = nil, removedBuddyNames: [String] = [],
+         invitedBuddyNames: [String] = [], pendingNewMemberName: String? = nil,
+         partialExcuseStart: [String: Prayer] = [:], partialExcuseEnd: [String: Prayer] = [:]) {
         self.name = name
         self.totalXP = totalXP
         self.streak = streak
@@ -207,6 +219,12 @@ struct UserProfile: Codable {
         self.breakReason = breakReason
         self.recoveryXPByDay = recoveryXPByDay
         self.deedsByDay = deedsByDay
+        self.avatarFilename = avatarFilename
+        self.removedBuddyNames = removedBuddyNames
+        self.invitedBuddyNames = invitedBuddyNames
+        self.pendingNewMemberName = pendingNewMemberName
+        self.partialExcuseStart = partialExcuseStart
+        self.partialExcuseEnd = partialExcuseEnd
     }
 
     // Migration-safe decoding: v1 profiles lack the v2 fields.
@@ -216,6 +234,8 @@ struct UserProfile: Codable {
         case excusedDayKeys, challengeCompletions
         case excusedModeSince, dhikrByDay, customChallenges, breakReason
         case recoveryXPByDay, deedsByDay
+        case avatarFilename, removedBuddyNames, invitedBuddyNames, pendingNewMemberName
+        case partialExcuseStart, partialExcuseEnd
     }
 
     init(from decoder: Decoder) throws {
@@ -238,6 +258,12 @@ struct UserProfile: Codable {
         breakReason = (try? c.decodeIfPresent(String.self, forKey: .breakReason)) ?? nil
         recoveryXPByDay = (try? c.decodeIfPresent([String: Int].self, forKey: .recoveryXPByDay)) ?? [:]
         deedsByDay = (try? c.decodeIfPresent([String: [String]].self, forKey: .deedsByDay)) ?? [:]
+        avatarFilename = (try? c.decodeIfPresent(String.self, forKey: .avatarFilename)) ?? nil
+        removedBuddyNames = (try? c.decodeIfPresent([String].self, forKey: .removedBuddyNames)) ?? []
+        invitedBuddyNames = (try? c.decodeIfPresent([String].self, forKey: .invitedBuddyNames)) ?? []
+        pendingNewMemberName = (try? c.decodeIfPresent(String.self, forKey: .pendingNewMemberName)) ?? nil
+        partialExcuseStart = (try? c.decodeIfPresent([String: Prayer].self, forKey: .partialExcuseStart)) ?? [:]
+        partialExcuseEnd = (try? c.decodeIfPresent([String: Prayer].self, forKey: .partialExcuseEnd)) ?? [:]
     }
 
     static func fresh(now: Date) -> UserProfile {
@@ -313,6 +339,12 @@ struct AppSettings: Codable {
     var savedPlaces: [String: SavedPlace] = [:]   // v3: PlaceTag.rawValue → remembered spot
     var memberKind: String? = nil      // v3.2: "brother" / "sister" (onboarding, optional) — tailors copy
     var isTraveling: Bool = false      // v3.3: travel mode — combine Dhuhr+Asr and Maghrib+Isha
+    // v3.6: per-kind notification options (design session). Prayer nudges
+    // default ON — turning them off kind of defeats the purpose.
+    var notifyPrayerStart: Bool = true     // "X just came in" the moment a window opens
+    var notifyLastCall: Bool = true        // 30 min before a window closes
+    var notifyFriendActivity: Bool = false // "Mina just posted Dhuhr" (opt-in)
+    var hasSeenTutorial: Bool = false      // v3.7: guided first-run tour completed/skipped
 
     init() {}
 
@@ -332,6 +364,10 @@ struct AppSettings: Codable {
         savedPlaces = (try? c.decode([String: SavedPlace].self, forKey: .savedPlaces)) ?? [:]
         memberKind = (try? c.decodeIfPresent(String.self, forKey: .memberKind)) ?? nil
         isTraveling = (try? c.decode(Bool.self, forKey: .isTraveling)) ?? false
+        notifyPrayerStart = (try? c.decode(Bool.self, forKey: .notifyPrayerStart)) ?? true
+        notifyLastCall = (try? c.decode(Bool.self, forKey: .notifyLastCall)) ?? true
+        notifyFriendActivity = (try? c.decode(Bool.self, forKey: .notifyFriendActivity)) ?? false
+        hasSeenTutorial = (try? c.decode(Bool.self, forKey: .hasSeenTutorial)) ?? false
     }
 }
 
@@ -466,6 +502,9 @@ struct CircleMember: Identifiable, Equatable {
     let name: String
     let emoji: String
     let isYou: Bool
+    /// v3.8: the user's profile photo (PhotoStore filename) — shown instead of
+    /// the emoji wherever "you" appears. nil for simulated buddies.
+    var avatarFilename: String? = nil
 }
 
 enum PostContent: Equatable {
