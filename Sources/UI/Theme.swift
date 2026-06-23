@@ -96,3 +96,53 @@ struct CardBackground: ViewModifier {
 extension View {
     func cardStyle() -> some View { modifier(CardBackground()) }
 }
+
+// MARK: - Centered modal (v3.6 — design session)
+
+/// A dimmed-backdrop CENTERED pop-up card (instead of a bottom sheet) with an
+/// X in the corner — "if it's like a central modal, it would be kind of
+/// nicer". Present inside a ZStack with a spring transition:
+///
+///     if showThing { CenteredModal(onClose: { showThing = false }) { ... } }
+struct CenteredModal<Content: View>: View {
+    let onClose: () -> Void
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.35)
+                .ignoresSafeArea()
+                .onTapGesture { close() }
+
+            VStack(spacing: 0) {
+                HStack {
+                    Spacer()
+                    Button { close() } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 24))
+                            .foregroundStyle(Theme.inkMuted.opacity(0.5))
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.top, 14)
+                .padding(.horizontal, 14)
+
+                content
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 20)
+            }
+            .frame(maxWidth: 340)
+            .background(
+                RoundedRectangle(cornerRadius: 26, style: .continuous)
+                    .fill(Theme.surface)
+                    .shadow(color: .black.opacity(0.18), radius: 24, x: 0, y: 8)
+            )
+            .padding(.horizontal, 24)
+            .transition(.scale(scale: 0.88).combined(with: .opacity))
+        }
+    }
+
+    private func close() {
+        withAnimation(Theme.spring) { onClose() }
+    }
+}
