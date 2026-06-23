@@ -29,30 +29,52 @@ enum GameEngine {
     static let dailyGoalDefault = 100
     static let perfectDayBonus = 25
     static let maxStreakFreezes = 2
-    static let jamaatBonus = 5            // v2: optional "prayed in jamaat" bonus
-    static let jummaBonus = 10            // v3.2: Friday Dhuhr in congregation = Jumma
-    // v3.5: dhikr/good-deeds while on a break. The ACT is unlimited (never
-    // blocked); only XP is softly capped per day so it can't be farmed. All of
-    // it is private — never on the circle scoreboard.
+
+    // v3.8: praying in a group is a FLOOR, not an additive bonus — it lifts a
+    // prayer's XP up to the on-time value (30) if it was lower, and adds
+    // nothing if you already prayed in the first quarter. Stops penalizing
+    // people who reach the masjid late (Asr/Isha jamaat times run late).
+    // Jumma (Friday Dhuhr in congregation) folds into the SAME floor — no
+    // separate Friday bonus.
+    static var jamaatFloorXP: Int { LogTier.onTime.xp }   // 30
+
+    // v3.5/v3.8: dhikr + good-deeds. The ACT is unlimited (never blocked);
+    // only the XP is capped per day. Caps now depend on whether you're on a
+    // break (see recoveryDailyCap):
     static let dhikrXP = 1                // per tasbih tap
-    static let deedXP = 10               // per good-deed prompt
-    static let recoveryDailyXPCap = 40   // shared soft daily cap for dhikr + deeds
+    static let deedXP = 10                // per good-deed prompt
+    static let recoveryBreakCap = 200     // on a break: dhikr alone can reach a full day
+    static let recoveryDayCeiling = 150   // not on a break: prayer + dhikr combined ≤ this
     static let maxExcusedPerMonth = 10    // legacy v2 cap — no longer enforced (excused is a mode now)
 
-    /// v3.5: how much of `amount` can still be granted today given what's
-    /// already been earned from dhikr+deeds, respecting the soft cap. Pure.
-    static func recoveryGrant(amount: Int, earnedToday: Int) -> Int {
-        max(0, min(amount, recoveryDailyXPCap - earnedToday))
+    /// v3.8: today's recovery (dhikr+deeds) XP ceiling.
+    /// - On a break: a flat 200, so someone who genuinely can't pray can still
+    ///   reach a full day and isn't disadvantaged by the Monday weekly reset.
+    /// - Otherwise: only enough to top a prayed-but-imperfect day up to 150 —
+    ///   never a perfect-prayer day (~175), so praying early always wins.
+    static func recoveryDailyCap(onBreak: Bool, prayerXPToday: Int) -> Int {
+        onBreak ? recoveryBreakCap : max(0, recoveryDayCeiling - prayerXPToday)
     }
 
-    /// Friday in the user's current calendar → the Dhuhr jamaat toggle becomes
-    /// "Prayed Jumma" and earns the bigger bonus.
+    /// How much of `amount` can still be granted today given the state-aware
+    /// cap and what's already been earned from dhikr+deeds. Pure.
+    static func recoveryGrant(amount: Int, earnedToday: Int,
+                              onBreak: Bool, prayerXPToday: Int) -> Int {
+        let cap = recoveryDailyCap(onBreak: onBreak, prayerXPToday: prayerXPToday)
+        return max(0, min(amount, cap - earnedToday))
+    }
+
+    /// XP a logged prayer is worth given its tier and whether it was in jamaat
+    /// (the floor). The single source of truth for prayer XP.
+    static func prayerXP(tier: LogTier, jamaat: Bool) -> Int {
+        guard tier.isInWindow else { return tier.xp }    // qada never floors
+        return jamaat ? max(tier.xp, jamaatFloorXP) : tier.xp
+    }
+
+    /// Friday in the user's current calendar → the Dhuhr congregation toggle is
+    /// labelled "Prayed Jumma" (same 30 floor, just nicer copy).
     static func isJumma(prayer: Prayer, date: Date, calendar: Calendar = .current) -> Bool {
         prayer == .dhuhr && calendar.component(.weekday, from: date) == 6
-    }
-
-    static func congregationBonus(prayer: Prayer, date: Date, calendar: Calendar = .current) -> Int {
-        isJumma(prayer: prayer, date: date, calendar: calendar) ? jummaBonus : jamaatBonus
     }
 
     static let levelTitles = ["Seeker", "Committed", "Consistent", "Devoted",
@@ -89,6 +111,33 @@ enum GameEngine {
     static func title(forLevel level: Int) -> String {
         let index = min(max(0, (level - 1) / 5), levelTitles.count - 1)
         return levelTitles[index]
+    }
+
+    /// v3.6 (design session): tapping a title shows what it means.
+    static func titleDescription(_ title: String) -> String {
+        switch title {
+        case "Seeker": return "Levels 1–5 · Every journey starts with a single sajdah — you're finding your rhythm."
+        case "Committed": return "Levels 6–10 · You keep showing up, day after day."
+        case "Consistent": return "Levels 11–15 · All five are becoming second nature."
+        case "Devoted": return "Levels 16–20 · Prayer anchors your whole day."
+        case "Steadfast": return "Levels 21–25 · Unshakeable, even on the busy days."
+        case "Radiant": return "Levels 26–30 · Your light pulls the whole circle up."
+        case "Luminous": return "Level 31+ · MashaAllah. Keep shining."
+        default: return "Keep praying — every level tells a story."
+        }
+    }
+
+    /// v3.6: XP for retroactively marking a past prayer as made up (Journey
+    /// edit). Within `gracedDays` of today it still earns qada XP; older edits
+    /// are record-keeping only — the incentive stays on logging same-day.
+    static let lateEditGraceDays = 2
+
+    static func lateEditXP(dayKey: String, todayKey: String,
+                           calendar: Calendar = .current) -> Int {
+        guard let day = AppClock.date(fromDayKey: dayKey),
+              let today = AppClock.date(fromDayKey: todayKey) else { return 0 }
+        let daysAgo = calendar.dateComponents([.day], from: day, to: today).day ?? .max
+        return daysAgo <= lateEditGraceDays ? LogTier.qada.xp : 0
     }
 
     // MARK: - Day queries

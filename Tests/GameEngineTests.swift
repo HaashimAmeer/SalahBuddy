@@ -57,21 +57,32 @@ final class GameEngineTests: XCTestCase {
         XCTAssertEqual(LogTier.prayed.xp, 20)
         XCTAssertEqual(LogTier.lastCall.xp, 15)
         XCTAssertEqual(LogTier.closeCall.xp, 12)
-        XCTAssertEqual(LogTier.qada.xp, 10)
+        XCTAssertEqual(LogTier.qada.xp, 5)   // v3.7: dropped from 10
         // In-window must always beat making up later.
         XCTAssertGreaterThan(LogTier.closeCall.xp, LogTier.qada.xp)
     }
 
-    func testJummaBonus() {
-        // 2026-06-12 is a Friday.
+    func testJummaLabel() {
+        // 2026-06-12 is a Friday — Jumma is just a Friday-Dhuhr label now;
+        // the XP effect is the shared 30 floor (no separate bonus).
         let friday = date(2026, 6, 12, 13, 0)
         let thursday = date(2026, 6, 11, 13, 0)
         XCTAssertTrue(GameEngine.isJumma(prayer: .dhuhr, date: friday))
         XCTAssertFalse(GameEngine.isJumma(prayer: .asr, date: friday))
         XCTAssertFalse(GameEngine.isJumma(prayer: .dhuhr, date: thursday))
-        XCTAssertEqual(GameEngine.congregationBonus(prayer: .dhuhr, date: friday), GameEngine.jummaBonus)
-        XCTAssertEqual(GameEngine.congregationBonus(prayer: .dhuhr, date: thursday), GameEngine.jamaatBonus)
-        XCTAssertEqual(GameEngine.congregationBonus(prayer: .isha, date: friday), GameEngine.jamaatBonus)
+    }
+
+    func testJamaatIsAFloorTo30() {
+        // v3.8: jamaat lifts a prayer up to 30 (on-time), never additive.
+        XCTAssertEqual(GameEngine.jamaatFloorXP, 30)
+        XCTAssertEqual(GameEngine.prayerXP(tier: .onTime, jamaat: true), 30)   // already 30
+        XCTAssertEqual(GameEngine.prayerXP(tier: .prayed, jamaat: true), 30)   // 20 → 30
+        XCTAssertEqual(GameEngine.prayerXP(tier: .lastCall, jamaat: true), 30) // 15 → 30
+        XCTAssertEqual(GameEngine.prayerXP(tier: .closeCall, jamaat: true), 30)// 12 → 30
+        // Without jamaat the tier stands.
+        XCTAssertEqual(GameEngine.prayerXP(tier: .lastCall, jamaat: false), 15)
+        // Qada never floors (out of window).
+        XCTAssertEqual(GameEngine.prayerXP(tier: .qada, jamaat: true), 5)
     }
 
     // MARK: - Levels
@@ -236,7 +247,7 @@ final class GameEngineTests: XCTestCase {
 
         var imperfect = logs
         imperfect[0] = log(.fajr, .qada, dayKey: dayKey)
-        XCTAssertEqual(GameEngine.xp(forDay: dayKey, logs: imperfect), 10 + 4 * 30)
+        XCTAssertEqual(GameEngine.xp(forDay: dayKey, logs: imperfect), 5 + 4 * 30)
     }
 
     // MARK: - Week math (BuddySimulator)

@@ -1,6 +1,6 @@
 # SalahBuddy — How scoring works
 
-One page for us (and curious users). The in-app version lives in Settings → "How scoring works".
+One page for us (and curious users). The in-app version lives in Journey → "How scoring works".
 
 ## Prayer XP — quarters of the window
 
@@ -12,19 +12,29 @@ Each prayer's window (e.g. Asr → Maghrib) is split into **four quarters**. The
 | 2nd quarter | **20** |
 | 3rd quarter | **15** |
 | 4th quarter | **12** |
-| Made up later same day (Qada, tap-only, no photo) | **10** |
+| Made up later same day (Qada, tap-only, no photo) | **5** |
 | Never logged | 0 — shown as "you missed out on +30 XP" |
 
 In-window always beats qada; qada always beats nothing.
+
+## Praying in a group (v3.8 — a floor, not a bonus)
+
+Toggle **Prayed in jamaat** (or **Jumma** on Friday Dhuhr) after the photo and the prayer's XP is **lifted up to 30** (the on-time value) — it never *adds* on top. So a late masjid prayer isn't penalised, and if you already prayed in the first quarter it's already 30. Jumma folds into the same floor (no separate Friday bonus).
 
 ## Bonuses
 
 | Bonus | XP | Notes |
 |---|---|---|
 | Perfect day | +25 | All 5 prayers in their windows; qada disqualifies |
-| Jamaat | +5 | Toggle after the photo |
-| **Jumma** | +10 | Friday Dhuhr in congregation (replaces the jamaat bonus that day) |
-| Dhikr | +5 each, max 5/day | Only while on a break; **private** — levels you up but never shows on the circle scoreboard |
+
+## Dhikr & deeds (v3.8 — permanent, for everyone)
+
+Tasbih and good deeds live on the **Dhikr tab**, always available, and earn XP toward your level and the **weekly circle scoreboard**. The daily cap depends on your state:
+
+- **On a break** (period/illness): up to **200/day** from dhikr alone — so someone who genuinely can't pray still reaches a full day and isn't left behind by the Monday reset.
+- **Otherwise**: dhikr only tops a prayed-but-imperfect day **up to 150** total (prayer + dhikr). A strong/perfect prayer day (~175) always beats it, so praying early still wins.
+
+The act of dhikr is never blocked once the XP cap is reached — it just stops adding points.
 
 ## Traveling (combining / jam')
 
