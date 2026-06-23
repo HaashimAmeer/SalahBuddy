@@ -10,25 +10,68 @@ struct StatsView: View {
     @State private var displayedMonth: Date = AppClock.now
     @State private var selectedSummary: DayPhotoSummary?
     @State private var showLevelRoad = false
+    @State private var showScoring = false
+    @State private var showTitleInfo = false
+    @State private var selectedBadge: Badge?
 
     var body: some View {
         ZStack {
             Theme.bg.ignoresSafeArea()
-            ScrollView {
-                VStack(spacing: 16) {
-                    header
-                    levelCard
-                    badgeStrip
-                    weeklyXPCard
-                    photoCalendarCard
-                    statTiles
-                    placesCard
-                    challengesCard
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(spacing: 16) {
+                        header
+                            .id("tour-journey-top")
+                        // v3.7: the guided tour spotlights the level + scoring
+                        // + badges block as one "your progress" unit.
+                        VStack(spacing: 16) {
+                            levelCard
+                            scoringRow
+                            badgeStrip
+                        }
+                        .tutorialTarget(.journey)
+                        weeklyXPCard
+                        // v3.8: challenges surfaced above memories (design
+                        // session) — they were buried at the bottom.
+                        challengesCard
+                        photoCalendarCard
+                        statTiles
+                        placesCard
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 24)
                 }
-                .padding(.horizontal, 16)
-                .padding(.bottom, 24)
+                .onChange(of: state.tutorialStep) { _, step in
+                    guard step == Tour.journeyIndex else { return }
+                    withAnimation(Theme.spring) { proxy.scrollTo("tour-journey-top", anchor: .top) }
+                }
+            }
+
+            // v3.6: centered modals (design session) — nicer than a bottom
+            // sheet, X to dismiss.
+            if showScoring {
+                CenteredModal(onClose: { showScoring = false }) {
+                    ScoringExplainerContent()
+                }
+                .zIndex(5)
+            }
+            if showTitleInfo {
+                CenteredModal(onClose: { showTitleInfo = false }) {
+                    titleInfoContent
+                }
+                .zIndex(5)
+            }
+            // v3.6: tap a badge ("Kindling"?) to see what it takes to earn.
+            if let badge = selectedBadge {
+                CenteredModal(onClose: { selectedBadge = nil }) {
+                    badgeInfoContent(badge)
+                }
+                .zIndex(5)
             }
         }
+        .animation(Theme.spring, value: showScoring)
+        .animation(Theme.spring, value: showTitleInfo)
+        .animation(Theme.spring, value: selectedBadge?.id)
         .sheet(item: $selectedSummary) { summary in
             DayPhotoSheet(summary: summary)
                 .environmentObject(state)
@@ -50,7 +93,48 @@ struct StatsView: View {
                 .offset(y: -6)
             Spacer()
         }
-        .padding(.top, 8)
+        .padding(.top, 16)
+    }
+
+    /// v3.6: "How scoring works" lives here now (moved from Settings) — a
+    /// little box right under the levels, like it looked on the old profile.
+    private var scoringRow: some View {
+        Button {
+            withAnimation(Theme.spring) { showScoring = true }
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "questionmark.circle.fill")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(Theme.gold)
+                Text("How scoring works")
+                    .font(Theme.sans(14, .semibold))
+                    .foregroundStyle(Theme.inkDeep)
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(Theme.inkMuted)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 11)
+        }
+        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity)
+        .cardStyle()
+    }
+
+    /// What the current level title means — tap the chip on the level row.
+    private var titleInfoContent: some View {
+        VStack(spacing: 10) {
+            Text(state.levelTitle)
+                .font(Theme.sans(22, .bold))
+                .foregroundStyle(Theme.inkDeep)
+            Text(GameEngine.titleDescription(state.levelTitle))
+                .font(Theme.sans(14, .semibold))
+                .foregroundStyle(Theme.inkMuted)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.top, 2)
     }
 
     // MARK: - Level card
@@ -64,12 +148,22 @@ struct StatsView: View {
                     .font(Theme.sans(17, .heavy))
                     .foregroundStyle(Theme.inkDeep)
                     .contentTransition(.numericText())
-                Text(state.levelTitle)
-                    .font(Theme.sans(12, .bold))
+                // v3.6: tap the title to learn what it means.
+                Button {
+                    withAnimation(Theme.spring) { showTitleInfo = true }
+                } label: {
+                    HStack(spacing: 3) {
+                        Text(state.levelTitle)
+                            .font(Theme.sans(12, .bold))
+                        Image(systemName: "info.circle")
+                            .font(.system(size: 9, weight: .bold))
+                    }
                     .foregroundStyle(.white)
                     .padding(.horizontal, 9)
                     .padding(.vertical, 3)
                     .background(Capsule().fill(Theme.green))
+                }
+                .buttonStyle(.plain)
                 Spacer()
                 Text("\(state.xpIntoLevel)/\(state.xpNeededForLevel) XP")
                     .font(Theme.sans(12, .bold))
@@ -108,13 +202,43 @@ struct StatsView: View {
         return ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 14) {
                 ForEach(earned + unearned) { badge in
-                    BadgeIcon(badge: badge, earned: state.profile.earnedBadges[badge.id] != nil)
-                        .frame(width: 64)
+                    // v3.6: tap a badge to see what it means / how to earn it.
+                    Button {
+                        withAnimation(Theme.spring) { selectedBadge = badge }
+                    } label: {
+                        BadgeIcon(badge: badge, earned: state.profile.earnedBadges[badge.id] != nil)
+                            .frame(width: 64)
+                    }
+                    .buttonStyle(.plain)
                 }
             }
             .padding(.horizontal, 4)
             .padding(.vertical, 2)
         }
+    }
+
+    /// What a badge is and how it's earned (tap "Kindling" etc.).
+    private func badgeInfoContent(_ badge: Badge) -> some View {
+        let earnedAt = state.profile.earnedBadges[badge.id]
+        return VStack(spacing: 12) {
+            BadgeIcon(badge: badge, earned: earnedAt != nil)
+                .frame(width: 76)
+            Text(badge.detail)
+                .font(Theme.sans(14, .semibold))
+                .foregroundStyle(Theme.inkMuted)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+            if let earnedAt {
+                Text("Earned \(earnedAt.formatted(.dateTime.month(.abbreviated).day()))")
+                    .font(Theme.sans(12, .bold))
+                    .foregroundStyle(Theme.gold)
+            } else {
+                Text("Not earned yet — you've got this 💪")
+                    .font(Theme.sans(12, .bold))
+                    .foregroundStyle(Theme.green)
+            }
+        }
+        .padding(.top, 2)
     }
 
     private var levelProgress: Double {
@@ -254,7 +378,9 @@ struct StatsView: View {
         let hasPhotos = (summary?.photoFilenames.isEmpty == false)
 
         Button {
-            if let summary, hasPhotos { selectedSummary = summary }
+            // v3.6: ANY past day opens — photo-less days too, so a forgotten
+            // make-up can be logged retroactively from the day sheet.
+            selectedSummary = summary ?? state.daySummary(dayKey: day.dayKey, date: day.date)
         } label: {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(dayColor(logged: logged, excused: isExcused, future: isFuture))
@@ -280,7 +406,7 @@ struct StatsView: View {
                 }
         }
         .buttonStyle(.plain)
-        .disabled(!hasPhotos)
+        .disabled(isFuture && !hasPhotos)
         .overlay {
             if day.dayKey == todayKey {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -550,10 +676,12 @@ private struct DayPhotoSheet: View {
     }
 
     private var recapRow: some View {
-        HStack(spacing: 8) {
-            chip("\(summary.recap.xp) XP", color: Theme.gold)
-            chip("\(summary.recap.inWindowCount)/5 in window", color: Theme.green)
-            if summary.recap.isPerfect {
+        // Recomputed live so a retroactive make-up updates the chips.
+        let recap = state.daySummary(dayKey: summary.id, date: summary.date).recap
+        return HStack(spacing: 8) {
+            chip("\(recap.xp) XP", color: Theme.gold)
+            chip("\(recap.inWindowCount)/5 in window", color: Theme.green)
+            if recap.isPerfect {
                 chip("Perfect day ⭐", color: Theme.gold)
             }
             Spacer()
@@ -581,9 +709,14 @@ private struct DayPhotoSheet: View {
         }
     }
 
+    /// v3.6: past days are editable here — "I made it up but forgot to log
+    /// it". Recent edits (≤2 days) still earn qada XP; older ones earn 0.
+    private var isEditablePastDay: Bool {
+        summary.id < AppClock.dayKey(for: AppClock.now)
+    }
+
     private var prayerDetailCard: some View {
         let dayLogs = state.logs.filter { $0.dayKey == summary.id }
-        let excused = state.profile.excusedDayKeys.contains(summary.id)
         return VStack(alignment: .leading, spacing: 12) {
             Text("Prayers")
                 .font(Theme.sans(16, .bold))
@@ -592,12 +725,28 @@ private struct DayPhotoSheet: View {
             ForEach(Prayer.allCases) { prayer in
                 prayerRow(prayer: prayer,
                           log: dayLogs.first { $0.prayer == prayer },
-                          excused: excused)
+                          excused: state.isExcused(prayer: prayer, dayKey: summary.id))
+            }
+
+            if isEditablePastDay, hasEditableMiss(dayLogs) {
+                Text(state.lateEditXP(forDayKey: summary.id) > 0
+                     ? "Forgot to log a make-up? Tap it — recent edits still earn +\(state.lateEditXP(forDayKey: summary.id)) XP."
+                     : "Forgot to log a make-up? Tap it — edits this far back don't earn XP, but the record counts.")
+                    .font(Theme.sans(11.5, .semibold))
+                    .foregroundStyle(Theme.inkMuted)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
         .cardStyle()
+    }
+
+    private func hasEditableMiss(_ dayLogs: [PrayerLog]) -> Bool {
+        Prayer.allCases.contains { prayer in
+            !dayLogs.contains(where: { $0.prayer == prayer })
+                && !state.isExcused(prayer: prayer, dayKey: summary.id)
+        }
     }
 
     private func prayerRow(prayer: Prayer, log: PrayerLog?, excused: Bool) -> some View {
@@ -613,15 +762,39 @@ private struct DayPhotoSheet: View {
                 .font(Theme.sans(15, .semibold))
                 .foregroundStyle(Theme.inkDeep)
             Spacer()
-            Text(rowStatus(log: log, excused: excused))
-                .font(Theme.sans(13, .bold))
-                .foregroundStyle(rowColor(log: log, excused: excused))
+            if log == nil, !excused, isEditablePastDay {
+                makeUpButton(prayer)
+            } else {
+                Text(rowStatus(log: log, excused: excused))
+                    .font(Theme.sans(13, .bold))
+                    .foregroundStyle(rowColor(log: log, excused: excused))
+            }
             if let filename = log?.photoFilename {
                 PhotoThumb(filename: filename)
                     .frame(width: 34, height: 34)
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
         }
+    }
+
+    private func makeUpButton(_ prayer: Prayer) -> some View {
+        let xp = state.lateEditXP(forDayKey: summary.id)
+        return Button {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            withAnimation(Theme.spring) { state.logPastMakeUp(prayer, dayKey: summary.id) }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "plus.circle.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                Text(xp > 0 ? "Made it up · +\(xp) XP" : "Made it up")
+                    .font(Theme.sans(12, .bold))
+            }
+            .foregroundStyle(Theme.qadaBlue)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 5)
+            .background(Capsule().fill(Theme.qadaBlue.opacity(0.10)))
+        }
+        .buttonStyle(.plain)
     }
 
     private func rowColor(log: PrayerLog?, excused: Bool) -> Color {
@@ -640,6 +813,90 @@ private struct DayPhotoSheet: View {
     }
 }
 
+// MARK: - Scoring explainer (v3.6 — moved from Settings, now a centered modal)
+
+/// Plain-English walkthrough of the point system — mirrors SCORING.md.
+/// Hosted inside `CenteredModal` from the Journey level card.
+struct ScoringExplainerContent: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("How scoring works ⚡")
+                .font(Theme.sans(20, .bold))
+                .foregroundStyle(Theme.inkDeep)
+
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 14) {
+                    section("⏱ Pray early, earn more") {
+                        row("First quarter of the window", "+30 XP", Theme.green)
+                        row("Second quarter", "+20 XP", Theme.green)
+                        row("Third quarter", "+15 XP", Theme.amber)
+                        row("Final quarter", "+12 XP", Theme.amber)
+                        row("Made up later (Qada)", "+\(LogTier.qada.xp) XP", Theme.qadaBlue)
+                    }
+                    section("🤝 Praying in a group") {
+                        bullet("Prayed in jamaat (or Jumma on Friday)? Your prayer is lifted to 30 XP.")
+                        bullet("So a late group prayer is never penalised.")
+                    }
+                    section("🎁 Bonuses") {
+                        row("Perfect day — all 5 in window", "+25 XP", Theme.gold)
+                    }
+                    section("📿 Dhikr & deeds") {
+                        bullet("Tasbih and good deeds earn XP toward your level — always available, on the Dhikr tab.")
+                        bullet("On a break you can earn up to 200/day; otherwise dhikr tops you up to 150, so praying early always wins.")
+                    }
+                    section("🔥 Streaks") {
+                        bullet("Log all 5 prayers in a day to extend your streak.")
+                        bullet("Every 7-day streak banks a streak freeze (max 2) that covers a missed day.")
+                        bullet("Breaks pause everything — your streak is safe until you resume.")
+                    }
+                    section("🏆 The circle") {
+                        bullet("Weekly scores reset every Monday and count prayer XP + bonuses + dhikr.")
+                        bullet("The crown goes to the first to the weekly target (prayer XP).")
+                    }
+                }
+                .padding(.bottom, 4)
+            }
+            .frame(maxHeight: 380)
+        }
+    }
+
+    private func section(_ title: String, @ViewBuilder content: () -> some View) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(Theme.sans(15, .bold))
+                .foregroundStyle(Theme.inkDeep)
+            content()
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.bg, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private func row(_ label: String, _ value: String, _ color: Color) -> some View {
+        HStack {
+            Text(label)
+                .font(Theme.sans(13, .semibold))
+                .foregroundStyle(Theme.inkMuted)
+            Spacer()
+            Text(value)
+                .font(Theme.sans(13, .heavy))
+                .foregroundStyle(color)
+        }
+    }
+
+    private func bullet(_ text: String) -> some View {
+        HStack(alignment: .top, spacing: 7) {
+            Text("•")
+                .font(Theme.sans(13, .bold))
+                .foregroundStyle(Theme.green)
+            Text(text)
+                .font(Theme.sans(13, .semibold))
+                .foregroundStyle(Theme.inkMuted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
 // MARK: - Lazy thumbnail
 
 /// Loads a photo off the main thread and decodes a small thumbnail so grids
@@ -649,6 +906,7 @@ private struct PhotoThumb: View {
     var pixelSize: CGFloat = 240
 
     @State private var image: UIImage?
+    @State private var loadedFor: String?
 
     var body: some View {
         GeometryReader { geo in
@@ -671,7 +929,7 @@ private struct PhotoThumb: View {
             }
         }
         .task(id: filename) {
-            guard image == nil else { return }
+            guard loadedFor != filename else { return }
             let name = filename
             let target = CGSize(width: pixelSize, height: pixelSize)
             let thumb = await Task.detached(priority: .utility) { () -> UIImage? in
@@ -679,6 +937,7 @@ private struct PhotoThumb: View {
                 return full.preparingThumbnail(of: target) ?? full
             }.value
             image = thumb
+            loadedFor = name
         }
     }
 }

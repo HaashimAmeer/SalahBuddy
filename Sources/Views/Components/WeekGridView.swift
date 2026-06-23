@@ -75,8 +75,7 @@ struct WeekGridView: View {
 
     private func memberLabel(_ member: CircleMember) -> some View {
         HStack(spacing: 4) {
-            Text(member.emoji)
-                .font(.system(size: 14))
+            MemberAvatarView(member: member, size: 16)
             Text(member.isYou ? "You" : member.name)
                 .font(Theme.sans(12, member.isYou ? .bold : .semibold))
                 .foregroundStyle(member.isYou ? Theme.green : Theme.inkDeep)

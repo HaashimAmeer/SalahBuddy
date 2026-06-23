@@ -10,35 +10,53 @@ struct HomeView: View {
 
     @State private var cameraTarget: CameraTarget?
     @State private var travelSuggestionDismissed = false
+    @State private var enlarged: EnlargedPost?
 
     var body: some View {
         ZStack {
             Theme.bg.ignoresSafeArea()
 
-            ScrollView(showsIndicators: false) {
-                VStack(spacing: 16) {
-                    TodayHeader()
-                    PrayerTimesStrip(currentPrayer: state.currentTodayBlock(now: now)?
-                        .isYesterdayIsha == false ? state.currentTodayBlock(now: now)?.prayer : nil)
+            ScrollViewReader { proxy in
+                ScrollView(showsIndicators: false) {
+                    VStack(spacing: 16) {
+                        TodayHeader()
+                            .id("tour-home-top")
+                        PrayerTimesStrip(currentPrayer: state.currentTodayBlock(now: now)?
+                            .isYesterdayIsha == false ? state.currentTodayBlock(now: now)?.prayer : nil)
 
-                    TravelSuggestionBanner(dismissed: $travelSuggestionDismissed)
+                        TravelSuggestionBanner(dismissed: $travelSuggestionDismissed)
 
-                    if let block = state.currentTodayBlock(now: now) {
-                        CurrentPrayerBlock(block: block) {
-                            cameraTarget = CameraTarget(prayer: block.prayer, dayKey: block.dayKey,
-                                                        combinedLead: block.combinedWith != nil ? block.prayer : nil)
+                        if let block = state.currentTodayBlock(now: now) {
+                            CurrentPrayerBlock(
+                                block: block,
+                                onPost: {
+                                    cameraTarget = CameraTarget(prayer: block.prayer, dayKey: block.dayKey,
+                                                                combinedLead: block.combinedWith != nil ? block.prayer : nil)
+                                },
+                                onEnlarge: { enlarged = EnlargedPost(entry: $0, prayer: block.prayer) })
+                            .tutorialTarget(.postPhoto)
                         }
-                    }
 
-                    MakeUpSection()
-                    EarlierTodaySection()
-                    UpcomingSection()
-                    TravelToggleRow()
-                    ExcusedTodayFooter()
+                        MakeUpSection()
+                        EarlierTodaySection()
+                            .tutorialTarget(.earlierToday)
+                            .id("tour-earlier")
+                        UpcomingSection()
+                        // v3.6: travel + "can't pray" controls moved to Settings
+                        // (design session) — they're not everyday actions.
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 18)
+                    .padding(.bottom, 28)
                 }
-                .padding(.horizontal, 16)
-                .padding(.top, 10)
-                .padding(.bottom, 28)
+                // v3.7: the guided tour scrolls its targets into view.
+                .onChange(of: state.tutorialStep) { _, step in
+                    guard let step else { return }
+                    withAnimation(Theme.spring) {
+                        if step == Tour.postPhotoIndex { proxy.scrollTo("tour-home-top", anchor: .top) }
+                        if step == Tour.earlierTodayIndex { proxy.scrollTo("tour-earlier", anchor: .center) }
+                    }
+                }
             }
 
             if state.celebration != nil {
@@ -46,8 +64,17 @@ struct HomeView: View {
                     .transition(.opacity.combined(with: .scale(scale: 0.94)))
                     .zIndex(10)
             }
+
+            // v3.8: enlarge a tapped square in place — centered modal, no scroll.
+            if let post = enlarged {
+                CenteredModal(onClose: { enlarged = nil }) {
+                    PrayerPhotoDetailContent(entry: post.entry, prayer: post.prayer)
+                }
+                .zIndex(15)
+            }
         }
         .animation(Theme.spring, value: state.celebration != nil)
+        .animation(Theme.spring, value: enlarged)
         .sheet(item: $cameraTarget) { target in
             CameraFlowSheet(target: target)
         }
@@ -63,16 +90,24 @@ struct TodayHeader: View {
     @Environment(\.appNow) private var now
 
     var body: some View {
+        // v3.6 (design session): bigger, more spaced greeting; the little moon
+        // sits right next to the salam instead of floating out of place.
         HStack(alignment: .center, spacing: 10) {
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text(HomeTimeFormat.dayLine(now))
-                    .font(Theme.sans(12, .semibold))
+                    .font(Theme.sans(13, .semibold))
                     .foregroundStyle(Theme.inkMuted)
-                Text("Salam, \(displayName)")
-                    .font(Theme.sans(24, .bold))
-                    .foregroundStyle(Theme.inkDeep)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.6)
+                HStack(spacing: 8) {
+                    Text("Salam, \(displayName)")
+                        .font(Theme.sans(28, .bold))
+                        .foregroundStyle(Theme.inkDeep)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.6)
+                    Image(systemName: "moon.stars.fill")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(Theme.green.opacity(0.55))
+                        .offset(y: -5)
+                }
                 // v3.2: level lives under the greeting (design session) — the
                 // right side keeps just the flame, less crowded.
                 HStack(spacing: 6) {
@@ -82,19 +117,14 @@ struct TodayHeader: View {
                     ProgressRing(progress: levelProgress, lineWidth: 2.5, color: Theme.gold)
                         .frame(width: 13, height: 13)
                 }
-                .padding(.top, 1)
-            }
-            .overlay(alignment: .topTrailing) {
-                Image(systemName: "moon.stars.fill")
-                    .font(.system(size: 13))
-                    .foregroundStyle(Theme.green.opacity(0.25))
-                    .offset(x: 20, y: -2)
+                .padding(.top, 2)
             }
 
             Spacer(minLength: 8)
 
             StreakFlameView(streak: state.profile.streak, isLitToday: streakLitToday)
         }
+        .padding(.top, 4)
     }
 
     private var levelProgress: Double {

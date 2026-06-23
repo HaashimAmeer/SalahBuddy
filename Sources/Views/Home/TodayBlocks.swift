@@ -8,11 +8,15 @@ import SwiftUI
 struct CurrentPrayerBlock: View {
     let block: TodayBlock
     let onPost: () -> Void
+    /// v3.8: tapping a square enlarges it — handled by HomeView as a centered
+    /// modal (so it pops in place, not a sheet you have to scroll).
+    var onEnlarge: (GridEntry) -> Void = { _ in }
 
     @EnvironmentObject private var state: AppState
     @Environment(\.appNow) private var now
 
     @State private var showRecharge = false
+    @State private var showResume = false
 
     var body: some View {
         let entries = state.gridEntries(for: block.prayer, dayKey: block.dayKey)
@@ -41,7 +45,8 @@ struct CurrentPrayerBlock: View {
             LiveCircleGrid(entries: entries,
                            showCTA: isWindowOpen && !excusedForBlockDay,
                            onPost: onPost,
-                           onUndoMine: { undoMine() })
+                           onUndoMine: { undoMine() },
+                           onTapEntry: { onEnlarge($0) })
 
             if iPostedInWindow(entries) {
                 Text(block.combinedWith != nil
@@ -51,6 +56,8 @@ struct CurrentPrayerBlock: View {
                     .foregroundStyle(Theme.inkMuted.opacity(0.8))
                     .frame(maxWidth: .infinity, alignment: .center)
             }
+
+            nudgeRow(entries)
         }
         .padding(16)
         .cardStyle()
@@ -58,6 +65,42 @@ struct CurrentPrayerBlock: View {
         .sheet(isPresented: $showRecharge) {
             RecoverySheet().environmentObject(state)
         }
+        .sheet(isPresented: $showResume) {
+            ResumeSheet()
+                .environmentObject(state)
+                .presentationDetents([.medium])
+        }
+    }
+
+    /// v3.6 (design session): once a prayer has been in for 30 minutes,
+    /// friends who still haven't posted can be nudged.
+    @ViewBuilder
+    private func nudgeRow(_ entries: [GridEntry]) -> some View {
+        let waiting = entries.filter { !$0.member.isYou && $0.state == .waiting }
+        if isWindowOpen, !excusedForBlockDay, nudgeEligible, !waiting.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Nudge your friends 👋")
+                    .font(Theme.sans(11, .bold))
+                    .foregroundStyle(Theme.inkMuted)
+                    .textCase(.uppercase)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(waiting) { entry in
+                            NudgeChip(member: entry.member, prayer: block.prayer,
+                                      dayKey: block.dayKey)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// 30+ minutes into the window (not computable for the pre-fajr
+    /// yesterday-isha block — no nudges there).
+    private var nudgeEligible: Bool {
+        guard !block.isYesterdayIsha,
+              let start = state.todaySchedule?.window(for: block.prayer)?.start else { return false }
+        return now >= start.addingTimeInterval(30 * 60)
     }
 
     /// Tier the log would earn now — against the combined window when traveling.
@@ -154,7 +197,7 @@ struct CurrentPrayerBlock: View {
                     .buttonStyle(.plain)
 
                     Button {
-                        withAnimation(Theme.spring) { state.resumePrayers() }
+                        showResume = true
                     } label: {
                         Text("Resume prayers")
                             .font(Theme.sans(14, .bold))
@@ -197,10 +240,10 @@ struct CurrentPrayerBlock: View {
         return false
     }
 
+    /// v3.6: per-prayer — a break that started at Asr leaves the maghrib CTA
+    /// alone after a mid-day resume, and never repaints the morning.
     private var excusedForBlockDay: Bool {
-        block.isYesterdayIsha
-            ? state.profile.excusedDayKeys.contains(block.dayKey)
-            : state.isTodayExcused
+        state.isExcused(prayer: block.prayer, dayKey: block.dayKey)
     }
 
     private func iLogged(_ entries: [GridEntry]) -> Bool {
@@ -233,12 +276,13 @@ struct LiveCircleGrid: View {
     let showCTA: Bool
     let onPost: () -> Void
     let onUndoMine: () -> Void
+    let onTapEntry: (GridEntry) -> Void
 
     @State private var page = 0
     @State private var width: CGFloat = 0
 
     private let perPage = 4
-    private let spacing: CGFloat = 12
+    private let line: CGFloat = 2   // v3.8: hairline divider between flush cells
 
     var body: some View {
         Group {
@@ -256,7 +300,7 @@ struct LiveCircleGrid: View {
                         }
                     }
                     .tabViewStyle(.page(indexDisplayMode: .never))
-                    .frame(height: square * 2 + spacing)
+                    .frame(height: square * 2 + line)
                     indicator
                 }
             }
@@ -283,22 +327,31 @@ struct LiveCircleGrid: View {
         }
     }
 
-    /// Square edge from the measured content width (two columns + spacing).
+    /// Square edge from the measured content width (two flush columns + one
+    /// hairline divider).
     private var square: CGFloat {
         let w = width > 0 ? width : UIScreen.main.bounds.width - 64
-        return max(60, (w - spacing) / 2)
+        return max(60, (w - line) / 2)
     }
 
-    /// One page: up to four squares in a fixed 2-column grid, left-anchored so
-    /// a partial last page keeps the top-left "you" position.
+    /// v3.8 (design session): one page is a flush 2×2 — square cells, hairline
+    /// dividers, rounded corners ONLY on the outer card. Partial last page
+    /// keeps the rows it has (top-left "you" first).
     private func gridPage(_ pageEntries: [GridEntry]) -> some View {
-        let cols = [GridItem(.fixed(square), spacing: spacing),
-                    GridItem(.fixed(square), spacing: spacing)]
-        return LazyVGrid(columns: cols, spacing: spacing) {
-            ForEach(pageEntries) { entry in
-                cell(entry).frame(width: square, height: square)
+        let rows = stride(from: 0, to: pageEntries.count, by: 2).map {
+            Array(pageEntries[$0 ..< min($0 + 2, pageEntries.count)])
+        }
+        return VStack(spacing: line) {
+            ForEach(Array(rows.enumerated()), id: \.offset) { _, rowEntries in
+                HStack(spacing: line) {
+                    ForEach(rowEntries) { entry in
+                        cell(entry).frame(width: square, height: square)
+                    }
+                }
             }
         }
+        .background(Theme.mist.opacity(0.55))   // shows through the gaps as dividers
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
@@ -346,11 +399,16 @@ struct LiveCircleGrid: View {
         if entry.member.isYou, entry.state == .waiting, showCTA {
             ctaSquare
         } else if entry.member.isYou, isPosted(entry) {
+            // Tap to enlarge; long-press to undo your own post.
             sizedSquare(entry)
+                .onTapGesture { onTapEntry(entry) }
                 .onLongPressGesture(minimumDuration: 0.5) {
                     UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
                     onUndoMine()
                 }
+        } else if isPosted(entry) {
+            sizedSquare(entry)
+                .onTapGesture { onTapEntry(entry) }
         } else {
             sizedSquare(entry)
         }
@@ -358,11 +416,13 @@ struct LiveCircleGrid: View {
 
     private func sizedSquare(_ entry: GridEntry) -> some View {
         GeometryReader { geo in
-            PhotoSquare(entry: entry, size: geo.size.width)
+            PhotoSquare(entry: entry, size: geo.size.width, flush: true)
         }
+        .contentShape(Rectangle())
     }
 
-    /// Your square as the camera CTA — dashed soft-green tile.
+    /// Your square as the camera CTA — flush soft-green tile with a dashed
+    /// inset so it still reads as "tap me" inside the edge-to-edge grid.
     private var ctaSquare: some View {
         Button {
             UIImpactFeedbackGenerator(style: .medium).impactOccurred()
@@ -377,16 +437,14 @@ struct LiveCircleGrid: View {
                     .foregroundStyle(Theme.inkDeep)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(Theme.greenSoft.opacity(0.55))
-            )
+            .background(Theme.greenSoft.opacity(0.6))
             .overlay(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .strokeBorder(Theme.green.opacity(0.7),
                                   style: StrokeStyle(lineWidth: 2, dash: [7, 5]))
+                    .padding(8)
             )
-            .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
@@ -406,6 +464,86 @@ private struct GridWidthKey: PreferenceKey {
     }
 }
 
+// MARK: - Tap-to-enlarge detail (v3.8 — design session)
+
+/// What HomeView needs to show the centered enlarge modal.
+struct EnlargedPost: Identifiable, Equatable {
+    let entry: GridEntry
+    let prayer: Prayer
+    var id: String { entry.id }
+    static func == (l: EnlargedPost, r: EnlargedPost) -> Bool { l.id == r.id }
+}
+
+/// Tapping a square pops this open IN PLACE (inside `CenteredModal`, which
+/// supplies the dim + close X) — the photo larger, with the details taken off
+/// the small tile (location, full time, tier). No scrolling.
+struct PrayerPhotoDetailContent: View {
+    let entry: GridEntry
+    let prayer: Prayer
+    @State private var image: UIImage?
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Text("\(prayer.emoji) \(entry.member.isYou ? "You" : entry.member.name)")
+                .font(Theme.sans(20, .bold))
+                .foregroundStyle(Theme.inkDeep)
+            photo
+            detailRow
+        }
+    }
+
+    @ViewBuilder
+    private var photo: some View {
+        Group {
+            switch entry.state {
+            case .posted(.photo(let filename), _, _):
+                Group {
+                    if let image {
+                        Image(uiImage: image).resizable().scaledToFill()
+                    } else {
+                        Theme.greenSoft.opacity(0.5)
+                    }
+                }
+                .task(id: filename) {
+                    let name = filename
+                    image = await Task.detached(priority: .userInitiated) {
+                        PhotoStore.load(name)
+                    }.value
+                }
+            case .posted(.illustration(let seed), _, _):
+                IllustratedPrayerCard(seed: seed)
+            default:
+                Theme.greenSoft.opacity(0.5)
+            }
+        }
+        .aspectRatio(1, contentMode: .fit)
+        .frame(maxWidth: .infinity)
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private var detailRow: some View {
+        HStack(spacing: 8) {
+            if case .posted(_, let tier, let at) = entry.state {
+                chip(tier.label, Theme.color(for: .inWindow(tier)))
+                chip(at.formatted(date: .omitted, time: .shortened), Theme.inkMuted)
+            }
+            if let place = entry.placeLabel {
+                chip(place, Theme.qadaBlue)
+            }
+        }
+    }
+
+    private func chip(_ text: String, _ color: Color) -> some View {
+        Text(text)
+            .font(Theme.sans(12.5, .bold))
+            .foregroundStyle(color)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 5)
+            .background(Capsule().fill(color.opacity(0.14)))
+            .lineLimit(1)
+    }
+}
+
 // MARK: - Make-up (qada) section
 
 /// Today's passed-unlogged prayers as small tap-only rows, with gentle
@@ -414,8 +552,12 @@ struct MakeUpSection: View {
     @EnvironmentObject private var state: AppState
 
     var body: some View {
-        let prayers = state.makeUpPrayers
-        if !prayers.isEmpty, !state.isTodayExcused {
+        // v3.6: per-prayer excuse — a miss from BEFORE a mid-day break started
+        // is still make-up-able.
+        let prayers = state.makeUpPrayers.filter {
+            !state.isExcused(prayer: $0, dayKey: state.todayKey)
+        }
+        if !prayers.isEmpty {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Make up")
                     .font(Theme.sans(13, .bold))
@@ -529,62 +671,16 @@ struct EarlierTodayBlock: View {
             .buttonStyle(.plain)
 
             if isExpanded {
-                // v3.2: status only, no photos — past photos live in YOUR
-                // Journey memories; here it's just who prayed and who didn't.
-                statusRows(state.gridEntries(for: prayer, dayKey: state.todayKey))
+                // v3.6 (design session): a sequential TIMELINE of who prayed
+                // when — earliest first, made-ups at the end, everyone who
+                // hasn't logged bunched at the bottom. No photos here; past
+                // photos live in YOUR Journey memories.
+                PrayerTimeline(prayer: prayer, dayKey: state.todayKey,
+                               entries: state.gridEntries(for: prayer, dayKey: state.todayKey))
             }
         }
         .padding(14)
         .cardStyle()
-    }
-
-    private func statusRows(_ entries: [GridEntry]) -> some View {
-        VStack(spacing: 6) {
-            ForEach(entries) { entry in
-                HStack(spacing: 8) {
-                    Text(entry.member.emoji)
-                        .font(.system(size: 14))
-                    Text(entry.member.isYou ? "You" : entry.member.name)
-                        .font(Theme.sans(13, entry.member.isYou ? .bold : .semibold))
-                        .foregroundStyle(Theme.inkDeep)
-                    Spacer(minLength: 8)
-                    statusChip(entry.state)
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func statusChip(_ entryState: GridEntryState) -> some View {
-        switch entryState {
-        case .posted(_, let tier, let at):
-            HStack(spacing: 4) {
-                Circle().fill(Theme.color(for: .inWindow(tier)))
-                    .frame(width: 8, height: 8)
-                Text("Prayed · \(at.formatted(date: .omitted, time: .shortened))")
-            }
-            .font(Theme.sans(12, .semibold))
-            .foregroundStyle(Theme.inkMuted)
-        case .qada:
-            Text("Made up")
-                .font(Theme.sans(12, .bold))
-                .foregroundStyle(Theme.qadaBlue)
-        case .missed:
-            Text("Not yet")
-                .font(Theme.sans(12, .semibold))
-                .foregroundStyle(Theme.inkMuted.opacity(0.7))
-        case .excused:
-            HStack(spacing: 3) {
-                Image(systemName: "moon.fill").font(.system(size: 9, weight: .bold))
-                Text("Excused")
-            }
-            .font(Theme.sans(12, .bold))
-            .foregroundStyle(Theme.lilac)
-        case .waiting:
-            Text("…")
-                .font(Theme.sans(12, .semibold))
-                .foregroundStyle(Theme.inkMuted.opacity(0.5))
-        }
     }
 
     @ViewBuilder
@@ -595,12 +691,234 @@ struct EarlierTodayBlock: View {
                 .font(Theme.sans(12, .bold))
                 .foregroundStyle(tier.isInWindow ? Theme.green : Theme.qadaBlue)
         case .missedWindow:
-            Text(state.isTodayExcused ? "Excused" : "Missed")
+            let excused = state.isExcused(prayer: prayer, dayKey: state.todayKey)
+            Text(excused ? "Excused" : "Missed")
                 .font(Theme.sans(12, .bold))
-                .foregroundStyle(state.isTodayExcused ? Theme.lilac : Theme.inkMuted)
+                .foregroundStyle(excused ? Theme.lilac : Theme.inkMuted)
         default:
             EmptyView()
         }
+    }
+}
+
+// MARK: - Prayer timeline (v3.6 — design session)
+
+/// Sequential visualization of one prayer across the circle: in-window posts
+/// ordered by time down a vertical timeline, made-ups appended at the end
+/// (when they made up doesn't matter), excused folks resting quietly, and
+/// everyone who hasn't logged bunched into one muted row (with a nudge).
+struct PrayerTimeline: View {
+    let prayer: Prayer
+    let dayKey: String
+    let entries: [GridEntry]
+
+    @EnvironmentObject private var state: AppState
+
+    private var posted: [GridEntry] {
+        entries
+            .filter { if case .posted = $0.state { return true }; return false }
+            .sorted { postTime($0) < postTime($1) }
+    }
+    private var madeUp: [GridEntry] {
+        entries.filter { if case .qada = $0.state { return true }; return false }
+    }
+    private var excused: [GridEntry] { entries.filter { $0.state == .excused } }
+    private var notLogged: [GridEntry] {
+        entries.filter { $0.state == .missed || $0.state == .waiting }
+    }
+
+    private func postTime(_ entry: GridEntry) -> Date {
+        if case .posted(_, _, let at) = entry.state { return at }
+        return .distantPast
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(posted.enumerated()), id: \.element.id) { index, entry in
+                timelineRow(entry, isLast: index == posted.count - 1
+                            && madeUp.isEmpty && excused.isEmpty && notLogged.isEmpty)
+            }
+            ForEach(madeUp) { entry in
+                plainRow(emoji: entry.member.emoji,
+                         name: displayName(entry.member),
+                         label: "Made up", color: Theme.qadaBlue,
+                         dotColor: Theme.qadaBlue)
+            }
+            ForEach(excused) { entry in
+                plainRow(emoji: entry.member.emoji,
+                         name: displayName(entry.member),
+                         label: "Resting 🌙", color: Theme.lilac,
+                         dotColor: Theme.lilac)
+            }
+            notLoggedRow
+            if posted.isEmpty && madeUp.isEmpty && excused.isEmpty && notLogged.isEmpty {
+                Text("No one's logged this one yet.")
+                    .font(Theme.sans(12, .semibold))
+                    .foregroundStyle(Theme.inkMuted.opacity(0.7))
+            }
+        }
+    }
+
+    private func displayName(_ member: CircleMember) -> String {
+        member.isYou ? "You" : member.name
+    }
+
+    /// One in-window post on the timeline: time column, colored dot on a
+    /// connecting line, then who + how early.
+    private func timelineRow(_ entry: GridEntry, isLast: Bool) -> some View {
+        guard case .posted(_, let tier, let at) = entry.state else {
+            return AnyView(EmptyView())
+        }
+        return AnyView(
+            HStack(alignment: .top, spacing: 10) {
+                Text(at.formatted(date: .omitted, time: .shortened))
+                    .font(Theme.sans(11, .bold))
+                    .foregroundStyle(Theme.inkMuted)
+                    .frame(width: 56, alignment: .trailing)
+                    .padding(.top, 2)
+
+                VStack(spacing: 0) {
+                    Circle()
+                        .fill(Theme.color(for: .inWindow(tier)))
+                        .frame(width: 10, height: 10)
+                    if !isLast {
+                        Rectangle()
+                            .fill(Theme.mist.opacity(0.5))
+                            .frame(width: 2)
+                            .frame(minHeight: 14)
+                    }
+                }
+
+                HStack(spacing: 6) {
+                    Text(entry.member.emoji).font(.system(size: 14))
+                    Text(displayName(entry.member))
+                        .font(Theme.sans(13, entry.member.isYou ? .bold : .semibold))
+                        .foregroundStyle(Theme.inkDeep)
+                    Spacer(minLength: 8)
+                    Text(tier.label)
+                        .font(Theme.sans(11.5, .bold))
+                        .foregroundStyle(Theme.color(for: .inWindow(tier)))
+                }
+                .padding(.bottom, isLast ? 0 : 10)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        )
+    }
+
+    /// Off-timeline rows (made up / resting) — no time column; "the end is
+    /// where they go" per the design session.
+    private func plainRow(emoji: String, name: String, label: String,
+                          color: Color, dotColor: Color) -> some View {
+        HStack(spacing: 10) {
+            Color.clear.frame(width: 56, height: 1)
+            Circle().fill(dotColor.opacity(0.7)).frame(width: 8, height: 8)
+            Text(emoji).font(.system(size: 14))
+            Text(name)
+                .font(Theme.sans(13, .semibold))
+                .foregroundStyle(Theme.inkDeep)
+            Spacer(minLength: 8)
+            Text(label)
+                .font(Theme.sans(11.5, .bold))
+                .foregroundStyle(color)
+        }
+        .padding(.top, 8)
+    }
+
+    /// Everyone who hasn't logged, bunched together so the timeline scales —
+    /// "it would just say, like, seven people not logged".
+    @ViewBuilder
+    private var notLoggedRow: some View {
+        let friends = notLogged.filter { !$0.member.isYou }
+        if !friends.isEmpty {
+            HStack(spacing: 8) {
+                Color.clear.frame(width: 56, height: 1)
+                HStack(spacing: -6) {
+                    ForEach(friends.prefix(4)) { entry in
+                        Text(entry.member.emoji)
+                            .font(.system(size: 13))
+                            .frame(width: 24, height: 24)
+                            .background(Circle().fill(Theme.bg))
+                            .overlay(Circle().strokeBorder(Theme.surface, lineWidth: 1.5))
+                            .grayscale(0.9)
+                            .opacity(0.75)
+                    }
+                }
+                Text(friends.count == 1
+                     ? "\(friends.first!.member.name) hasn't logged yet"
+                     : "\(friends.count) haven't logged yet")
+                    .font(Theme.sans(12, .semibold))
+                    .foregroundStyle(Theme.inkMuted.opacity(0.85))
+                Spacer(minLength: 8)
+                if friends.count == 1, let only = friends.first {
+                    NudgeChip(member: only.member, prayer: prayer, dayKey: dayKey)
+                } else {
+                    nudgeAllButton(friends.map(\.member))
+                }
+            }
+            .padding(.top, 10)
+        }
+    }
+
+    private func nudgeAllButton(_ members: [CircleMember]) -> some View {
+        let allSent = members.allSatisfy {
+            state.nudgesSent.contains(state.nudgeKey(member: $0, prayer: prayer, dayKey: dayKey))
+        }
+        return Button {
+            guard !allSent else { return }
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            withAnimation(Theme.spring) {
+                for member in members {
+                    state.sendNudge(to: member, prayer: prayer, dayKey: dayKey)
+                }
+            }
+        } label: {
+            Text(allSent ? "Nudged ✓" : "Nudge all 👋")
+                .font(Theme.sans(12, .bold))
+                .foregroundStyle(allSent ? Theme.inkMuted : .white)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Capsule().fill(allSent ? Theme.mist.opacity(0.4) : Theme.green))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// One friend's nudge chip — emoji + name + a wave; flips to "✓" once sent.
+struct NudgeChip: View {
+    let member: CircleMember
+    let prayer: Prayer
+    let dayKey: String
+
+    @EnvironmentObject private var state: AppState
+
+    private var sent: Bool {
+        state.nudgesSent.contains(state.nudgeKey(member: member, prayer: prayer, dayKey: dayKey))
+    }
+
+    var body: some View {
+        Button {
+            guard !sent else { return }
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            withAnimation(Theme.spring) {
+                state.sendNudge(to: member, prayer: prayer, dayKey: dayKey)
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Text(member.emoji).font(.system(size: 13))
+                Text(member.name)
+                    .font(Theme.sans(12, .semibold))
+                    .foregroundStyle(Theme.inkDeep)
+                Text(sent ? "✓" : "👋")
+                    .font(.system(size: 12))
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Capsule().fill(sent ? Theme.greenSoft.opacity(0.6) : Theme.bg))
+            .overlay(Capsule().strokeBorder(
+                sent ? Theme.green.opacity(0.5) : Theme.mist.opacity(0.6), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .disabled(sent)
     }
 }
 
@@ -654,49 +972,9 @@ struct UpcomingSection: View {
 }
 
 // MARK: - Travel mode (v3.3)
-
-/// Quiet manual "I'm traveling" toggle — combines Dhuhr+Asr and Maghrib+Isha.
-struct TravelToggleRow: View {
-    @EnvironmentObject private var state: AppState
-
-    var body: some View {
-        Button {
-            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-            withAnimation(Theme.spring) { state.setTraveling(!state.isTraveling) }
-        } label: {
-            HStack(spacing: 10) {
-                Image(systemName: state.isTraveling ? "airplane.circle.fill" : "airplane")
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(state.isTraveling ? Theme.qadaBlue : Theme.inkMuted)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(state.isTraveling ? "Traveling — prayers combined" : "Traveling?")
-                        .font(Theme.sans(14, .bold))
-                        .foregroundStyle(Theme.inkDeep)
-                    Text(state.isTraveling
-                         ? "Dhuhr+Asr and Maghrib+Isha log together. Tap to turn off."
-                         : "Combine Dhuhr+Asr and Maghrib+Isha (jam').")
-                        .font(Theme.sans(11.5, .semibold))
-                        .foregroundStyle(Theme.inkMuted)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer(minLength: 8)
-                Image(systemName: state.isTraveling ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 22, weight: .semibold))
-                    .foregroundStyle(state.isTraveling ? Theme.qadaBlue : Theme.mist)
-                    .contentTransition(.symbolEffect(.replace))
-            }
-            .padding(14)
-            .background(state.isTraveling ? Theme.qadaBlue.opacity(0.10) : Theme.surface,
-                        in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .strokeBorder(state.isTraveling ? Theme.qadaBlue.opacity(0.5) : Theme.mist.opacity(0.4),
-                                  lineWidth: 1.5)
-            )
-        }
-        .buttonStyle(.plain)
-    }
-}
+// v3.6: the manual travel toggle and the "Can't pray right now?" entry moved
+// to Settings (design session) — they're occasional, not everyday actions.
+// Only the location-based auto-suggestion stays on Today.
 
 /// Auto-suggestion banner: shows when you're far from your saved Home.
 struct TravelSuggestionBanner: View {
@@ -740,94 +1018,6 @@ struct TravelSuggestionBanner: View {
 }
 
 // MARK: - Excused-day footer
-
-/// Quiet "Can't pray today?" flow: confirm dialog → setTodayExcused(true).
-/// Shows the lilac excused banner with undo when active, and the cap state
-/// ("n/10 used") when the monthly allowance is spent.
-struct ExcusedTodayFooter: View {
-    @EnvironmentObject private var state: AppState
-
-    // v3.4: the entry routes differently by gender (memberKind).
-    @State private var sisterConfirm = false
-    @State private var brotherConfirm = false
-    @State private var genericConfirm = false
-
-    var body: some View {
-        Group {
-            if state.isOnBreak {
-                breakBanner
-            } else {
-                entryButton
-            }
-        }
-        .padding(.top, 6)
-    }
-
-    @ViewBuilder
-    private var entryButton: some View {
-        Button {
-            if state.isSister { sisterConfirm = true }
-            else if state.isBrother { brotherConfirm = true }
-            else { genericConfirm = true }
-        } label: {
-            Text("Can't pray right now?")
-                .font(Theme.sans(13, .semibold))
-                .foregroundStyle(Theme.inkMuted)
-                .underline()
-        }
-        .buttonStyle(.plain)
-        // Sisters: period leads, framed as completely normal.
-        .confirmationDialog("Need a break?", isPresented: $sisterConfirm, titleVisibility: .visible) {
-            Button("Monthly break 🌸") { withAnimation(Theme.spring) { state.startBreak(reason: "period") } }
-            Button("Another reason") { withAnimation(Theme.spring) { state.startBreak(reason: "other") } }
-            Button("Not now", role: .cancel) {}
-        } message: {
-            Text("Your prayers are waived while you rest — nothing to make up, and your streak stays safe. Your circle only sees a gentle \"resting\". Dhikr earns private XP meanwhile.")
-        }
-        // Brothers: travel routes to combining (you can still pray); only
-        // genuine inability starts a break.
-        .confirmationDialog("Can't pray right now?", isPresented: $brotherConfirm, titleVisibility: .visible) {
-            Button("I'm traveling ✈️") { withAnimation(Theme.spring) { state.setTraveling(true) } }
-            Button("I'm unwell 🤒") { withAnimation(Theme.spring) { state.startBreak(reason: "illness") } }
-            Button("Not now", role: .cancel) {}
-        } message: {
-            Text("Traveling? You can still pray — turn on combining to log Dhuhr+Asr and Maghrib+Isha together. A break is for when you genuinely can't; your streak stays safe either way.")
-        }
-        // Unknown gender: the unified break.
-        .confirmationDialog("Take a break?", isPresented: $genericConfirm, titleVisibility: .visible) {
-            Button("Start a break 🌙") { withAnimation(Theme.spring) { state.startBreak(reason: "other") } }
-            Button("Not now", role: .cancel) {}
-        } message: {
-            Text("Sickness, travel, your period — whatever the reason, your streak is safe until you tap Resume. Your circle sees a gentle \"excused\", never the details.")
-        }
-    }
-
-    private var breakBanner: some View {
-        HStack(spacing: 10) {
-            Image(systemName: state.breakReason == "period" ? "drop.fill" : "moon.fill")
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(Theme.lilac)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(state.breakCopy.headline)
-                    .font(Theme.sans(14, .bold))
-                    .foregroundStyle(Theme.inkDeep)
-                Text(state.breakCopy.subtext)
-                    .font(Theme.sans(12, .semibold))
-                    .foregroundStyle(Theme.inkMuted)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 8)
-            Button("Resume") {
-                withAnimation(Theme.spring) { state.resumePrayers() }
-            }
-            .font(Theme.sans(13, .bold))
-            .foregroundStyle(Theme.green)
-            .buttonStyle(.plain)
-        }
-        .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(Theme.lilac.opacity(0.12))
-        )
-    }
-}
+// v3.6: gone from Today — the "Can't pray right now?" flow lives in Settings
+// (BreakAndTravelCard), and resuming asks WHEN you started praying again
+// (ResumeSheet in Views/Recovery).

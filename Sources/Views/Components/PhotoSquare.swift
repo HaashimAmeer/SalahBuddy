@@ -11,6 +11,10 @@ import SwiftUI
 struct PhotoSquare: View {
     let entry: GridEntry
     let size: CGFloat
+    /// v3.8: flush mode for the Today grid — square (un-rounded) cells with no
+    /// location pill, so a 2×2 fills the card edge-to-edge (the outer card does
+    /// the rounding). Other surfaces keep the rounded standalone tile.
+    var flush: Bool = false
 
     var body: some View {
         content
@@ -18,7 +22,7 @@ struct PhotoSquare: View {
             .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
     }
 
-    private var cornerRadius: CGFloat { max(12, size * 0.14) }
+    private var cornerRadius: CGFloat { flush ? 0 : max(12, size * 0.14) }
 
     @ViewBuilder
     private var content: some View {
@@ -77,7 +81,8 @@ struct PhotoSquare: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 // v3: where they prayed, when tagged — "🏠 Home", "📍 Capitol Hill".
-                if let place = entry.placeLabel, size >= 70 {
+                // v3.8: hidden in the flush Today grid (it moves to tap-to-enlarge).
+                if let place = entry.placeLabel, size >= 70, !flush {
                     Text(place)
                         .font(Theme.sans(max(8, size * 0.07), .bold))
                         .lineLimit(1)
@@ -184,6 +189,38 @@ struct PhotoSquare: View {
     }()
 }
 
+// MARK: - Member avatar (v3.8)
+
+/// A circular avatar that shows the member's profile photo when it's "you" and
+/// a photo is set, otherwise their emoji. Used on the scoreboard, member
+/// detail, and week grid.
+struct MemberAvatarView: View {
+    let member: CircleMember
+    let size: CGFloat
+
+    @State private var image: UIImage?
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(uiImage: image).resizable().scaledToFill()
+            } else {
+                Text(member.emoji).font(.system(size: size * 0.52))
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(Circle())
+        .task(id: member.avatarFilename) {
+            guard member.isYou, let name = member.avatarFilename else { image = nil; return }
+            let side = size * UIScreen.main.scale
+            image = await Task.detached(priority: .userInitiated) { () -> UIImage? in
+                guard let full = PhotoStore.load(name) else { return nil }
+                return full.preparingThumbnail(of: CGSize(width: side, height: side)) ?? full
+            }.value
+        }
+    }
+}
+
 // MARK: - Lazy thumbnail loader
 
 /// Loads a stored photo off the main thread and downscales it to roughly the
@@ -193,6 +230,11 @@ private struct LazyThumbnail: View {
     let pixelSize: CGFloat
 
     @State private var image: UIImage?
+    /// Which filename `image` was loaded for — so a reused cell whose filename
+    /// changes reloads instead of showing the previous post's photo (v3.8 bug
+    /// fix: SwiftUI reuses these views, and the old `guard image == nil` kept
+    /// the stale image).
+    @State private var loadedFor: String?
 
     var body: some View {
         ZStack {
@@ -208,7 +250,7 @@ private struct LazyThumbnail: View {
             }
         }
         .task(id: filename) {
-            guard image == nil else { return }
+            guard loadedFor != filename else { return }
             let name = filename
             let side = max(80, pixelSize) * UIScreen.main.scale
             let thumb = await Task.detached(priority: .userInitiated) { () -> UIImage? in
@@ -216,6 +258,7 @@ private struct LazyThumbnail: View {
                 return full.preparingThumbnail(of: CGSize(width: side, height: side)) ?? full
             }.value
             image = thumb
+            loadedFor = name
         }
     }
 }
