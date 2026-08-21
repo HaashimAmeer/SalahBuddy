@@ -10,6 +10,10 @@ import CoreLocation
 /// notification options, About, and a DEBUG developer section.
 struct SettingsView: View {
     @EnvironmentObject private var state: AppState
+    // v4: the developer card is where demo and real circles are told apart,
+    // and where an account is signed out again.
+    @EnvironmentObject private var auth: AuthService
+    @EnvironmentObject private var circleService: CircleService
     @Environment(\.scenePhase) private var scenePhase
 
     @State private var name: String = ""
@@ -689,11 +693,15 @@ struct SettingsView: View {
                 .disabled(!timeTravelEnabled)
                 .opacity(timeTravelEnabled ? 1 : 0.4)
 
-                Text(timeTravelEnabled ? offsetDescription : Self.timeTravelPausedNote)
+                Text(timeTravelEnabled ? offsetDescription : timeTravelPausedNote)
                     .font(Theme.sans(12, .semibold))
                     .foregroundStyle(Theme.inkMuted)
                     .fixedSize(horizontal: false, vertical: true)
             }
+
+            Divider()
+
+            circleDeveloperSection
 
             Divider()
 
@@ -749,8 +757,17 @@ struct SettingsView: View {
     /// the row greyed out in step with SwiftUI's invalidation of `settings`.
     private var timeTravelEnabled: Bool { state.settings.circleMode == .demo }
 
-    private static let timeTravelPausedNote =
-        "Paused while you're in a real circle — your friends see real timestamps."
+    /// The guard is keyed on the MODE, not on having a circle, and deliberately
+    /// so: flipping the row above into real-circle mode pins the clock straight
+    /// away, which is what stops the circle you create NEXT from being stamped
+    /// with a fictional `joined_at`. The note names whichever of the two is
+    /// holding it, instead of claiming a circle that may not exist yet.
+    private var timeTravelPausedNote: String {
+        if inRealCircle {
+            return "Paused while you're in a real circle — your friends see real timestamps."
+        }
+        return "Paused while real-circle mode is on — a travelled clock would stamp fictional times on the circle you join next."
+    }
 
     private var offsetDescription: String {
         let offset = AppClock.offset
@@ -758,6 +775,107 @@ struct SettingsView: View {
         let hours = Int(offset) / 3600
         let minutes = (Int(offset) % 3600) / 60
         return "Clock offset: +\(hours)h \(minutes)m → now \(AppClock.now.formatted(.dateTime.month().day().hour().minute()))"
+    }
+
+    // MARK: - Developer: circles (v4)
+
+    /// SPEC-V4 §2: the simulator survives here as "Demo circle", and it is
+    /// mutually exclusive with a real one — so the row is a switch between two
+    /// worlds, disabled while the real one is occupied.
+    private var circleDeveloperSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Circle")
+                .font(Theme.sans(14, .heavy))
+                .foregroundStyle(Theme.inkMuted)
+
+            Toggle(isOn: demoCircleBinding) {
+                Text("Demo circle")
+                    .font(Theme.sans(15, .semibold))
+                    .foregroundStyle(Theme.inkDeep)
+            }
+            .tint(Theme.green)
+            .disabled(inRealCircle)
+
+            Text(demoCircleNote)
+                .font(Theme.sans(12, .semibold))
+                .foregroundStyle(Theme.inkMuted)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Divider()
+
+            accountSection
+        }
+    }
+
+    private var inRealCircle: Bool { circleService.snapshot.hasCircle }
+
+    private var demoCircleBinding: Binding<Bool> {
+        Binding(
+            get: { state.settings.circleMode == .demo },
+            set: { isOn in
+                // Belt and braces: the row is already disabled here, and a
+                // circle you are actually in must not be swapped out from
+                // under the grid it is drawing.
+                guard !circleService.snapshot.hasCircle else { return }
+                state.settings.circleMode = isOn ? .demo : .real
+            })
+    }
+
+    private var demoCircleNote: String {
+        if inRealCircle {
+            return "Off while you're in a real circle — the two can't run at once. Leave the circle and the simulated friends come back."
+        }
+        if state.settings.circleMode == .demo {
+            return "Simulated friends fill the grid and the leaderboard. Nothing about them leaves this phone."
+        }
+        return "The simulated friends are put away — your circle is whoever is really in it."
+    }
+
+    // MARK: - Developer: account (v4)
+
+    @ViewBuilder
+    private var accountSection: some View {
+        if auth.isSignedIn {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(signedInLine)
+                    .font(Theme.sans(15, .semibold))
+                    .foregroundStyle(Theme.inkDeep)
+                Text("You'll stay in your circle — sign back in on any phone and it's there. Your streak, XP and photos stay on this one either way.")
+                    .font(Theme.sans(12, .semibold))
+                    .foregroundStyle(Theme.inkMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button {
+                    Task { await signOut() }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "rectangle.portrait.and.arrow.right")
+                        Text(auth.isWorking ? "Signing out…" : "Sign out")
+                    }
+                    .font(Theme.sans(15, .bold))
+                    .foregroundStyle(Theme.amber)
+                }
+                .buttonStyle(.plain)
+                .disabled(auth.isWorking)
+            }
+        } else {
+            Text("Not signed in. The Circle tab is where a real circle starts.")
+                .font(Theme.sans(12, .semibold))
+                .foregroundStyle(Theme.inkMuted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var signedInLine: String {
+        let name: String = state.profile.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if name.isEmpty { return "Signed in" }
+        return "Signed in as \(name)"
+    }
+
+    /// Signing out is not a reset: `signOutAndReset` drops the session and the
+    /// circle mirror, and cannot reach a log, a streak or an XP total.
+    @MainActor
+    private func signOut() async {
+        await circleService.signOutAndReset()
     }
 
     // MARK: - Shared bits

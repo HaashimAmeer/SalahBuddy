@@ -3,6 +3,9 @@ import UIKit
 
 struct RootView: View {
     @EnvironmentObject private var state: AppState
+    /// v4: only for the foreground work below — every circle screen reads
+    /// `AuthService`/`CircleService` from the environment itself.
+    @EnvironmentObject private var circles: CircleStack
     @Environment(\.scenePhase) private var scenePhase
 
     /// 1-second heartbeat: drives countdowns and detects day rollover.
@@ -67,6 +70,11 @@ struct RootView: View {
             if phase == .active {
                 state.refresh()
                 NotificationManager.shared.reschedule()
+                // v4: the circle may have moved on someone else's phone while
+                // we were away, and a profile write that failed offline is owed
+                // a retry. `CircleStack` owns both halves — going straight to
+                // `CircleService` here is what left the profile half unwired.
+                Task { await circles.handleForeground() }
             }
         }
     }

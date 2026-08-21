@@ -18,9 +18,15 @@ import SwiftUI
 // award those without a circle, and the tab shouldn't tease them either.
 struct CircleView: View {
     @EnvironmentObject private var state: AppState
+    // v4: the tab is the entry point to a REAL circle, so it needs both — the
+    // service for the circle itself, and auth only to hand on to the sign-in
+    // sheet it may present.
+    @EnvironmentObject private var auth: AuthService
+    @EnvironmentObject private var circleService: CircleService
 
     @State private var creatingChallenge = false
     @State private var showInvite = false
+    @State private var showCircleSettings = false
     @State private var selectedMember: CircleMember?
 
     var body: some View {
@@ -55,7 +61,14 @@ struct CircleView: View {
         .sheet(isPresented: $showInvite) {
             InviteSheet()
                 .environmentObject(state)
+                .environmentObject(auth)
+                .environmentObject(circleService)
                 .presentationDetents([.medium, .large])
+        }
+        .sheet(isPresented: $showCircleSettings) {
+            CircleSettingsSheet()
+                .environmentObject(circleService)
+                .presentationDetents([.large])
         }
     }
 
@@ -70,7 +83,8 @@ struct CircleView: View {
                         // v3.9: no circle yet — the whole tab is the pitch.
                         // Still a tour target, so step 4 spotlights something
                         // real instead of dimming an empty page.
-                        SoloCircleCard(friendCapacity: state.friendCapacity) { showInvite = true }
+                        SoloCircleCard(friendCapacity: state.friendCapacity,
+                                       ctaTitle: soloCTATitle) { showInvite = true }
                             .tutorialTarget(.leaderboard)
                     } else {
                         circleBody
@@ -93,6 +107,12 @@ struct CircleView: View {
                 }
             }
         }
+    }
+
+    /// v4: with a real circle already created, the thing left to do is send the
+    /// code — not build the circle again.
+    private var soloCTATitle: String {
+        circleService.snapshot.hasCircle ? "Share your code" : "Build your circle"
     }
 
     // MARK: Circle body (someone else is in here)
@@ -182,23 +202,44 @@ struct CircleView: View {
                 }
                 // v3.9: a week countdown over an empty page is noise — solo
                 // gets the invitation instead.
-                Text(state.isSoloMode ? "Nobody here yet" : weekCountdownText)
+                Text(headerSubtitle)
                     .font(Theme.sans(14, .medium))
                     .foregroundStyle(Theme.inkMuted)
             }
             Spacer()
-            Button {
-                showInvite = true
-            } label: {
-                Image(systemName: "person.badge.plus")
-                    .font(.system(size: 16, weight: .bold))
-                    .foregroundStyle(Theme.green)
-                    .frame(width: 38, height: 38)
-                    .background(Circle().fill(Theme.greenSoft))
-            }
-            .buttonStyle(.plain)
+            headerButtons
         }
         .padding(.top, 8)
+    }
+
+    /// v4: a real circle you're the only one in isn't "nobody here yet" — it's
+    /// a circle waiting on a code being sent, and saying so points at the one
+    /// thing left to do.
+    private var headerSubtitle: String {
+        if !state.isSoloMode { return weekCountdownText }
+        if circleService.snapshot.hasCircle { return "Just you so far — share your code" }
+        return "Nobody here yet"
+    }
+
+    /// The gear only exists when there is a real circle behind it: in demo mode
+    /// there is nothing to rename and nobody to leave.
+    @ViewBuilder
+    private var headerButtons: some View {
+        if circleService.snapshot.hasCircle {
+            headerButton(icon: "gearshape.fill") { showCircleSettings = true }
+        }
+        headerButton(icon: "person.badge.plus") { showInvite = true }
+    }
+
+    private func headerButton(icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 16, weight: .bold))
+                .foregroundStyle(Theme.green)
+                .frame(width: 38, height: 38)
+                .background(Circle().fill(Theme.greenSoft))
+        }
+        .buttonStyle(.plain)
     }
 
     /// "New week in 3d 4h" — counts down to next Monday 00:00 local.
@@ -417,6 +458,9 @@ private struct SoloCircleCard: View {
     /// seats one fewer friend than the demo one, and this card is the first
     /// place the number is quoted.
     let friendCapacity: Int
+    /// v4: "Build your circle" for a solo account, "Share your code" once a
+    /// real circle exists and is just waiting on people.
+    var ctaTitle: String = "Build your circle"
     let onBuild: () -> Void
 
     private struct Perk: Identifiable {
@@ -458,7 +502,7 @@ private struct SoloCircleCard: View {
             }
             .padding(.top, 2)
 
-            ChunkyButton(title: "Build your circle", color: Theme.green, isEnabled: true) {
+            ChunkyButton(title: ctaTitle, color: Theme.green, isEnabled: true) {
                 onBuild()
             }
 
@@ -685,114 +729,289 @@ struct MemberDetailContent: View {
     }
 }
 
-// MARK: - Invite (v3.6 — design session)
+// MARK: - Invite (v3.6; v4 — the real share flow)
 
-/// Add a friend: a shareable invite link, plus (demo) pool friends who can
-/// "accept" so the add → celebration flow is tangible. Capped at 8 friends —
-/// five photos a day is an intimate thing.
+/// The circle's front door (SPEC-V4 §2, code-first).
 ///
-/// v3.9: with nobody in the circle this is the "your circle begins here"
-/// moment rather than an "0 of 8" tally, and the pickable list is the whole
-/// roster (`state.invitableBuddies` already widens for solo accounts) — so it
-/// scrolls.
+/// Which of the three states you get is decided by `CircleService.phase`:
+///   • **in a circle** → the six-character code, big and copyable, a share
+///     message that reads like a person wrote it, and who's already here.
+///   • **signed in, no circle** → start one, or type a friend's code.
+///   • **signed out** → the pitch, and the one sign-in that makes it real.
+///
+/// The simulated roster survives ONLY on a developer build in demo mode:
+/// tapping a fictional name to make them "accept" is a screenshot tool now,
+/// not a feature.
 struct InviteSheet: View {
     @EnvironmentObject private var state: AppState
+    @EnvironmentObject private var auth: AuthService
+    @EnvironmentObject private var circleService: CircleService
     @Environment(\.dismiss) private var dismiss
 
-    private let inviteLink = "https://salahbuddy.app/join/HML7-MOON"
-
-    /// Nobody in the circle yet — this invite is the one that starts it.
-    /// v4: through the seam, so a real circle isn't permanently "first invite"
-    /// just because it has no simulated buddies.
-    private var isFirstInvite: Bool { state.friendCount == 0 }
+    @State private var showSignIn: Bool = false
+    @State private var showCreate: Bool = false
+    @State private var showJoin: Bool = false
+    @State private var copied: Bool = false
 
     var body: some View {
-        VStack(spacing: 16) {
-            Capsule()
-                .fill(Theme.mist.opacity(0.6))
-                .frame(width: 38, height: 5)
-                .padding(.top, 10)
-
-            VStack(spacing: 6) {
-                Text(isFirstInvite ? "Start your circle 🤝" : "Invite a friend 🤝")
-                    .font(Theme.sans(22, .bold))
-                    .foregroundStyle(Theme.inkDeep)
-                Text(subtitle)
-                    .font(Theme.sans(13, .semibold))
-                    .foregroundStyle(Theme.inkMuted)
-                    .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 30)
-            }
-
-            if state.circleIsFull {
-                VStack(spacing: 6) {
-                    Text("🫶")
-                        .font(.system(size: 34))
-                    Text("Your circle is full")
-                        .font(Theme.sans(16, .bold))
-                        .foregroundStyle(Theme.inkDeep)
-                    Text(fullCopy)
-                        .font(Theme.sans(13, .semibold))
-                        .foregroundStyle(Theme.inkMuted)
-                        .multilineTextAlignment(.center)
+        VStack(spacing: 0) {
+            SheetGrabber()
+            ScrollView {
+                VStack(spacing: 18) {
+                    content
+                    demoSection
                 }
-                .padding(.horizontal, 30)
-                Spacer(minLength: 8)
-            } else {
-                // The roster can run to 11 names on a solo account, so the
-                // pickable list scrolls instead of overflowing the sheet.
-                ScrollView {
-                    VStack(spacing: 16) {
-                        ShareLink(item: URL(string: inviteLink)!) {
-                            HStack(spacing: 8) {
-                                Image(systemName: "link")
-                                    .font(.system(size: 14, weight: .bold))
-                                Text("Share your invite link")
-                                    .font(Theme.sans(15, .bold))
-                            }
-                            .foregroundStyle(.white)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 13)
-                            .background(Capsule().fill(Theme.green))
-                        }
-
-                        if !state.invitableBuddies.isEmpty {
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text(isFirstInvite ? "Demo · tap someone to begin"
-                                                   : "Demo · pretend someone accepted")
-                                    .font(Theme.sans(11, .bold))
-                                    .foregroundStyle(Theme.inkMuted)
-                                    .textCase(.uppercase)
-                                ForEach(state.invitableBuddies, id: \.name) { buddy in
-                                    buddyRow(buddy)
-                                }
-                            }
-                        }
-                    }
-                    .padding(.horizontal, 24)
-                    .padding(.bottom, 24)
-                }
-                .scrollBounceBehavior(.basedOnSize)
+                .padding(.horizontal, 24)
+                .padding(.bottom, 28)
             }
+            .scrollBounceBehavior(.basedOnSize)
         }
         .frame(maxWidth: .infinity)
         .background(Theme.bg)
+        .sheet(isPresented: $showSignIn) { signInSheet }
+        .sheet(isPresented: $showCreate) { createSheet }
+        .sheet(isPresented: $showJoin) { joinSheet }
     }
 
-    private var subtitle: String {
-        isFirstInvite
-            ? "Your first friend is where it begins — up to \(state.friendCapacity), so it stays close."
-            : "Your circle: \(state.friendCount) of \(state.friendCapacity) friends"
+    // MARK: Routing
+
+    /// `working` is a passing state, not a screen. Whatever the circle looked
+    /// like a moment ago is still the truest thing to draw, and the sheet doing
+    /// the work is on top of this one anyway.
+    private var displayPhase: CircleService.Phase {
+        guard circleService.phase == .working else { return circleService.phase }
+        return circleService.snapshot.hasCircle ? .inCircle : .noCircle
     }
 
-    /// A full DEMO circle makes room by removing someone; a real one is
-    /// leave-only (SPEC-V4 §2), so there the copy can't promise a removal.
-    private var fullCopy: String {
-        if state.canRemoveMembers {
-            return "\(state.friendCapacity) friends keeps it intimate — remove someone from the leaderboard to make room."
+    @ViewBuilder
+    private var content: some View {
+        switch displayPhase {
+        case .inCircle:
+            inCircleContent
+        case .noCircle:
+            noCircleContent
+        case .signedOut:
+            signedOutContent
+        case .working:
+            noCircleContent
         }
-        return "\(state.friendCapacity) friends keeps it intimate — there's room again when someone leaves."
+    }
+
+    private var signInSheet: some View {
+        SignInSheet()
+            .environmentObject(auth)
+            .environmentObject(circleService)
+            .presentationDetents([.large])
+    }
+
+    private var createSheet: some View {
+        CreateCircleSheet()
+            .environmentObject(circleService)
+            .presentationDetents([.large])
+    }
+
+    private var joinSheet: some View {
+        JoinCircleSheet()
+            .environmentObject(circleService)
+            .presentationDetents([.medium, .large])
+    }
+
+    // MARK: In a circle — the code is the invite
+
+    @ViewBuilder
+    private var inCircleContent: some View {
+        circleTitle
+        codeCard
+        if circleService.snapshot.remainingSlots > 0 {
+            shareButton
+            Text(slotsLine)
+                .font(Theme.sans(12, .medium))
+                .foregroundStyle(Theme.inkMuted)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+        } else {
+            CircleNoticeCard(notice: InviteSheet.fullNotice)
+        }
+        rosterCard
+    }
+
+    private var circleTitle: some View {
+        VStack(spacing: 6) {
+            Text(circleEmoji)
+                .font(.system(size: 38))
+            Text(circleName)
+                .font(Theme.sans(22, .bold))
+                .foregroundStyle(Theme.inkDeep)
+                .multilineTextAlignment(.center)
+            Text("Send this code to whoever should be in it.")
+                .font(Theme.sans(13, .medium))
+                .foregroundStyle(Theme.inkMuted)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.top, 6)
+    }
+
+    private var codeCard: some View {
+        VStack(spacing: 8) {
+            Text("Invite code")
+                .font(Theme.sans(11, .bold))
+                .foregroundStyle(Theme.inkMuted)
+                .textCase(.uppercase)
+            Text(inviteCode)
+                .font(.system(size: 32, weight: .heavy, design: .monospaced))
+                .kerning(5)
+                .foregroundStyle(Theme.inkDeep)
+            Text(copied ? "Copied ✓" : "Tap to copy")
+                .font(Theme.sans(12, .semibold))
+                .foregroundStyle(copied ? Theme.green : Theme.inkMuted)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 18)
+        .cardStyle()
+        .contentShape(Rectangle())
+        .onTapGesture { copyCode() }
+    }
+
+    private var shareButton: some View {
+        ShareLink(item: shareMessage) {
+            HStack(spacing: 8) {
+                Image(systemName: "square.and.arrow.up")
+                    .font(.system(size: 14, weight: .bold))
+                Text("Send an invite")
+                    .font(Theme.sans(15, .bold))
+            }
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 13)
+            .background(Capsule().fill(Theme.green))
+        }
+    }
+
+    private var rosterCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Who's here")
+                .font(Theme.sans(11, .bold))
+                .foregroundStyle(Theme.inkMuted)
+                .textCase(.uppercase)
+            ForEach(state.circleMembers) { member in
+                rosterRow(member)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .cardStyle()
+    }
+
+    private func rosterRow(_ member: CircleMember) -> some View {
+        HStack(spacing: 10) {
+            MemberAvatarView(member: member, size: 30)
+            Text(member.isYou ? "\(member.name) (you)" : member.name)
+                .font(Theme.sans(15, .semibold))
+                .foregroundStyle(Theme.inkDeep)
+            Spacer(minLength: 0)
+        }
+    }
+
+    // MARK: Signed in, no circle yet
+
+    @ViewBuilder
+    private var noCircleContent: some View {
+        VStack(spacing: 10) {
+            Text("🌱")
+                .font(.system(size: 38))
+            Text("Your circle starts here")
+                .font(Theme.sans(22, .bold))
+                .foregroundStyle(Theme.inkDeep)
+            Text("Start one and share the code, or put in the code a friend already sent you.")
+                .font(Theme.sans(14, .medium))
+                .foregroundStyle(Theme.inkMuted)
+                .multilineTextAlignment(.center)
+                .lineSpacing(3)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.top, 6)
+
+        ChunkyButton(title: "Start a circle", color: Theme.green, isEnabled: true) {
+            showCreate = true
+        }
+
+        Button {
+            showJoin = true
+        } label: {
+            Text("I have a code")
+                .font(Theme.sans(15, .bold))
+                .foregroundStyle(Theme.green)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 13)
+                .background(Capsule().fill(Theme.greenSoft))
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: Signed out
+
+    @ViewBuilder
+    private var signedOutContent: some View {
+        VStack(spacing: 10) {
+            MascotView(mood: .happy, size: 68)
+            Text("Build your circle")
+                .font(Theme.sans(22, .bold))
+                .foregroundStyle(Theme.inkDeep)
+            Text("A circle is up to eight real people on real phones, keeping all five together. To find each other, we just need to know who you are.")
+                .font(Theme.sans(14, .medium))
+                .foregroundStyle(Theme.inkMuted)
+                .multilineTextAlignment(.center)
+                .lineSpacing(3)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.top, 6)
+
+        ChunkyButton(title: "Sign in to start", color: Theme.green, isEnabled: !auth.isWorking) {
+            showSignIn = true
+        }
+
+        Text("Already got a code from a friend? Sign in first — you can put it in straight after.")
+            .font(Theme.sans(12, .medium))
+            .foregroundStyle(Theme.inkMuted)
+            .multilineTextAlignment(.center)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    // MARK: Demo roster (developer builds, demo mode only)
+
+    /// SPEC-V4 §2: the simulator survives behind `BuildEnv` as "Demo circle",
+    /// mutually exclusive with a real one. It is how screenshots and the guided
+    /// tour get a populated circle without eight friends and eight phones.
+    @ViewBuilder
+    private var demoSection: some View {
+        if showsDemoSection {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Demo circle")
+                    .font(Theme.sans(11, .bold))
+                    .foregroundStyle(Theme.inkMuted)
+                    .textCase(.uppercase)
+                if state.circleIsFull {
+                    Text("The demo circle is full — remove someone from the leaderboard to make room.")
+                        .font(Theme.sans(12, .medium))
+                        .foregroundStyle(Theme.inkMuted)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    ForEach(state.invitableBuddies, id: \.name) { buddy in
+                        buddyRow(buddy)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 6)
+        }
+    }
+
+    /// A lone "DEMO CIRCLE" heading with nothing under it is just clutter —
+    /// which is what happens once every simulated buddy is already in.
+    private var showsDemoSection: Bool {
+        guard BuildEnv.showsDeveloperTools, state.settings.circleMode == .demo else { return false }
+        return state.circleIsFull || !state.invitableBuddies.isEmpty
     }
 
     private func buddyRow(_ buddy: BuddySimulator.Buddy) -> some View {
@@ -807,7 +1026,7 @@ struct InviteSheet: View {
                     .font(Theme.sans(15, .semibold))
                     .foregroundStyle(Theme.inkDeep)
                 Spacer()
-                Text(isFirstInvite ? "Starts your circle" : "Joins instantly")
+                Text("Joins instantly")
                     .font(Theme.sans(12, .bold))
                     .foregroundStyle(Theme.green)
             }
@@ -815,6 +1034,48 @@ struct InviteSheet: View {
             .background(Theme.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
         .buttonStyle(.plain)
+    }
+
+    // MARK: Copy + helpers
+
+    private var circleName: String {
+        circleService.snapshot.circle?.name ?? "Your Circle"
+    }
+
+    private var circleEmoji: String {
+        circleService.snapshot.circle?.emoji ?? "🤝"
+    }
+
+    private var inviteCode: String {
+        circleService.snapshot.circle?.code ?? "——————"
+    }
+
+    private var slotsLine: String {
+        let left: Int = circleService.snapshot.remainingSlots
+        if left == 1 { return "One more seat left." }
+        return "\(left) more can join — eight in total, you included."
+    }
+
+    /// Written to be forwarded as-is. Universal links land the day a domain
+    /// does (§2); until then the code IS the invite, so the message has to
+    /// carry it in a way a person would actually type.
+    private var shareMessage: String {
+        "Pray with me? 🌙 I keep my five daily prayers with a few friends on SalahBuddy — join my circle with this code: \(inviteCode)"
+    }
+
+    /// A full circle is a fact about the circle, not something you did wrong.
+    private static let fullNotice = CircleNotice(
+        title: "Your circle is full",
+        message: "Eight people, five photos a day — that's the whole idea. There's a seat again the moment someone leaves.")
+
+    private func copyCode() {
+        guard circleService.snapshot.circle != nil else { return }
+        UIPasteboard.general.string = inviteCode
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        withAnimation(Theme.spring) { copied = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            withAnimation(Theme.spring) { copied = false }
+        }
     }
 }
 
