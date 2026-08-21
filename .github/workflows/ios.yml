@@ -35,7 +35,11 @@ permissions:
 jobs:
   test:
     runs-on: macos-15
-    timeout-minutes: 40
+    # 40 was inherited from "a build+test is well under 15 minutes". A hung
+    # simulator boot then costs the full 40 before anyone finds out. A green
+    # run is ~4 minutes and the slowest observed real one ~10, so 20 fails a
+    # genuine hang fast while leaving plenty of headroom.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
 
