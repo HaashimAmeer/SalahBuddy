@@ -39,28 +39,101 @@ begin
     where g.grantee = 'authenticated' and g.table_schema = 'public'
     group by g.table_name
   ) actual
+  -- NOTE: INSERT/UPDATE are column-scoped now, so they do NOT appear here —
+  -- information_schema.role_table_grants lists table-wide grants only. The
+  -- columns those verbs actually cover are pinned in the next block, which is
+  -- the assertion that matters: a table-wide INSERT would show up here as a
+  -- surprise verb, and a widened column list fails there.
   where (table_name, verbs) not in (
-    values ('profiles',          'INSERT,SELECT,UPDATE'),
-           ('circles',           'SELECT,UPDATE'),
+    values ('profiles',          'SELECT'),
+           ('circles',           'SELECT'),
            ('circle_members',    'DELETE,SELECT'),
-           ('posts',             'DELETE,INSERT,SELECT,UPDATE'),
-           ('excused_days',      'DELETE,INSERT,SELECT,UPDATE'),
-           ('recovery_weeks',    'DELETE,INSERT,SELECT,UPDATE'),
-           ('custom_challenges', 'DELETE,INSERT,SELECT,UPDATE'),
-           ('devices',           'DELETE,INSERT,SELECT,UPDATE'),
-           ('nudges',            'INSERT,SELECT')
+           ('posts',             'DELETE,SELECT'),
+           ('excused_days',      'DELETE,SELECT'),
+           ('recovery_weeks',    'DELETE,SELECT'),
+           ('custom_challenges', 'DELETE,SELECT'),
+           ('devices',           'DELETE,SELECT'),
+           ('nudges',            'SELECT')
   );
   if v_bad is not null then
     raise exception 'authenticated holds unexpected table privileges: %', v_bad;
   end if;
 
+  -- The columns a signed-in user must never write. Each of these is load-bearing
+  -- somewhere: created_at is the retention clock (a writable one makes the
+  -- ~30-day photo expiry opt-out), updated_at is the touch trigger's,
+  -- notified_at / announced_at are push leases, and circles.code is the invite
+  -- (rewritable = every outstanding invite silently dead, and a blank code
+  -- captures anyone whose join field was empty).
+  select string_agg(format('%s.%s(%s)', t, c, v), ', ') into v_bad
+  from (values
+      ('posts','created_at','INSERT'),   ('posts','created_at','UPDATE'),
+      ('posts','updated_at','INSERT'),   ('posts','updated_at','UPDATE'),
+      ('posts','notified_at','INSERT'),  ('posts','notified_at','UPDATE'),
+      ('posts','id','UPDATE'),
+      ('posts','user_id','UPDATE'),      ('posts','circle_id','UPDATE'),
+      ('nudges','created_at','INSERT'),  ('nudges','created_at','UPDATE'),
+      ('circles','code','UPDATE'),       ('circles','created_by','UPDATE'),
+      ('circles','id','UPDATE'),         ('circles','created_at','UPDATE'),
+      ('circle_members','announced_at','UPDATE'),
+      ('excused_days','created_at','INSERT'),
+      ('excused_days','created_at','UPDATE'),
+      ('recovery_weeks','updated_at','INSERT'),
+      ('recovery_weeks','updated_at','UPDATE'),
+      ('custom_challenges','created_at','INSERT'),
+      ('custom_challenges','created_at','UPDATE'),
+      ('custom_challenges','created_by','UPDATE'),
+      ('custom_challenges','id','UPDATE'),
+      ('devices','updated_at','INSERT'), ('devices','updated_at','UPDATE'),
+      ('profiles','created_at','INSERT'),('profiles','created_at','UPDATE'),
+      ('profiles','updated_at','INSERT'),('profiles','updated_at','UPDATE'),
+      ('profiles','id','UPDATE')
+  ) as forbidden(t, c, v)
+  where has_column_privilege('authenticated', 'public.' || t, c, v);
+  if v_bad is not null then
+    raise exception 'authenticated can write columns it must not: %', v_bad;
+  end if;
+
+  -- ...and the columns it genuinely needs, so a copy-paste that over-narrows a
+  -- grant fails here instead of at runtime on a real device.
+  select string_agg(format('%s.%s(%s)', t, c, v), ', ') into v_bad
+  from (values
+      ('posts','id','INSERT'),           ('posts','user_id','INSERT'),
+      ('posts','circle_id','INSERT'),    ('posts','photo_path','UPDATE'),
+      ('posts','tier','UPDATE'),         ('posts','logged_at','UPDATE'),
+      ('excused_days','day_key','INSERT'),
+      ('recovery_weeks','xp','INSERT'),  ('recovery_weeks','xp','UPDATE'),
+      ('circles','name','UPDATE'),       ('circles','emoji','UPDATE'),
+      ('devices','apns_token','INSERT'),
+      ('devices','notify_friend_activity','INSERT'),
+      ('devices','notify_friend_activity','UPDATE'),
+      ('profiles','name','UPDATE'),      ('profiles','id','INSERT'),
+      ('nudges','day_key','INSERT')
+  ) as needed(t, c, v)
+  where not has_column_privilege('authenticated', 'public.' || t, c, v);
+  if v_bad is not null then
+    raise exception 'authenticated lost a column grant it needs: %', v_bad;
+  end if;
+
   -- every table we expect must actually exist
   select string_agg(t, ', ') into v_bad
-  from unnest(array['profiles','circles','circle_members','posts','excused_days',
+  from unnest(array['profiles','circles','circle_members','circle_departures',
+                    'photo_tombstones','posts','excused_days',
                     'recovery_weeks','custom_challenges','devices','nudges','retention_runs']) t
   where to_regclass('public.' || t) is null;
   if v_bad is not null then
     raise exception 'missing tables: %', v_bad;
+  end if;
+
+  -- The sweep's own bookkeeping is service_role-only. photo_tombstones in
+  -- particular IS the list of paths we are burying — a SELECT grant on it would
+  -- publish exactly what the storage policy is hiding.
+  select string_agg(distinct table_name, ', ') into v_bad
+  from information_schema.role_table_grants
+  where grantee in ('authenticated', 'anon') and table_schema = 'public'
+    and table_name in ('circle_departures', 'photo_tombstones');
+  if v_bad is not null then
+    raise exception 'a user session can reach the sweep bookkeeping: %', v_bad;
   end if;
 
   -- retention_runs is service_role-only: RLS on, zero policies, no user grants
@@ -87,7 +160,9 @@ begin
 
   -- Retention is service_role only; a user session must never wipe photos.
   select string_agg(f, ', ') into v_bad
-  from unnest(array['public.purge_expired_photo_rows(int)',
+  from unnest(array['public.purge_expired_photo_rows(int,int)',
+                    'public.confirm_photo_deletions(text[])',
+                    'public.charge_join_attempt()',
                     'public.claim_retention_run(interval)']) f
   where has_function_privilege('authenticated', f, 'execute')
      or has_function_privilege('anon', f, 'execute');

@@ -16,7 +16,11 @@ import {
   buildAPNsPayload,
   deliverToDevices,
   envRecord,
+  invalidateAPNsToken,
+  isStaleProviderToken,
   isUnregistered,
+  isWrongEnvironment,
+  otherEnvironment,
   parseAPNsReason,
   pemToPkcs8,
   resetAPNsTokenCache,
@@ -266,14 +270,30 @@ Deno.test("buildAPNsPayload omits optional aps keys when unset", () => {
 
 // ------------------------------------------------------------------- delivery
 
-Deno.test("isUnregistered covers 410 and 400/BadDeviceToken only", () => {
+Deno.test("isUnregistered means 410/Unregistered — NOT BadDeviceToken", () => {
   assert.equal(isUnregistered(410), true);
   assert.equal(isUnregistered(410, "Unregistered"), true);
-  assert.equal(isUnregistered(400, "BadDeviceToken"), true);
   assert.equal(isUnregistered(400, "Unregistered"), true);
   assert.equal(isUnregistered(400, "PayloadTooLarge"), false);
   assert.equal(isUnregistered(429, "TooManyRequests"), false);
   assert.equal(isUnregistered(200), false);
+
+  // REGRESSION: 400/BadDeviceToken used to delete the device row outright. It
+  // is what Apple answers for a token sent to the WRONG HOST — exactly what a
+  // TestFlight build looks like when it registers a sandbox token while
+  // devices.environment defaults to 'production'. Deleting it there loses push
+  // for that user permanently, with nothing to re-trigger a registration.
+  assert.equal(isUnregistered(400, "BadDeviceToken"), false);
+  assert.equal(isWrongEnvironment(400, "BadDeviceToken"), true);
+  assert.equal(isWrongEnvironment(410, "Unregistered"), false);
+  assert.equal(otherEnvironment("production"), "sandbox");
+  assert.equal(otherEnvironment("sandbox"), "production");
+  assert.equal(otherEnvironment(undefined), "sandbox");
+
+  assert.equal(isStaleProviderToken(403, "ExpiredProviderToken"), true);
+  assert.equal(isStaleProviderToken(403, "InvalidProviderToken"), true);
+  assert.equal(isStaleProviderToken(403, "Forbidden"), false);
+  assert.equal(isStaleProviderToken(400, "ExpiredProviderToken"), false);
 });
 
 Deno.test("parseAPNsReason reads Apple's error body", () => {
@@ -429,7 +449,7 @@ Deno.test("deliverToDevices drops device rows Apple rejects", async () => {
   const { pem } = await generateTestKey();
   const { impl } = recordingFetch((url) =>
     url.endsWith("/dead")
-      ? new Response('{"reason":"BadDeviceToken"}', { status: 400 })
+      ? new Response('{"reason":"Unregistered"}', { status: 410 })
       : new Response("", { status: 200 })
   );
   const dropped: string[] = [];
@@ -490,5 +510,166 @@ Deno.test("deliverToDevices survives a failing onUnregistered hook", async () =>
     },
   );
   assert.deepEqual(summary.unregistered, ["dead"]);
+  resetAPNsTokenCache();
+});
+
+Deno.test("a BadDeviceToken is retried on the other host before it is believed", async () => {
+  resetAPNsTokenCache();
+  const { pem } = await generateTestKey();
+  // The classic TestFlight mix-up: a sandbox token registered as 'production'.
+  const { impl, calls } = recordingFetch((url) =>
+    url.includes("api.sandbox.push.apple.com")
+      ? new Response("", { status: 200 })
+      : new Response('{"reason":"BadDeviceToken"}', { status: 400 })
+  );
+  const dropped: string[] = [];
+  const flipped: { token: string; environment: string }[] = [];
+  const summary = await deliverToDevices(
+    [{ user_id: "u1", apns_token: "sandbox-token", environment: "production" }],
+    { aps: {} },
+    {
+      credentials: creds(pem),
+      fetchImpl: impl,
+      log: silent,
+      onUnregistered: (t) => {
+        dropped.push(t);
+      },
+      onEnvironmentChanged: (token, environment) => {
+        flipped.push({ token, environment });
+      },
+    },
+  );
+
+  assert.equal(summary.delivered, 1, "the token was live all along");
+  assert.deepEqual(summary.unregistered, [], "a live device must not be deleted");
+  assert.deepEqual(dropped, []);
+  assert.deepEqual(flipped, [{
+    token: "sandbox-token",
+    environment: "sandbox",
+  }]);
+  assert.equal(calls.length, 2, "one try per host");
+  resetAPNsTokenCache();
+});
+
+Deno.test("a token both hosts reject really is dead", async () => {
+  resetAPNsTokenCache();
+  const { pem } = await generateTestKey();
+  const { impl } = recordingFetch(() =>
+    new Response('{"reason":"BadDeviceToken"}', { status: 400 })
+  );
+  const dropped: string[] = [];
+  const summary = await deliverToDevices(
+    [{ user_id: "u1", apns_token: "garbage", environment: "production" }],
+    { aps: {} },
+    {
+      credentials: creds(pem),
+      fetchImpl: impl,
+      log: silent,
+      onUnregistered: (t) => {
+        dropped.push(t);
+      },
+    },
+  );
+  assert.deepEqual(summary.unregistered, ["garbage"]);
+  assert.deepEqual(dropped, ["garbage"]);
+  resetAPNsTokenCache();
+});
+
+Deno.test("an expired provider token is refreshed and the push retried", async () => {
+  resetAPNsTokenCache();
+  const { pem } = await generateTestKey();
+  let seen = 0;
+  const tokens: string[] = [];
+  const { impl } = recordingFetch((_url, init) => {
+    tokens.push(String((init.headers as Record<string, string>).authorization));
+    seen += 1;
+    // First call: Apple says the JWT is stale (clock drift, or a rotated .p8).
+    return seen === 1
+      ? new Response('{"reason":"ExpiredProviderToken"}', { status: 403 })
+      : new Response("", { status: 200 });
+  });
+
+  const result = await sendAPNs({
+    token: "device-1",
+    payload: { aps: {} },
+    credentials: creds(pem),
+    fetchImpl: impl,
+    log: silent,
+    // Distinct iat values so the refreshed JWT is observably different.
+    nowSeconds: 1_800_000_000,
+  });
+
+  assert.equal(result.delivered, true);
+  assert.equal(seen, 2, "the push was retried once");
+  // REGRESSION: nothing invalidated the cache, so every push from a warm
+  // isolate re-sent the byte-identical dead JWT for up to the 50-minute TTL —
+  // and 403 is not "unregistered", so no device row was dropped either. Pushes
+  // simply stopped, silently. The refreshed token must also be minted against
+  // the current clock: re-signing at the pinned instant would reproduce the
+  // token Apple just rejected.
+  assert.notEqual(tokens[0], tokens[1], "the same dead JWT was re-sent");
+  const iatOf = (header: string) =>
+    JSON.parse(
+      new TextDecoder().decode(
+        base64UrlDecodeBytes(header.split(" ")[1].split(".")[1])!,
+      ),
+    ).iat as number;
+  assert.equal(iatOf(tokens[0]), 1_800_000_000);
+  assert.notEqual(iatOf(tokens[1]), 1_800_000_000);
+  resetAPNsTokenCache();
+});
+
+Deno.test("invalidateAPNsToken forces the next signature to be fresh", async () => {
+  resetAPNsTokenCache();
+  const { pem } = await generateTestKey();
+  const c = { key: pem, keyId: "KEYID12345", teamId: "TEAMID1234" };
+  const first = await signAPNsJWT(c, { nowSeconds: 1_800_000_000 });
+  assert.equal(await signAPNsJWT(c, { nowSeconds: 1_800_000_010 }), first);
+  invalidateAPNsToken(c);
+  assert.notEqual(await signAPNsJWT(c, { nowSeconds: 1_800_000_010 }), first);
+  resetAPNsTokenCache();
+});
+
+Deno.test("the fan-out is bounded, not serial, and carries an expiry", async () => {
+  resetAPNsTokenCache();
+  const { pem } = await generateTestKey();
+  let inFlight = 0;
+  let peak = 0;
+  const expirations = new Set<string>();
+  const impl = ((_input: string | URL | Request, init?: RequestInit) => {
+    const headers = (init?.headers ?? {}) as Record<string, string>;
+    expirations.add(headers["apns-expiration"] ?? "absent");
+    inFlight += 1;
+    peak = Math.max(peak, inFlight);
+    return new Promise<Response>((resolve) =>
+      setTimeout(() => {
+        inFlight -= 1;
+        resolve(new Response("", { status: 200 }));
+      }, 5)
+    );
+  }) as unknown as typeof fetch;
+
+  const devices = Array.from({ length: 24 }, (_, i) => ({
+    user_id: `u${i}`,
+    apns_token: `t${i}`,
+    environment: "production",
+  }));
+  const summary = await deliverToDevices(devices, { aps: {} }, {
+    credentials: creds(pem),
+    fetchImpl: impl,
+    log: silent,
+    expiration: 1_800_003_600,
+    concurrency: 4,
+  });
+
+  assert.equal(summary.delivered, 24);
+  // REGRESSION (a): `for … await` sent one push at a time, so a member with
+  // hundreds of device rows could push their circle's fan-out past the Edge
+  // Function wall clock — every notification for that circle then died.
+  assert.ok(peak > 1, `fan-out was serial (peak concurrency ${peak})`);
+  assert.ok(peak <= 4, `fan-out exceeded its bound (peak ${peak})`);
+  // REGRESSION (b): apns-expiration was never set, so Apple's default
+  // store-and-retry applied and a window-bound nudge could land days later.
+  assert.deepEqual([...expirations], ["1800003600"]);
   resetAPNsTokenCache();
 });

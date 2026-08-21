@@ -77,6 +77,15 @@ export async function readJsonBody(req: Request): Promise<unknown> {
 
 export function errorResponse(err: unknown): Response {
   if (err instanceof HttpError) {
+    // 4xx messages are the actionable ones — "dayKey must be yyyy-MM-dd" is
+    // written for the caller and says nothing about the inside of the system.
+    // 5xx messages are not: every DB helper builds one from a PostgREST/Postgres
+    // error, so surfacing it hands any authenticated caller constraint names,
+    // column names and function signatures. Log it, return the code.
+    if (err.status >= 500) {
+      console.error("server error", err.code, err.message);
+      return json({ ok: false, error: err.code }, err.status);
+    }
     return json(
       { ok: false, error: err.code, message: err.message },
       err.status,

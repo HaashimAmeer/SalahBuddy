@@ -6,10 +6,16 @@
 // the work is a fixed, idempotent, whole-project cleanup.
 //
 // Order matters: claim the run slot FIRST (a single row + `for update`, so two
-// overlapping cron ticks cannot both purge), then let SQL null out the expired
-// `photo_path`s and hand back the object paths, then delete those objects from
-// Storage. Rows first means a crash mid-delete leaves orphaned objects (harmless,
-// swept next run) rather than posts pointing at photos that no longer exist.
+// overlapping cron ticks cannot both purge), then let SQL retract the expired
+// rows and hand back the pending object paths, then delete those objects from
+// Storage — and only then tell the database they are gone.
+//
+// That last step is the difference between "swept next run" being true and being
+// a comforting sentence in a comment. The paths live in a tombstone table, not
+// in the return value of the statement that erased them, so a batch that fails
+// (or a run the wall clock kills mid-loop) leaves them on the list and the next
+// tick picks them up. Confirming only what Storage accepted is what makes a
+// half-finished sweep resumable instead of a permanent orphan.
 //
 // POST body (all optional): { "days": 30, "minIntervalMinutes": 60 }
 
@@ -38,6 +44,10 @@ import { chunk, readEnv } from "../_shared/util.ts";
 export const PHOTO_BUCKET = "prayer-photos";
 /// Supabase Storage caps a single remove() call; 100 keeps us well inside it.
 export const STORAGE_REMOVE_CHUNK = 100;
+/// Paths per run. Bounded so the first sweep after a long gap cannot return an
+/// unbounded set and guarantee the timeout it exists to prevent — the remainder
+/// is simply picked up on the next tick.
+export const PURGE_BATCH_LIMIT = 500;
 
 Deno.serve(async (req: Request): Promise<Response> => {
   const preflight = handleOptions(req);
@@ -83,14 +93,14 @@ async function handle(req: Request): Promise<Response> {
 
   const { data: purged, error: purgeError } = await admin.rpc(
     "purge_expired_photo_rows",
-    { p_days: days },
+    { p_days: days, p_limit: PURGE_BATCH_LIMIT },
   );
   if (purgeError) {
     throw new HttpError(500, "purge_failed", purgeError.message);
   }
 
   const paths = normalizePhotoPaths(purged);
-  const { removed, errors } = await removeObjects(admin, paths);
+  const { removed, confirmed, errors } = await removeObjects(admin, paths);
 
   return json({
     ok: true,
@@ -98,6 +108,8 @@ async function handle(req: Request): Promise<Response> {
     days,
     photoRowsCleared: paths.length,
     objectsRemoved: removed,
+    // paths still pending come back on the next run; nothing is lost
+    pendingRetry: paths.length - confirmed,
     storageErrors: errors,
   });
 }
@@ -105,20 +117,33 @@ async function handle(req: Request): Promise<Response> {
 async function removeObjects(
   admin: Client,
   paths: readonly string[],
-): Promise<{ removed: number; errors: string[] }> {
+): Promise<{ removed: number; confirmed: number; errors: string[] }> {
   let removed = 0;
+  let confirmed = 0;
   const errors: string[] = [];
   for (const batch of chunk(paths, STORAGE_REMOVE_CHUNK)) {
     const { data, error } = await admin.storage.from(PHOTO_BUCKET).remove(
       batch,
     );
     if (error) {
-      // Keep going: one bad batch must not strand the rest of the sweep.
+      // Keep going: one bad batch must not strand the rest of the sweep. The
+      // batch stays on the tombstone list, so the next run retries it.
       console.error("retention: storage remove failed", error.message);
       errors.push(error.message);
       continue;
     }
     removed += data?.length ?? batch.length;
+
+    // Only now is it safe to forget the paths.
+    const { error: confirmError } = await admin.rpc("confirm_photo_deletions", {
+      p_paths: batch,
+    });
+    if (confirmError) {
+      console.error("retention: confirm failed", confirmError.message);
+      errors.push(confirmError.message);
+      continue;
+    }
+    confirmed += batch.length;
   }
-  return { removed, errors };
+  return { removed, confirmed, errors };
 }

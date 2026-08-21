@@ -35,7 +35,7 @@ backend/
       retention/index.ts            # the ~30-day photo sweep
   tests/
     shim/00_supabase_shim.sql       # fakes auth.*/storage.*/the API roles on vanilla Postgres
-    sql/01..16_*.sql                # assertion tests — RLS, cap-8, privacy, constraints
+    sql/01..24_*.sql                # assertion tests — RLS, cap-8, privacy, constraints
     run_sql_tests.sh                # scratch DB -> shim -> migrations -> assertions
     deno/*_test.ts                  # unit tests for the function helpers (offline, no permissions)
 ```
@@ -61,6 +61,24 @@ and the real project can never diverge on ordering.
 - **Automatic RLS is OFF on this project**, so every table needs an explicit
   `enable row level security`. Test 12 walks `pg_class` and fails the build if
   one is missed — that assertion exists because the failure mode is silent.
+- **Grants are column-scoped wherever a table has a column the client must not
+  write.** A policy answers "which rows"; only the grant answers "which
+  columns". `posts.created_at` is the retention clock, so a table-wide UPDATE
+  lets a client re-date a row to 2126 and its photo never expires;
+  `circles.code` is the invite, so a table-wide UPDATE lets any member kill
+  every outstanding invite (or set the code to `''` and capture anyone whose
+  join field was blank). Test 12 pins the column matrix in both directions.
+- **The keys carry `circle_id`.** `posts` is unique on
+  `(user_id, circle_id, day_key, prayer)`, and `excused_days` / `recovery_weeks`
+  key on `(user_id, circle_id, …)`. Your rows outlive your membership (§2), so
+  a key without the circle makes the join-backfill of your current week collide
+  with the rows still sitting in the circle you just left.
+- **Two tables are the sweep's private bookkeeping** and are granted to nobody:
+  `circle_departures` (who left which circle, and when — the purge clock) and
+  `photo_tombstones` (Storage paths whose row is gone). The tombstone list is
+  precisely the set of paths the storage policy is hiding, so `authenticated`
+  reaching it would undo the point; the policy consults
+  `photo_is_pending_deletion()` instead.
 
 ---
 
@@ -178,14 +196,22 @@ curl-level test", SPEC-V4 §10), re-run on every deploy:
 1. The publishable key **on its own reads nothing** — `posts`, `profiles`,
    `circles`, `circle_members`, `excused_days` each denied or empty, both with
    `apikey` alone and with an anon bearer. RLS, not key custody, is the
-   security boundary; this is the assertion that says so out loud.
+   security boundary; this is the assertion that says so out loud. A `404` is
+   scored as a FAILURE, not a denial: PostgREST answers `404/PGRST205` for a
+   table missing from the schema cache, so treating it as "denied" reports a
+   broken deploy as a row of green ticks.
 2. Three throwaway `@example.com` users sign up and sign in for real tokens.
 3. User A's `create_circle` returns a circle and a 6-char invite code from the
    unambiguous alphabet (the code's *value* is masked — a public log should not
    hand out live invites).
 4. User B joins with that code and sees a 2-person roster.
-5. User C creates an unrelated circle and posts into it; **user B cannot see
-   that post**, sees an empty feed, and sees exactly one circle — their own.
+5. User C creates an unrelated circle, posts into it and marks a resting day;
+   **user B cannot see that post**, sees an empty feed, and sees exactly one
+   circle — their own.
+6. The proof-1 reads are repeated **while those rows exist**. Proof 1 runs
+   before anything has been created and the cleanup trap deletes it all again,
+   so on its own it reads five empty tables — which passes identically with RLS
+   switched off. Proof 6 is the assertion; proof 1 is the smoke check.
 
 Every assertion prints `PASS`/`FAIL`/`SKIP` and lands in the job summary.
 Tokens, passwords and invite codes are masked; the run ends by calling
@@ -275,10 +301,51 @@ preferences.
   `<circle_id>/<user_id>/<uuid>.jpg`. Folder 1 is the read scope, folder 2 is
   the owner — which is what makes the storage policies one-liners. 5 MiB cap,
   `image/jpeg` only.
-- **Nudges are rate-limited by their primary key**, not by a counter:
-  `(sender_id, recipient_id, day_key, prayer)`. A second nudge in the same
-  window is not an error, it returns `false` — the caller gets
+- **Nudges are rate-limited by their primary key** —
+  `(sender_id, recipient_id, day_key, prayer)` — *plus* two clock-based bounds,
+  because the key alone is only a limit against an honest client. `day_key` is
+  the caller's schedule day, so an unbounded one is ~18 million fresh primary
+  keys against one circle-mate (3.65M days × 5 prayers), each a real push.
+  `record_nudge()` therefore rejects a `day_key` more than a day either side of
+  `now()` (±1 day covers every real timezone offset) and caps a sender at
+  `nudge_hourly_cap()` per hour. A second nudge in the same window is not an
+  error, it returns `false` — the caller gets
   `{sent:false, reason:"rate_limited"}` and nobody's phone buzzes twice.
+- **Push is opt-in and first-only.** §6's friend-activity alert is
+  `devices.notify_friend_activity`, which mirrors `AppSettings` and defaults to
+  **false**; the fan-out filters on it, because iOS cannot suppress an alert it
+  has already been handed. `notify` announces a post only when no earlier post
+  exists for that `(circle, day, prayer)` and claims `posts.notified_at` as a
+  one-shot lease, so a circle of 8 produces one alert per window rather than 7
+  — and the same `postId` can never be re-announced. `{kind:"join"}` claims
+  `circle_members.announced_at` the same way.
+- **Realtime publishes `posts` and `custom_challenges` — and deliberately not
+  `circle_members` or `excused_days`.** Realtime cannot apply RLS to DELETE
+  events (there is no row left to test a policy against), so a delete is
+  broadcast to every subscriber in the project carrying the row's primary key.
+  For those two tables the primary key IS the private fact: un-marking a rest
+  day would announce `(user_id, circle_id, day_key)` product-wide, and a
+  departure would announce the user→circle graph. **The client re-fetches the
+  roster and the resting flags on a `posts` event or on foreground.** For the
+  same reason `posts` keeps the DEFAULT (primary-key) replica identity: walrus
+  truncates a delete's `old_record` to the primary key whenever RLS is on, so
+  `replica identity full` delivers nothing and costs a full old tuple in the
+  WAL on every UPDATE. An undo arrives as an opaque `{id}` the client resolves
+  against its own mirror.
+- **Invite codes are throttled and format-checked.** 32^6 ≈ 1.07e9 codes is a
+  keyspace an online guesser walks in an afternoon, and one hit reads a
+  stranger's whole circle. `circles.code` has a CHECK for the six-character
+  unambiguous alphabet (an empty code used to be legal, which made
+  `join_circle('')` land the caller in whichever circle had claimed it),
+  `join_circle` rejects a malformed code before it looks anything up, and
+  attempts are charged against an hourly budget. That meter is a SEQUENCE, not
+  a table, because every failure path here RAISES and a raise rolls back
+  whatever a counter just wrote — `nextval`/`setval` are the only writes
+  Postgres does not roll back, so they are the only way to remember a failed
+  guess. Known trade-off: the budget is project-global, so a determined
+  attacker can spend it and make joins fail for an hour. Per-user accounting
+  needs a caller that can commit between attempts (an Edge Function) and is a
+  Phase D conversation.
 - **The developer time-travel offset is forced to zero while a real circle is
   active** (client-side, SPEC-V4 §3). Posting fictional timestamps to real
   friends would break the very thing time travel exists to test.
@@ -289,28 +356,59 @@ preferences.
 
 Photos are the only heavy, personal thing here, so they age out.
 
-`purge_expired_photo_rows(p_days int default 30)` (SECURITY DEFINER,
-`service_role` only):
+**Every path that can detach a photo records it first.** An AFTER trigger on
+`posts` writes `old.photo_path` into `photo_tombstones` on DELETE and on any
+change of the column — so undo, `delete_account()`, a replaced photo and the
+sweep itself all leave the path behind. Without it the only reference to a
+Storage object dies with the row: a deleted account's prayer photos would sit
+in the bucket forever, unreachable by any sweep and readable by every remaining
+member of the circle. A tombstoned path also stops being readable *immediately*
+— the storage SELECT policy consults `photo_is_pending_deletion()` — so §4's
+"deletion purges immediately" is true of the read, not just eventually of the
+bytes.
 
-1. nulls `posts.photo_path` for posts older than `p_days` and **returns the
-   paths it just detached**,
-2. deletes `nudges` older than 30 days — they are rate-limit tokens, litter
+`purge_expired_photo_rows(p_days int default 30, p_limit int default 500)`
+(SECURITY DEFINER, `service_role` only):
+
+1. nulls `posts.photo_path` for posts older than `p_days` (the trigger
+   tombstones each path),
+2. purges a departed member's footprint — posts, resting days, recovery total,
+   custom challenges — once `departure_grace_days()` (7) has passed since they
+   left, which is §2's "until the week ends" without the server ever having to
+   derive a week boundary in somebody else's timezone,
+3. deletes `nudges` older than 30 days — they are rate-limit tokens, litter
    once the window is gone,
-3. deletes `excused_days` / `recovery_weeks` whose owner is no longer in any
-   circle (left or deleted their account, so nobody is allowed to read them).
+4. deletes ownerless `excused_days` / `recovery_weeks` **scoped to the row's own
+   circle** and only after 30 days. Both halves matter: "is this user in *a*
+   circle" let a member who moved from A to B keep rendering resting days to
+   circle A forever, and no age guard meant a leaver's resting flags vanished
+   the instant they left while their posts stayed — turning a gentle "resting"
+   into a wall of plain misses for the circle they just left,
+5. deletes circles nobody is in any more (they cascade, and an abandoned circle
+   otherwise keeps its invite code alive against the code space forever),
+6. **returns a bounded batch of pending Storage paths** from `photo_tombstones`.
 
 It ages off `created_at`, the server's own clock — never `logged_at`, which is
-client-supplied and therefore not a fact about when we stored anything.
+client-supplied and therefore not a fact about when we stored anything. That is
+only true because `created_at` is not writable: the column-scoped grants keep
+`authenticated` off it, and a BEFORE UPDATE trigger pins it against the
+service-role client too.
 
-The `retention` edge function orchestrates it: `claim_retention_run()` first
-(a single-row lease, so two overlapping cron ticks cannot both purge and a
+The `retention` edge function orchestrates it: `claim_retention_run()` first (a
+single-row lease, so two overlapping cron ticks cannot both purge and a
 signed-in developer cannot hammer it), then the SQL, then
-`storage.remove(paths)` in chunks of 100. **Rows first, objects second** — a
-crash mid-delete leaves orphaned bytes (harmless, swept next run) rather than a
-post pointing at a photo that no longer exists.
+`storage.remove(paths)` in chunks of 100 — and then `confirm_photo_deletions()`
+for each batch Storage actually accepted. **Confirm-after-delete is what makes
+the sweep resumable**: a failed batch, or a run the wall clock kills mid-loop,
+leaves those paths on the tombstone list and the next tick picks them up.
+Returning the paths from the same statement that erased them (the previous
+shape) lost them permanently on any partial failure. `p_limit` bounds a run so
+the first sweep after a long gap cannot return an unbounded set and guarantee
+the timeout it exists to avoid.
 
-Leaving a circle keeps your posts (the circle's week stays coherent);
-`delete_account()` purges everything you own immediately.
+Leaving a circle keeps your posts for the rest of the week (the circle's week
+stays coherent) and then purges them; `delete_account()` purges everything you
+own immediately, photos included.
 
 ---
 
@@ -323,6 +421,13 @@ Leaving a circle keeps your posts (the circle's week stays coherent);
       has no production deploy job — wiring one up is a copy of
       `deploy-staging` with the ref check and secret names swapped, and the
       smoke job must stay pointed at staging (it creates users and posts rows).
+- [ ] **Set `devices.notify_friend_activity` from the client.** It defaults to
+      `false`, which is the safe default and also means the friend-activity
+      push does nothing until the app writes the user's `AppSettings` toggle
+      into the `devices` row it registers (Phase D).
+- [ ] **Client: re-fetch the roster and resting flags on a `posts` realtime
+      event.** `circle_members` and `excused_days` are deliberately not
+      published (see Privacy invariants), so those two are pull, not push.
 - [ ] **Add `backend/supabase/.temp/` to `.gitignore`.** The Supabase CLI
       writes the linked project ref there; on a public repo that should never
       be committed by accident.

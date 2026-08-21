@@ -44,6 +44,29 @@ export function isDayKey(value: unknown): value is string {
     date.getUTCDate() === d;
 }
 
+/// True when `dayKey` is within ±`days` of the server's current UTC date.
+///
+/// `isDayKey` only asks "is this a real calendar date", which accepts everything
+/// from year 0000 to 9999 — and dayKey is half of the nudge rate limit's primary
+/// key, so an unbounded one hands a sender ~18 million fresh tokens against a
+/// single circle-mate (3.65M days × 5 prayers), each a real push that does not
+/// even collapse on the lock screen. `record_nudge` enforces the same bound in
+/// SQL against now(); this is here so an out-of-window key is a clean 400
+/// instead of a round trip that comes back as a 500.
+///
+/// ±1 day, not 0: day_key is the client's LOCAL schedule day, so a circle-mate
+/// a few timezones away is legitimately on yesterday's or tomorrow's date.
+export function dayKeyWithinWindow(
+  dayKey: string,
+  nowMs: number = Date.now(),
+  days = 1,
+): boolean {
+  const day = Date.parse(`${dayKey}T00:00:00Z`);
+  if (Number.isNaN(day)) return false;
+  const today = Math.floor(nowMs / 86_400_000) * 86_400_000;
+  return Math.abs(day - today) <= days * 86_400_000;
+}
+
 export function isPrayerKind(value: unknown): value is PrayerKind {
   return typeof value === "string" &&
     (PRAYERS as readonly string[]).includes(value);

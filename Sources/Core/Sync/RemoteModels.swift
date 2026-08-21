@@ -15,6 +15,8 @@ import Foundation
 //    value the server sent us — or a stale one from a wrong device clock —
 //    straight back over the server's own. They are read-only mirrors of the
 //    row, so the write side simply leaves them out and the DB default wins.
+//    The ONE exception is `RemoteMember.joinedAt` — see the note on its
+//    `encode(to:)`: that encoder can only ever write `circle.json`.
 //    Nil optionals the client DOES own are omitted rather than sent as null,
 //    which would try to write null into a NOT NULL column. Both rules are why
 //    every DTO hand-writes `encode(to:)` instead of relying on synthesis.
@@ -165,12 +167,17 @@ struct RemoteMember: Codable, Equatable, Sendable {
         joinedAt = try c.decodeIfPresent(Date.self, forKey: .joinedAt)
     }
 
+    /// Rule 2's one exception, and the grant is why it is safe: `authenticated`
+    /// holds only `select, delete` on `circle_members` — the row is inserted by
+    /// `create_circle` / `join_circle`, server-side — so this encoder can never
+    /// reach the wire. It writes `circle.json` and nothing else, and the mirror
+    /// MUST keep `joined_at`: it is what orders the roster, so dropping it here
+    /// re-sorts everybody by raw uuid on the next cold launch.
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(circleID, forKey: .circleID)
         try c.encode(userID, forKey: .userID)
-        // joined_at is the server's (rule 2) — it decides the roster order for
-        // everybody, so no client gets to claim its own seniority.
+        try c.encodeIfPresent(joinedAt, forKey: .joinedAt)
     }
 }
 

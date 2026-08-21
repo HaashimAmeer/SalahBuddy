@@ -26,13 +26,17 @@ import {
   callerClient,
   circleIdFor,
   circleMemberIds,
+  claimJoinAnnouncement,
+  claimPostNotification,
   type Client,
   deleteDevice,
   devicesFor,
+  isFirstPostInWindow,
   postById,
   profileFor,
   resolveCallerId,
   serviceClient,
+  setDeviceEnvironment,
 } from "../_shared/db.ts";
 import {
   errorResponse,
@@ -49,6 +53,7 @@ import {
   postAlert,
 } from "../_shared/messages.ts";
 import {
+  dayKeyWithinWindow,
   isPrayerKind,
   type NotifyRequest,
   parseNotifyRequest,
@@ -142,6 +147,23 @@ async function notifyPost(
     });
   }
 
+  // §6 is "X posted FIRST for Fajr", not "X posted". Checked before the lease is
+  // claimed so a later poster's postId stays announceable if the first one is
+  // ever deleted — and so a circle of 8 produces one alert per window, not 7.
+  if (!await isFirstPostInWindow(admin, post)) {
+    return json({ ok: true, kind: "post", sent: false, reason: "not_first" });
+  }
+  // The lease: one announcement per post, ever. Nothing else in this function is
+  // stateful, so without it the same postId can be re-announced in a loop.
+  if (!await claimPostNotification(admin, post.id)) {
+    return json({
+      ok: true,
+      kind: "post",
+      sent: false,
+      reason: "already_notified",
+    });
+  }
+
   const alert = postAlert({
     name: caller.senderName,
     prayer: post.prayer,
@@ -154,6 +176,9 @@ async function notifyPost(
     // One notification per prayer per friend: a burst of posts for the same
     // window collapses instead of stacking.
     collapseId: `post-${post.user_id}-${post.day_key}-${post.prayer}`,
+    // Opt-in only: this is the friend-activity toggle, which is off by default.
+    friendActivityOnly: true,
+    expiration: expiresIn(POST_TTL_SECONDS),
     data: {
       kind: "post",
       circleId: caller.circleId,
@@ -166,11 +191,22 @@ async function notifyPost(
 }
 
 async function notifyJoin(admin: Client, caller: Caller): Promise<Response> {
+  // Same lease shape as a post: the membership row is claimed once, so a client
+  // POSTing {kind:"join"} in a loop cannot fan out to the circle on every call.
+  if (!await claimJoinAnnouncement(admin, caller.callerId, caller.circleId)) {
+    return json({
+      ok: true,
+      kind: "join",
+      sent: false,
+      reason: "already_announced",
+    });
+  }
   const alert = joinAlert({ name: caller.senderName });
   return await fanOut(admin, caller, alert, {
     threadId: `circle-${caller.circleId}`,
     category: "CIRCLE_JOIN",
     collapseId: `join-${caller.callerId}`,
+    expiration: expiresIn(JOIN_TTL_SECONDS),
     data: { kind: "join", circleId: caller.circleId, userId: caller.callerId },
   });
 }
@@ -183,6 +219,16 @@ async function notifyNudge(
 ): Promise<Response> {
   if (request.recipientId === caller.callerId) {
     return json({ ok: true, kind: "nudge", sent: false, reason: "self_nudge" });
+  }
+  // The rate limit's primary key contains dayKey, so an unbounded dayKey is not
+  // a rate limit at all. record_nudge re-checks this against the DB clock — the
+  // check here just turns "walked off the calendar" into an honest 400.
+  if (!dayKeyWithinWindow(request.dayKey)) {
+    throw new HttpError(
+      400,
+      "invalid_day_key",
+      "dayKey must be within a day of today",
+    );
   }
   // The recipient must actually be a circle-mate — checked here as well as by
   // the nudges INSERT policy, so a bogus recipientId never reaches the RPC.
@@ -204,7 +250,14 @@ async function notifyNudge(
     p_day_key: request.dayKey,
     p_prayer: request.prayer,
   });
-  if (error) throw new HttpError(500, "record_nudge_failed", error.message);
+  if (error) {
+    // SB400 is record_nudge's own "that day_key is not a prayer window" — a
+    // caller error, not ours, so it must not come back as an opaque 500.
+    if ((error as { code?: string }).code === "SB400") {
+      throw new HttpError(400, "invalid_day_key", "dayKey is out of window");
+    }
+    throw new HttpError(500, "record_nudge_failed", error.message);
+  }
   if (data !== true) {
     return json({
       ok: true,
@@ -225,6 +278,14 @@ async function notifyNudge(
     category: "CIRCLE_NUDGE",
     collapseId:
       `nudge-${request.recipientId}-${request.dayKey}-${request.prayer}`,
+    // A nudge is window-bound ("there's still time"), so it must not sit in
+    // Apple's store-and-retry queue and surface two days later for a prayer
+    // that is long gone. One hour is generous for a phone that blinked.
+    expiration: expiresIn(NUDGE_TTL_SECONDS),
+    // The counts below would tell one member how many live push registrations
+    // another member has. Harmless-looking, but it is about a single named
+    // person, so the nudge reply says only whether it went.
+    countsPrivate: true,
     data: {
       kind: "nudge",
       circleId: caller.circleId,
@@ -235,11 +296,23 @@ async function notifyNudge(
   });
 }
 
+/// Apple's default is store-and-retry forever; every push here has a shelf life.
+const NUDGE_TTL_SECONDS = 60 * 60;
+const POST_TTL_SECONDS = 6 * 60 * 60;
+const JOIN_TTL_SECONDS = 24 * 60 * 60;
+
+function expiresIn(seconds: number): number {
+  return Math.floor(Date.now() / 1000) + seconds;
+}
+
 interface PushOptions {
   kind?: string;
   threadId?: string;
   category?: string;
   collapseId?: string;
+  expiration?: number;
+  friendActivityOnly?: boolean;
+  countsPrivate?: boolean;
   data?: Record<string, unknown>;
 }
 
@@ -255,7 +328,9 @@ async function fanOut(
     caller.circleId,
     caller.callerId,
   );
-  const devices = await devicesFor(admin, recipients);
+  const devices = await devicesFor(admin, recipients, {
+    friendActivityOnly: opts.friendActivityOnly,
+  });
   return await push(admin, devices, alert, {
     ...opts,
     kind: opts.kind ?? String(opts.data?.kind ?? "post"),
@@ -278,8 +353,14 @@ async function push(
   // project without a push key still answers 200 and the caller carries on.
   const summary = await deliverToDevices(devices, payload, {
     collapseId: opts.collapseId,
+    expiration: opts.expiration,
     onUnregistered: (token) => deleteDevice(admin, token),
+    onEnvironmentChanged: (token, environment) =>
+      setDeviceEnvironment(admin, token, environment),
   });
+  if (opts.countsPrivate) {
+    return json({ ok: true, kind: opts.kind, sent: summary.delivered > 0 });
+  }
   return json({
     ok: true,
     kind: opts.kind,

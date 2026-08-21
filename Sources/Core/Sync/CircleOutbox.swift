@@ -31,8 +31,9 @@ enum CircleOp: Codable, Equatable, Sendable {
     /// Retract an object that already reached Storage. Deleting the post ROW
     /// is not enough: the retention sweep enumerates paths from `posts`, so an
     /// object whose row is gone is never collected and stays readable by every
-    /// circle member (§4). Undoing a post whose photo has already uploaded
-    /// queues this behind the row delete.
+    /// circle member (§4). Undoing a post whose photo upload is already ON THE
+    /// WIRE queues this directly behind that upload — and so ahead of the row
+    /// delete, which `enqueue` appends afterwards (see `cancelPhotoUpload`).
     case deletePhoto(path: String)
 
     enum Kind: String, Codable, Sendable {

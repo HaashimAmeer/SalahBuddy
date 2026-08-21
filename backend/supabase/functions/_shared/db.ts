@@ -113,20 +113,37 @@ export async function circleMemberIds(
   return ((data ?? []) as { user_id: string }[]).map((row) => row.user_id);
 }
 
+/// Hard ceiling on how many device rows one fan-out will ever touch. The DB
+/// trigger already caps each user at max_devices_per_user(), so 8 members × 10
+/// devices is the real worst case; this is the belt to that suspenders, so a cap
+/// that is ever raised in SQL cannot silently turn one post into a 5,000-push
+/// invocation that outlives the function's wall clock.
+export const MAX_FAN_OUT_DEVICES = 80;
+
 export async function devicesFor(
   admin: Client,
   userIds: readonly string[],
+  opts: { friendActivityOnly?: boolean } = {},
 ): Promise<DeviceRow[]> {
   if (userIds.length === 0) return [];
-  const { data, error } = await admin
+  let query = admin
     .from("devices")
     .select("user_id,apns_token,environment")
     .in("user_id", userIds as string[]);
+  // §6's friend-activity push is opt-in and OFF by default. iOS cannot suppress
+  // an alert it has already been handed, so the toggle has to be applied here.
+  if (opts.friendActivityOnly) {
+    query = query.eq("notify_friend_activity", true);
+  }
+  const { data, error } = await query
+    .order("updated_at", { ascending: false })
+    .limit(MAX_FAN_OUT_DEVICES);
   if (error) throw new HttpError(500, "devices_lookup_failed", error.message);
   return (data ?? []) as DeviceRow[];
 }
 
-/// Drops a token Apple told us is dead (410 / BadDeviceToken).
+/// Drops a token Apple told us is dead (410 / Unregistered, or rejected by both
+/// hosts).
 export async function deleteDevice(
   admin: Client,
   token: string,
@@ -136,6 +153,80 @@ export async function deleteDevice(
     token,
   );
   if (error) console.error("devices: delete failed", error.message);
+}
+
+/// Remembers which APNs host a token actually answers on, so the next push does
+/// not have to discover it again.
+export async function setDeviceEnvironment(
+  admin: Client,
+  token: string,
+  environment: string,
+): Promise<void> {
+  const { error } = await admin
+    .from("devices")
+    .update({ environment })
+    .eq("apns_token", token);
+  if (error) console.error("devices: environment update failed", error.message);
+}
+
+/// Claims the one-and-only announcement for a post, atomically.
+///
+/// `notified_at is null` in the WHERE is the lease: two concurrent calls, or a
+/// client re-POSTing the same postId in a loop, produce exactly one row here and
+/// therefore exactly one fan-out. Nothing else in the function is stateful, so
+/// without this a member could re-announce themselves to the circle forever.
+export async function claimPostNotification(
+  admin: Client,
+  postId: string,
+): Promise<boolean> {
+  const { data, error } = await admin
+    .from("posts")
+    .update({ notified_at: new Date().toISOString() })
+    .eq("id", postId)
+    .is("notified_at", null)
+    .select("id");
+  if (error) throw new HttpError(500, "notify_claim_failed", error.message);
+  return (data ?? []).length > 0;
+}
+
+/// True when no earlier post exists for this (circle, day, prayer).
+///
+/// §6 is specific: "X posted FIRST for Fajr". Announcing every post instead
+/// means up to 7 alerts per prayer window per member — and they do not even
+/// collapse, because the collapse id is keyed on the poster.
+export async function isFirstPostInWindow(
+  admin: Client,
+  post: Pick<PostRow, "id" | "circle_id" | "day_key" | "prayer">,
+): Promise<boolean> {
+  const { data, error } = await admin
+    .from("posts")
+    .select("id")
+    .eq("circle_id", post.circle_id)
+    .eq("day_key", post.day_key)
+    .eq("prayer", post.prayer)
+    .neq("id", post.id)
+    .limit(1);
+  if (error) throw new HttpError(500, "first_post_lookup_failed", error.message);
+  return (data ?? []).length === 0;
+}
+
+/// The same lease shape for "member joined", keyed on the membership row.
+/// Without it any member can POST {kind:"join"} in a loop and fan a push out to
+/// all seven circle-mates on every request, forever.
+export async function claimJoinAnnouncement(
+  admin: Client,
+  userId: string,
+  circleId: string,
+): Promise<boolean> {
+  const { data, error } = await admin
+    .from("circle_members")
+    .update({ announced_at: new Date().toISOString() })
+    .eq("user_id", userId)
+    .eq("circle_id", circleId)
+    .is("announced_at", null)
+    .select("user_id");
+  if (error) throw new HttpError(500, "join_claim_failed", error.message);
+  return (data ?? []).length > 0;
 }
 
 export interface PostRow {

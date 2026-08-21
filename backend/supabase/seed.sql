@@ -82,7 +82,7 @@ from (values
   ('00000000-0000-4000-a000-000000000004'::uuid, 'dhuhr'::public.prayer_kind,   'prayed'::public.log_tier,   interval '3 hours', false, null),
   ('00000000-0000-4000-a000-000000000002'::uuid, 'asr'::public.prayer_kind,     'onTime'::public.log_tier,   interval '1 hour',  true,  'Masjid')
 ) as post(user_id, prayer, tier, ago, jamaat, place)
-on conflict (user_id, day_key, prayer) do nothing;
+on conflict (user_id, circle_id, day_key, prayer) do nothing;
 
 -- A resting day, synced as a bare flag. There is no reason column and there
 -- never will be — period/illness privacy is absolute (SPEC-V4 §3).
@@ -92,7 +92,7 @@ values (
   '00000000-0000-4000-a000-0000000000c1',
   to_char(current_date - 1, 'YYYY-MM-DD')
 )
-on conflict (user_id, day_key) do nothing;
+on conflict (user_id, circle_id, day_key) do nothing;
 
 -- Recovery XP rides the scoreboard as an opaque weekly total: how it was
 -- earned (dhikr vs. good deeds) never leaves the device.
@@ -103,7 +103,7 @@ values (
   to_char(current_date, 'IYYY-"W"IW'),
   24
 )
-on conflict (user_id, week_key) do update set xp = excluded.xp;
+on conflict (user_id, circle_id, week_key) do update set xp = excluded.xp;
 
 -- One group challenge, in the client's id format ("custom-<uuid>").
 insert into public.custom_challenges (id, circle_id, created_by, prayer, days, week_key)

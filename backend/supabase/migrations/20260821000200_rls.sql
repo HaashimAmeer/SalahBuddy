@@ -12,9 +12,24 @@ create or replace function public.current_circle_id() returns uuid
 language sql stable security definer set search_path = public, pg_temp
 as $$ select circle_id from public.circle_members where user_id = auth.uid() limit 1 $$;
 
+-- Storage read gate. A photo whose post row is gone (undo, delete_account, the
+-- retention sweep) is tombstoned the instant the row goes, and the object itself
+-- disappears on the next sweep — but "on the next sweep" is not what §4 promises
+-- for a deleted account, and until then the circle read policy would happily keep
+-- serving the bytes. This closes the read the moment the fact is retracted.
+--
+-- SECURITY DEFINER because the policy expression runs as the CALLER, and handing
+-- `authenticated` a SELECT grant on photo_tombstones would publish the very list
+-- of paths we are trying to bury.
+create or replace function public.photo_is_pending_deletion(p_path text) returns boolean
+language sql stable security definer set search_path = public, pg_temp
+as $$ select exists (select 1 from public.photo_tombstones t where t.path = p_path) $$;
+
 alter table public.profiles          enable row level security;
 alter table public.circles           enable row level security;
 alter table public.circle_members    enable row level security;
+alter table public.circle_departures enable row level security;
+alter table public.photo_tombstones  enable row level security;
 alter table public.posts             enable row level security;
 alter table public.excused_days      enable row level security;
 alter table public.recovery_weeks    enable row level security;
@@ -46,6 +61,13 @@ drop policy if exists circles_select on public.circles;
 create policy circles_select on public.circles for select to authenticated
 using (id = public.current_circle_id());
 
+-- §2 gives members an editable NAME AND EMOJI — nothing else. The row-level
+-- policy cannot express that, so the column list on the grant below is what
+-- actually scopes it. Without that list this policy hands every member the
+-- invite `code` and `created_by`: rewriting `code` silently invalidates every
+-- outstanding invite (griefing, with no admin role to undo it), setting it to a
+-- blank captures anyone who submits an empty join field, and the unique index
+-- turns UPDATE into a free existence oracle for other circles' codes.
 drop policy if exists circles_update on public.circles;
 create policy circles_update on public.circles for update to authenticated
 using (id = public.current_circle_id()) with check (id = public.current_circle_id());
@@ -190,22 +212,79 @@ revoke all on all sequences in schema public from authenticated;
 
 grant usage on schema public to authenticated, service_role;
 
-grant select, insert, update         on public.profiles          to authenticated;
-grant select, update                 on public.circles           to authenticated;
-grant select, delete                 on public.circle_members    to authenticated;
-grant select, insert, update, delete on public.posts             to authenticated;
-grant select, insert, update, delete on public.excused_days      to authenticated;
-grant select, insert, update, delete on public.recovery_weeks    to authenticated;
-grant select, insert, update, delete on public.custom_challenges to authenticated;
-grant select, insert, update, delete on public.devices           to authenticated;
-grant select, insert                 on public.nudges            to authenticated;
+-- COLUMN-SCOPED on purpose, everywhere a table has a column the client must not
+-- write. A row-level policy can only answer "which rows"; the grant is the only
+-- thing that answers "which columns", and three columns here are load-bearing:
+--
+--   * posts.created_at is what the ~30-day photo retention ages off. Left
+--     writable, a client can PATCH it to 2126 and its photo never expires —
+--     the retention promise in §4 becomes opt-out. (nudges.created_at is the
+--     same column for the nudge sweep.)
+--   * posts.notified_at / circle_members.announced_at are push leases; a client
+--     that can clear them can re-announce itself forever.
+--   * circles.code is the invite (see circles_update above).
+--
+-- updated_at is excluded everywhere too: the touch trigger owns it, and a row
+-- that can lie about its own freshness breaks last-write-wins on the client.
+grant select on public.profiles to authenticated;
+grant insert (id, name, avatar_emoji, avatar_path, member_kind),
+      update (name, avatar_emoji, avatar_path, member_kind)
+      on public.profiles to authenticated;
+
+grant select on public.circles to authenticated;
+grant update (name, emoji) on public.circles to authenticated;
+
+grant select, delete on public.circle_members to authenticated;
+
+grant select, delete on public.posts to authenticated;
+grant insert (id, user_id, circle_id, day_key, prayer, tier, logged_at,
+              jamaat, place_label, photo_path, travel_combined),
+      update (day_key, prayer, tier, logged_at,
+              jamaat, place_label, photo_path, travel_combined)
+      on public.posts to authenticated;
+
+grant select, delete on public.excused_days to authenticated;
+grant insert (user_id, circle_id, day_key),
+      update (user_id, circle_id, day_key)
+      on public.excused_days to authenticated;
+
+grant select, delete on public.recovery_weeks to authenticated;
+grant insert (user_id, circle_id, week_key, xp),
+      update (user_id, circle_id, week_key, xp)
+      on public.recovery_weeks to authenticated;
+
+grant select, delete on public.custom_challenges to authenticated;
+grant insert (id, circle_id, created_by, prayer, days, week_key),
+      update (prayer, days, week_key)
+      on public.custom_challenges to authenticated;
+
+grant select, delete on public.devices to authenticated;
+grant insert (user_id, apns_token, environment, notify_friend_activity),
+      update (user_id, apns_token, environment, notify_friend_activity)
+      on public.devices to authenticated;
+
+grant select on public.nudges to authenticated;
+grant insert (sender_id, recipient_id, day_key, prayer)
+      on public.nudges to authenticated;
+
+-- circle_departures / photo_tombstones get nothing at all: they are the sweep's
+-- own bookkeeping. The tombstone list is literally the set of paths we are
+-- trying to make unreadable, so `authenticated` must never hold SELECT on it —
+-- the storage policy reaches it through photo_is_pending_deletion() instead.
 
 grant select, insert, update, delete on all tables in schema public to service_role;
+grant usage, select on all sequences in schema public to service_role;
 
 -- `from public` drops the implicit grant every function is born with; `from anon`
 -- is separate and necessary, because an EXPLICIT grant (which Supabase's default
 -- privileges on `public` hand out) survives a revoke aimed at PUBLIC.
-revoke execute on function public.current_circle_id()  from public, anon;
-revoke execute on function public.circle_max_members() from public, anon;
-grant  execute on function public.current_circle_id()  to authenticated, service_role;
-grant  execute on function public.circle_max_members() to authenticated, service_role;
+revoke execute on function public.current_circle_id()          from public, anon;
+revoke execute on function public.circle_max_members()         from public, anon;
+revoke execute on function public.max_devices_per_user()       from public, anon;
+revoke execute on function public.photo_is_pending_deletion(text) from public, anon;
+grant  execute on function public.current_circle_id()          to authenticated, service_role;
+grant  execute on function public.circle_max_members()         to authenticated, service_role;
+grant  execute on function public.max_devices_per_user()       to authenticated, service_role;
+-- Reachable by authenticated only as the storage SELECT policy's helper; it
+-- answers a yes/no about a path the caller already named, never a listing.
+grant  execute on function public.photo_is_pending_deletion(text) to authenticated, service_role;

@@ -26,11 +26,19 @@ name: backend
 # ios.yml ignores backend/**). dev/** matches ios.yml so a long-running v4
 # session gets a verdict on every push without merging to staging first —
 # but note that only `staging` deploys; dev branches stop after `test`.
+#
+# The negation matters on `staging`: "backend/**" matches backend/README.md, so
+# a typo fix in the docs would otherwise run `supabase link` → `db push` →
+# `functions deploy` against the live project and mint three throwaway auth
+# users that nothing deletes — for a change that deploys nothing. tests/** is
+# deliberately NOT excluded: a change to the suite is exactly what the `test`
+# job exists to run.
 on:
   push:
     branches: [staging, production, "dev/**"]
     paths:
       - "backend/**"
+      - "!backend/README.md"
       - ".github/workflows/backend.yml"
   workflow_dispatch:
 
@@ -327,27 +335,45 @@ jobs:
           }
           trap cleanup EXIT
 
+          # ---- the anon probe, factored out --------------------------------
+          # Used twice: once before any rows exist (a smoke check that the
+          # endpoints answer at all) and once AFTER proof 5, while user C's
+          # circle, profile, membership and post are live. The second call is
+          # the one that proves anything: reading 0 rows from a table that is
+          # genuinely empty would pass with RLS switched off entirely.
+          #
+          # 404 is NOT a denial. PostgREST answers 404/PGRST205 when a table is
+          # missing from the schema cache — a renamed table, or a cache that has
+          # not reloaded in the seconds since `db push`. Scoring that as a pass
+          # reports a broken deploy as ten green ticks.
+          anon_reads_nothing() {
+            local phase="$1" table mode rows
+            for table in posts profiles circles circle_members excused_days; do
+              for mode in "apikey-only" "apikey+anon-bearer"; do
+                if [ "$mode" = "apikey-only" ]; then
+                  api GET "/rest/v1/$table?select=id&limit=5" "-"
+                else
+                  api GET "/rest/v1/$table?select=id&limit=5" "$KEY"
+                fi
+                rows="$(printf '%s' "$RESP" | jq 'if type=="array" then length else -1 end' 2>/dev/null || echo -1)"
+                if [ "$CODE" = "401" ] || [ "$CODE" = "403" ]; then
+                  pass "anon GET /$table ($mode, $phase) denied with $CODE"
+                elif [ "$CODE" = "200" ] && [ "$rows" = "0" ]; then
+                  pass "anon GET /$table ($mode, $phase) returned 0 rows"
+                elif [ "$CODE" = "404" ]; then
+                  fail "anon GET /$table ($mode, $phase): table missing from the schema cache" "$(why)"
+                else
+                  fail "anon GET /$table ($mode, $phase) LEAKED DATA" "$(why)"
+                fi
+              done
+            done
+          }
+
           # =====================================================================
           echo "== Proof 1: the publishable key alone reads nothing"
           # RLS is the boundary. Anonymous is either denied outright (no grants
           # to `anon`) or returns an empty set — anything else is a data leak.
-          for table in posts profiles circles circle_members excused_days; do
-            for mode in "apikey-only" "apikey+anon-bearer"; do
-              if [ "$mode" = "apikey-only" ]; then
-                api GET "/rest/v1/$table?select=id&limit=5" "-"
-              else
-                api GET "/rest/v1/$table?select=id&limit=5" "$KEY"
-              fi
-              rows="$(printf '%s' "$RESP" | jq 'if type=="array" then length else -1 end' 2>/dev/null || echo -1)"
-              if [ "$CODE" = "401" ] || [ "$CODE" = "403" ] || [ "$CODE" = "404" ]; then
-                pass "anon GET /$table ($mode) denied with $CODE"
-              elif [ "$CODE" = "200" ] && [ "$rows" = "0" ]; then
-                pass "anon GET /$table ($mode) returned 0 rows"
-              else
-                fail "anon GET /$table ($mode) LEAKED DATA" "$(why)"
-              fi
-            done
-          done
+          anon_reads_nothing "empty"
 
           # =====================================================================
           echo "== Proof 2: a throwaway user can sign up and sign in"
@@ -441,11 +467,20 @@ jobs:
             # ===================================================================
             echo "== Proof 3: create_circle mints a circle with a 6-char code"
             api POST "/rest/v1/rpc/create_circle" "$JWT_A" '{"p_name":"CI smoke"}'
-            CIRCLE_A="$(jqr 'if type=="array" then .[0] else . end | .id // empty')"
-            CODE_A="$(jqr 'if type=="array" then .[0] else . end | .code // empty')"
-            # The code is a live invite for as long as the circle exists, and
-            # this log is public — assert its shape, never print its value.
-            if [ -n "$CODE_A" ]; then echo "::add-mask::$CODE_A"; fi
+            CIRCLE_A=""; CODE_A=""
+            if [ "$CODE" = "200" ]; then
+              CIRCLE_A="$(jqr 'if type=="array" then .[0] else . end | .id // empty')"
+              CODE_A="$(jqr 'if type=="array" then .[0] else . end | .code // empty')"
+              # The code is a live invite for as long as the circle exists, and
+              # this log is public — assert its shape, never print its value.
+              #
+              # Harvested ONLY on success: a PostgREST error body is
+              # {"code":"PGRST202",...}, and `.code` is the same field. Masking
+              # that registers ::add-mask::PGRST202, after which every later
+              # diagnostic prints the error code as *** — redacting the one
+              # thing a failing run needs to say.
+              if [ -n "$CODE_A" ]; then echo "::add-mask::$CODE_A"; fi
+            fi
             if [ "$CODE" = "200" ] && [ -n "$CIRCLE_A" ]; then
               pass "create_circle returned a circle row"
             else
@@ -478,9 +513,12 @@ jobs:
             # ===================================================================
             echo "== Proof 5: an unrelated circle is invisible"
             api POST "/rest/v1/rpc/create_circle" "$JWT_C" '{"p_name":"CI outsider"}'
-            CIRCLE_C="$(jqr 'if type=="array" then .[0] else . end | .id // empty')"
-            CODE_C="$(jqr 'if type=="array" then .[0] else . end | .code // empty')"
-            if [ -n "$CODE_C" ]; then echo "::add-mask::$CODE_C"; fi
+            CIRCLE_C=""; CODE_C=""
+            if [ "$CODE" = "200" ]; then
+              CIRCLE_C="$(jqr 'if type=="array" then .[0] else . end | .id // empty')"
+              CODE_C="$(jqr 'if type=="array" then .[0] else . end | .code // empty')"
+              if [ -n "$CODE_C" ]; then echo "::add-mask::$CODE_C"; fi
+            fi
             if [ "$CODE" = "200" ] && [ -n "$CIRCLE_C" ]; then
               pass "user C created a third, unrelated circle"
             else
@@ -496,6 +534,18 @@ jobs:
               pass "user C posted into their own circle"
             else
               fail "user C post insert" "$(why)"
+            fi
+
+            # A resting day too, so proof 6's anon read has a row to fail to see
+            # in every one of the five tables it probes — including the one the
+            # spec calls absolutely private.
+            api POST "/rest/v1/excused_days" "$JWT_C" "$(jq -nc \
+              --arg u "$USER_C" --arg c "$CIRCLE_C" --arg d "$(date -u +%F)" \
+              '{user_id:$u,circle_id:$c,day_key:$d}')"
+            if [ "$CODE" = "201" ] || [ "$CODE" = "200" ]; then
+              pass "user C marked a resting day"
+            else
+              fail "user C excused_days insert" "$(why)"
             fi
 
             api GET "/rest/v1/posts?select=id,circle_id" "$JWT_B"
@@ -514,11 +564,23 @@ jobs:
 
             api GET "/rest/v1/circles?select=id" "$JWT_B"
             visible="$(printf '%s' "$RESP" | jq -r 'if type=="array" then (map(.id) | join(",")) else "" end' 2>/dev/null || printf '')"
-            if [ "$visible" = "$CIRCLE_A" ]; then
+            # Guarded on the status AND on CIRCLE_A being non-empty: `visible`
+            # collapses to "" for any non-array response, so "" = "" would
+            # otherwise report PASS for a run where create_circle had failed and
+            # the GET returned a 401. Every sibling assertion checks $CODE; this
+            # one used to be the exception.
+            if [ "$CODE" = "200" ] && [ -n "$CIRCLE_A" ] && [ "$visible" = "$CIRCLE_A" ]; then
               pass "user B sees exactly one circle: their own"
             else
               fail "circle visibility for user B" "expected only their circle, saw $(printf '%s' "$RESP" | jq 'length' 2>/dev/null || echo '?') row(s)"
             fi
+
+            # =================================================================
+            echo "== Proof 6: anon still reads nothing, now that rows exist"
+            # The assertion proof 1 could not make: user C's circle, membership,
+            # profile and post are all live at this point, so a 0-row read here
+            # is RLS doing its job rather than an empty table.
+            anon_reads_nothing "populated"
           fi
 
           # ---- did we actually prove anything? -------------------------------

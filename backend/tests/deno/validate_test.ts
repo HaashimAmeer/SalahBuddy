@@ -3,6 +3,7 @@
 
 import assert from "node:assert/strict";
 import {
+  dayKeyWithinWindow,
   isDayKey,
   isPrayerKind,
   isUuid,
@@ -272,4 +273,24 @@ Deno.test("retentionParams lets only service_role tune a destructive sweep", () 
     days: RETENTION_DEFAULT_DAYS,
     minIntervalMinutes: RETENTION_DEFAULT_MINUTES,
   });
+});
+
+Deno.test("dayKeyWithinWindow bounds the nudge rate-limit key to the server clock", () => {
+  const now = Date.parse("2026-08-21T13:00:00Z");
+  assert.equal(dayKeyWithinWindow("2026-08-21", now), true);
+  // ±1 day, because day_key is the client's LOCAL schedule day and a circle-mate
+  // a few timezones over is legitimately on the neighbouring date.
+  assert.equal(dayKeyWithinWindow("2026-08-20", now), true);
+  assert.equal(dayKeyWithinWindow("2026-08-22", now), true);
+
+  // REGRESSION: the only check on dayKey was "is this a real calendar date",
+  // which accepts year 0000 to 9999. Since dayKey is part of the nudges primary
+  // key — the thing §6 calls the rate limit — that is ~18 million distinct
+  // tokens (3.65M days × 5 prayers) for one sender against one recipient, each
+  // one a real push that does not even collapse on the lock screen.
+  assert.equal(dayKeyWithinWindow("2026-08-19", now), false);
+  assert.equal(dayKeyWithinWindow("2026-08-23", now), false);
+  assert.equal(dayKeyWithinWindow("1000-01-02", now), false);
+  assert.equal(dayKeyWithinWindow("2999-12-31", now), false);
+  assert.equal(dayKeyWithinWindow("not-a-date", now), false);
 });

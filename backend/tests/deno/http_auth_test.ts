@@ -144,6 +144,22 @@ Deno.test("errorResponse surfaces HttpError and hides everything else", async ()
     const body = await unknownErr.json();
     assert.deepEqual(body, { ok: false, error: "internal_error" });
     assert.equal(JSON.stringify(body).includes("leaked"), false);
+
+    // REGRESSION: an HttpError's message was returned for every status. Every
+    // 5xx in this codebase is built from a PostgREST/Postgres error, so that
+    // handed any authenticated caller constraint names, column names and
+    // function signatures — from a public repo with public logs.
+    const serverErr = errorResponse(
+      new HttpError(
+        500,
+        "devices_lookup_failed",
+        'relation "public.devices" violates constraint devices_pkey',
+      ),
+    );
+    assert.equal(serverErr.status, 500);
+    const serverBody = await serverErr.json();
+    assert.deepEqual(serverBody, { ok: false, error: "devices_lookup_failed" });
+    assert.equal(JSON.stringify(serverBody).includes("devices_pkey"), false);
   } finally {
     console.error = originalError;
   }
@@ -176,15 +192,29 @@ Deno.test("decodeJwtPayload reads claims without pretending to verify", () => {
   assert.equal(subjectFromJwt(fakeJwt({})), null);
 });
 
-Deno.test("isServiceRoleToken spots both credential shapes", () => {
-  assert.equal(isServiceRoleToken(fakeJwt({ role: "service_role" })), true);
+Deno.test("isServiceRoleToken believes the injected key and nothing else", () => {
+  // Both shapes of the real credential, compared verbatim.
+  assert.equal(isServiceRoleToken("sb_secret_abc", "sb_secret_abc"), true);
+  const realJwt = fakeJwt({ role: "service_role" });
+  assert.equal(isServiceRoleToken(realJwt, realJwt), true);
+
+  assert.equal(isServiceRoleToken("sb_secret_abc", "sb_secret_xyz"), false);
+  assert.equal(isServiceRoleToken("sb_secret_abc", ""), false);
+  assert.equal(isServiceRoleToken("sb_secret_abc", undefined), false);
+
+  // REGRESSION: a self-asserted `role: service_role` claim used to be enough.
+  // The one caller uses this answer to unlock retention's destructive `days`
+  // knob, so a decoded — i.e. unverified — claim meant anyone who could reach
+  // the function could POST {"days":1} and wipe every photo in the project.
+  // Only the platform's verify_jwt flag stood in the way, and that is a config
+  // switch, not a boundary.
+  assert.equal(isServiceRoleToken(fakeJwt({ role: "service_role" })), false);
+  assert.equal(
+    isServiceRoleToken(fakeJwt({ role: "service_role" }), "sb_secret_abc"),
+    false,
+  );
   assert.equal(
     isServiceRoleToken(fakeJwt({ role: "authenticated", sub: "u" })),
     false,
   );
-  assert.equal(isServiceRoleToken(fakeJwt({}), undefined), false);
-  // Newer projects issue an opaque secret key rather than a JWT.
-  assert.equal(isServiceRoleToken("sb_secret_abc", "sb_secret_abc"), true);
-  assert.equal(isServiceRoleToken("sb_secret_abc", "sb_secret_xyz"), false);
-  assert.equal(isServiceRoleToken("sb_secret_abc", ""), false);
 });

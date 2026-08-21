@@ -142,6 +142,19 @@ export function resetAPNsTokenCache(): void {
   keyCache.clear();
 }
 
+/// Drops the cached provider token for these credentials.
+///
+/// Apple answers 403 ExpiredProviderToken when the container's clock has drifted
+/// or the .p8 was rotated under a warm isolate. Without this the same stale JWT
+/// is re-sent on every subsequent push from that isolate — for up to the full
+/// 50-minute TTL — and because 403 is not "unregistered", no device row is
+/// dropped either: pushes just silently stop.
+export function invalidateAPNsToken(
+  creds: Pick<APNsCredentials, "keyId" | "teamId">,
+): void {
+  tokenCache.delete(`${creds.teamId}:${creds.keyId}`);
+}
+
 /// Signs (or returns the cached) ES256 provider token for these credentials.
 /// WebCrypto's ECDSA signature is already raw r||s, which is exactly the JOSE
 /// ES256 encoding — no DER unwrapping needed.
@@ -235,18 +248,51 @@ export interface APNsSendResult {
   reason?: string;
   /// The token is dead — delete the `devices` row.
   unregistered: boolean;
+  /// 400/BadDeviceToken: retry against the other APNs host before believing it.
+  wrongEnvironment?: boolean;
   error?: string;
 }
 
-/// Apple's way of saying "this token is gone": 410 always, and 400 with
-/// BadDeviceToken for a token that never belonged to this topic.
+/// Apple's way of saying "this token is gone": 410, and an explicit
+/// Unregistered reason.
+///
+/// 400/BadDeviceToken is deliberately NOT here. Apple returns it for a token
+/// that does not belong to the host it was sent to — which is exactly what a
+/// TestFlight/dev build looks like when it registers a sandbox token against
+/// the production host (devices.environment is client-supplied and defaults to
+/// 'production'). Treating that as "dead" deletes a perfectly good row and the
+/// user silently never receives another push. `isWrongEnvironment` routes it to
+/// a retry against the other host instead; only if BOTH reject does the row go.
 export function isUnregistered(
   status: number,
   reason?: string | null,
 ): boolean {
   if (status === 410) return true;
-  return status === 400 &&
-    (reason === "BadDeviceToken" || reason === "Unregistered");
+  return status === 400 && reason === "Unregistered";
+}
+
+/// 400/BadDeviceToken: either a genuinely bogus token, or the right token sent
+/// to the wrong APNs host. Only a retry can tell the two apart.
+export function isWrongEnvironment(
+  status: number,
+  reason?: string | null,
+): boolean {
+  return status === 400 && reason === "BadDeviceToken";
+}
+
+/// A provider token Apple will not accept any more — the cached JWT has to go.
+export function isStaleProviderToken(
+  status: number,
+  reason?: string | null,
+): boolean {
+  return status === 403 &&
+    (reason === "ExpiredProviderToken" || reason === "InvalidProviderToken");
+}
+
+export function otherEnvironment(
+  environment: APNsEnvironment | string | null | undefined,
+): APNsEnvironment {
+  return environment === "sandbox" ? "production" : "sandbox";
 }
 
 export type Logger = (message: string, meta?: Record<string, unknown>) => void;
@@ -269,7 +315,13 @@ export interface SendAPNsOptions {
   fetchImpl?: typeof fetch;
   log?: Logger;
   nowSeconds?: number;
+  /// Milliseconds before the request to Apple is abandoned. One hung HTTP/2
+  /// connection must not be able to eat the whole invocation's wall clock —
+  /// the fan-out behind it still has other devices to reach.
+  timeoutMs?: number;
 }
+
+export const APNS_REQUEST_TIMEOUT_MS = 5000;
 
 /// Sends one push. NEVER throws: an unconfigured deployment, a malformed key
 /// and a network blip all come back as a result object with `delivered: false`.
@@ -295,8 +347,15 @@ export async function sendAPNs(opts: SendAPNsOptions): Promise<APNsSendResult> {
     return { ...base, skipped: true, reason: "empty_token" };
   }
 
-  try {
-    const jwt = await signAPNsJWT(creds, { nowSeconds: opts.nowSeconds });
+  const attempt = async (
+    forceRefresh: boolean,
+  ): Promise<{ status: number; reason?: string }> => {
+    const jwt = await signAPNsJWT(creds, {
+      // A refresh mints against the CURRENT clock. Re-signing at the same pinned
+      // instant would reproduce the very token Apple just called expired.
+      nowSeconds: forceRefresh ? undefined : opts.nowSeconds,
+      forceRefresh,
+    });
     const headers: Record<string, string> = {
       authorization: `bearer ${jwt}`,
       "apns-topic": creds.bundleId,
@@ -316,25 +375,42 @@ export async function sendAPNs(opts: SendAPNsOptions): Promise<APNsSendResult> {
       method: "POST",
       headers,
       body: JSON.stringify(opts.payload),
+      signal: AbortSignal.timeout(opts.timeoutMs ?? APNS_REQUEST_TIMEOUT_MS),
     });
 
-    if (response.status === 200) {
-      // Drain the (empty) body so the HTTP/2 stream closes cleanly.
-      await response.text().catch(() => "");
-      return { ...base, delivered: true, status: 200 };
+    // Always drain: an undrained body leaves the HTTP/2 stream open.
+    const text = await response.text().catch(() => "");
+    return { status: response.status, reason: parseAPNsReason(text) };
+  };
+
+  try {
+    let { status, reason } = await attempt(false);
+
+    // A stale provider token is the standard warm-isolate failure (clock drift,
+    // or a rotated .p8). Nothing else in the pipeline would ever clear it, so
+    // one push would poison every push from this isolate for up to 50 minutes.
+    if (isStaleProviderToken(status, reason)) {
+      log("apns: provider token rejected — refreshing and retrying once", {
+        reason,
+      });
+      invalidateAPNsToken(creds);
+      ({ status, reason } = await attempt(true));
     }
 
-    const text = await response.text().catch(() => "");
-    const reason = parseAPNsReason(text);
-    const unregistered = isUnregistered(response.status, reason);
-    log("apns: delivery failed", {
-      status: response.status,
+    if (status === 200) return { ...base, delivered: true, status: 200 };
+
+    const unregistered = isUnregistered(status, reason);
+    log("apns: delivery failed", { status, reason, unregistered });
+    return {
+      ...base,
+      status,
       reason,
       unregistered,
-    });
-    return { ...base, status: response.status, reason, unregistered };
+      wrongEnvironment: isWrongEnvironment(status, reason),
+    };
   } catch (err) {
-    // Signing failure (bad .p8) or transport failure — log, never throw.
+    // Signing failure (bad .p8), a timeout, or a transport failure — log, never
+    // throw: one dead device must not take the rest of the fan-out with it.
     log("apns: send threw", { error: String(err) });
     return { ...base, error: String(err), reason: "send_failed" };
   }
@@ -356,22 +432,39 @@ export interface DeliverSummary {
   delivered: number;
   skipped: number;
   unregistered: string[];
+  /// Tokens that turned out to be registered against the OTHER APNs host.
+  reenvironmented: { token: string; environment: APNsEnvironment }[];
   results: APNsSendResult[];
 }
 
+/// How many pushes are in flight at once. A serial `for … await` over a whole
+/// circle is fine at 7 devices and fatal at 700: at a realistic 40 ms round trip
+/// it is the difference between 0.3 s and half a minute inside one Edge Function
+/// invocation. Small enough to stay polite to Apple, wide enough that a slow
+/// device cannot hold up the rest.
+export const APNS_FAN_OUT_CONCURRENCY = 6;
+
 /// Fans one payload out to a set of device rows.
 ///
-/// `onUnregistered` is injected rather than imported so this module never needs
-/// to know about Supabase — which is what keeps it unit-testable offline.
+/// `onUnregistered` / `onEnvironmentChanged` are injected rather than imported
+/// so this module never needs to know about Supabase — which is what keeps it
+/// unit-testable offline.
 export async function deliverToDevices(
   devices: readonly DeviceRow[],
   payload: Record<string, unknown>,
   opts: {
     credentials?: APNsCredentials | null;
     onUnregistered?: (token: string) => Promise<void> | void;
+    onEnvironmentChanged?: (
+      token: string,
+      environment: APNsEnvironment,
+    ) => Promise<void> | void;
     fetchImpl?: typeof fetch;
     log?: Logger;
     collapseId?: string;
+    expiration?: number;
+    concurrency?: number;
+    timeoutMs?: number;
   } = {},
 ): Promise<DeliverSummary> {
   const log = opts.log ?? defaultLog;
@@ -383,6 +476,7 @@ export async function deliverToDevices(
     delivered: 0,
     skipped: 0,
     unregistered: [],
+    reenvironmented: [],
     results: [],
   };
 
@@ -393,16 +487,55 @@ export async function deliverToDevices(
     return summary;
   }
 
-  for (const device of devices) {
-    const result = await sendAPNs({
+  const send = (
+    device: DeviceRow,
+    environment: APNsEnvironment | string | null | undefined,
+  ) =>
+    sendAPNs({
       token: device.apns_token,
-      environment: device.environment,
+      environment,
       payload,
       credentials: creds,
       collapseId: opts.collapseId,
+      expiration: opts.expiration,
       fetchImpl: opts.fetchImpl,
+      timeoutMs: opts.timeoutMs,
       log,
     });
+
+  const deliverOne = async (device: DeviceRow) => {
+    let result = await send(device, device.environment);
+
+    // 400/BadDeviceToken usually means "right token, wrong host" — a TestFlight
+    // build whose registration did not say `sandbox`. Ask the other host before
+    // concluding the token is dead, and remember the answer.
+    if (result.wrongEnvironment) {
+      const flipped = otherEnvironment(device.environment);
+      log("apns: BadDeviceToken — retrying against the other host", {
+        environment: flipped,
+      });
+      const retry = await send(device, flipped);
+      if (retry.delivered) {
+        summary.reenvironmented.push({
+          token: device.apns_token,
+          environment: flipped,
+        });
+        try {
+          await opts.onEnvironmentChanged?.(device.apns_token, flipped);
+        } catch (err) {
+          log("apns: failed to record the device environment", {
+            error: String(err),
+          });
+        }
+        result = retry;
+      } else if (retry.wrongEnvironment) {
+        // Rejected by both hosts: now it really is a dead token.
+        result = { ...retry, unregistered: true };
+      } else {
+        result = retry;
+      }
+    }
+
     summary.results.push(result);
     if (result.delivered) summary.delivered++;
     if (result.skipped) summary.skipped++;
@@ -414,6 +547,21 @@ export async function deliverToDevices(
         log("apns: failed to drop dead device row", { error: String(err) });
       }
     }
-  }
+  };
+
+  const width = Math.max(1, opts.concurrency ?? APNS_FAN_OUT_CONCURRENCY);
+  let next = 0;
+  const workers = Array.from(
+    { length: Math.min(width, devices.length) },
+    async () => {
+      while (true) {
+        const index = next++;
+        if (index >= devices.length) return;
+        await deliverOne(devices[index]);
+      }
+    },
+  );
+  await Promise.all(workers);
+
   return summary;
 }

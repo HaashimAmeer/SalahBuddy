@@ -18,12 +18,19 @@ begin
   values ('prayer-photos', 'prayer-photos', false, 5242880, array['image/jpeg'])
   on conflict (id) do nothing;
 
+  -- The tombstone clause is what makes "deletion purges immediately" (§4) true
+  -- of the READ as well as the bytes. Membership alone would keep serving a
+  -- departed account's photos to the circle right up until the next sweep runs
+  -- — and the sweep is not even scheduled yet. The instant the owning row is
+  -- retracted (undo, delete_account, expiry) the object stops being readable;
+  -- the sweep then removes it for real.
   execute 'drop policy if exists prayer_photos_select on storage.objects';
   execute $p$
     create policy prayer_photos_select on storage.objects for select to authenticated
     using (
       bucket_id = 'prayer-photos'
       and (storage.foldername(name))[1] = public.current_circle_id()::text
+      and not public.photo_is_pending_deletion(name)
     )
   $p$;
 

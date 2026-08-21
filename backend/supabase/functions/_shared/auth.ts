@@ -36,17 +36,26 @@ export function decodeJwtPayload(jwt: string): Record<string, unknown> | null {
   }
 }
 
-/// True when the bearer is the project's service-role credential rather than a
-/// signed-in human. Covers both shapes: the legacy service-role JWT (role claim)
-/// and the newer opaque secret key, which is compared against the injected env
-/// value. Only ever consulted after the platform verified the token.
+/// True when the bearer IS the project's service-role credential.
+///
+/// Equality against the injected key, and nothing else. The obvious second
+/// branch — decode the token and trust `role === "service_role"` — is the one
+/// thing this module says it never does, and it would matter: the only caller
+/// uses the answer to unlock retention's destructive `days` knob, so a decoded
+/// (i.e. unverified) claim would let anyone who can reach the function POST
+/// `{"days":1}` and wipe every photo in the project older than a day. Today the
+/// platform's `verify_jwt = true` happens to make that unreachable — which is a
+/// config flag one `--no-verify-jwt` away from gone, not a security boundary.
+///
+/// Both credential shapes still work: the legacy service-role JWT and the newer
+/// opaque secret key are each compared verbatim against SUPABASE_SERVICE_ROLE_KEY,
+/// and the scheduler presents exactly that value.
 export function isServiceRoleToken(
   jwt: string,
   serviceRoleKey?: string,
 ): boolean {
-  if (serviceRoleKey && jwt === serviceRoleKey) return true;
-  const claims = decodeJwtPayload(jwt);
-  return claims?.role === "service_role";
+  return serviceRoleKey !== undefined && serviceRoleKey !== "" &&
+    jwt === serviceRoleKey;
 }
 
 /// The `sub` claim, when it looks like a user id.

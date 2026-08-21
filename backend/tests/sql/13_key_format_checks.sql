@@ -6,7 +6,7 @@ begin;
 insert into auth.users (id, email) values
   ('00000000-0000-0000-0000-000000001001', 'keys@example.test');
 insert into public.circles (id, code, name, created_by)
-values ('00000000-0000-0000-0000-0000000010cc', 'KEYS01', 'Keys', '00000000-0000-0000-0000-000000001001');
+values ('00000000-0000-0000-0000-0000000010cc', 'KEYSAB', 'Keys', '00000000-0000-0000-0000-000000001001');
 insert into public.circle_members (circle_id, user_id)
 values ('00000000-0000-0000-0000-0000000010cc', '00000000-0000-0000-0000-000000001001');
 
