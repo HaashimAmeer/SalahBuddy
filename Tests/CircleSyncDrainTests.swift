@@ -84,6 +84,17 @@ private final class DrainTransport: CircleSyncTransport {
     }
 }
 
+/// Where §6's friend-activity push would go. `CircleSync.announcer` is nil in
+/// the app (it reaches `PushRegistrar.shared`); a test supplies one and gets to
+/// watch the announcement without APNs, a network or a signed-in user.
+///
+/// Deliberately not actor-isolated: it is only ever touched from the main
+/// actor, and leaving it plain means the recording closure compiles whatever
+/// isolation the hook carries.
+private final class AnnounceRecorder {
+    var ids: [UUID] = []
+}
+
 // MARK: - Tests
 
 /// v4 Phase C: the outbox drain, the pull merge, and the promise that a break
@@ -178,6 +189,104 @@ final class CircleSyncDrainTests: XCTestCase {
         XCTAssertTrue(sync.outbox.isEmpty)
         XCTAssertEqual(sync.pendingCount, 0)
         XCTAssertEqual(sync.status, .idle)
+    }
+
+    // MARK: - The friend-activity push (§6)
+
+    /// v4 Phase D FIX: an acknowledged post is the ONE moment the app knows a
+    /// post is on the server, and it used to tell nobody —
+    /// `PushRegistrar.announcePost` had no call site anywhere in `Sources/`, so
+    /// "📸 X posted first for Fajr" could never fire and the server's
+    /// `kind: "post"` path was never once exercised. The ack is also what the
+    /// function requires: it looks the post up by id and answers
+    /// `post_not_found` for a row that is not there yet.
+    func testAnAcknowledgedPostAnnouncesItself() async {
+        let host: DrainHost = liveHost()
+        let transport = DrainTransport()
+        let sync: CircleSync = makeSync(host: host, transport: transport)
+        let recorder = AnnounceRecorder()
+        sync.announcer = { id in recorder.ids.append(id) }
+
+        let entry: PrayerLog = log(.fajr, dayKey: monday)
+        sync.postLogged(entry)
+        await sync.drain()
+        // One post, one announcement, however many times the queue is drained.
+        // The server's `posts.notified_at` lease is the real belt; this is the
+        // braces.
+        await sync.drain()
+
+        XCTAssertEqual(recorder.ids, [entry.id])
+    }
+
+    /// Nothing is announced until the SERVER has it. A failing write holds the
+    /// queue, and a push about a post nobody can look up is the
+    /// `post_not_found` reply.
+    func testAQueuedPostIsNotAnnouncedWhileItIsStillQueued() async {
+        let host: DrainHost = liveHost()
+        let transport = DrainTransport()
+        transport.failure = URLError(.notConnectedToInternet)
+        let sync: CircleSync = makeSync(host: host, transport: transport)
+        let recorder = AnnounceRecorder()
+        sync.announcer = { id in recorder.ids.append(id) }
+
+        sync.postLogged(log(.fajr, dayKey: monday))
+        await sync.drain()
+        XCTAssertTrue(recorder.ids.isEmpty)
+
+        transport.failure = nil
+        // `retryNow()` rather than `drain()`: a failed item carries a backoff
+        // stamp, and only the retry path clears it.
+        await sync.retryNow()
+        XCTAssertEqual(recorder.ids.count, 1, "and it goes out when the write lands")
+    }
+
+    /// Undo before the write lands: the delete cancels the queued create, and
+    /// the announcement goes with it. (The registrar's own guard covers the
+    /// narrower case where the create was already on the wire — a post the
+    /// person has taken back must not wake anybody either way.)
+    func testARetractedPostIsNeverAnnounced() async {
+        let host: DrainHost = liveHost()
+        let transport = DrainTransport()
+        transport.failure = URLError(.notConnectedToInternet)
+        let sync: CircleSync = makeSync(host: host, transport: transport)
+        let recorder = AnnounceRecorder()
+        sync.announcer = { id in recorder.ids.append(id) }
+
+        let entry: PrayerLog = log(.fajr, dayKey: monday)
+        sync.postLogged(entry)
+        await sync.drain()
+        sync.postRetracted(entry)
+
+        transport.failure = nil
+        await sync.retryNow()
+        XCTAssertTrue(recorder.ids.isEmpty)
+    }
+
+    /// The join backfill publishes prayers that already happened, some of them
+    /// days ago (§2). Announcing them would fire "posted first for Fajr" up to
+    /// 35 times the moment somebody joins, for windows that closed on Monday.
+    func testTheJoinBackfillAnnouncesNothing() async {
+        let host: DrainHost = liveHost()
+        let transport = DrainTransport()
+        let sync: CircleSync = makeSync(host: host, transport: transport)
+        let recorder = AnnounceRecorder()
+        sync.announcer = { id in recorder.ids.append(id) }
+
+        let now: Date = AppClock.now
+        let todayKey: String = AppClock.dayKey(for: now)
+        let week: [PrayerLog] = [
+            PrayerLog(id: UUID(), prayer: .fajr, dayKey: todayKey,
+                      loggedAt: now.addingTimeInterval(-3600), tier: .onTime,
+                      xp: GameEngine.prayerXP(tier: .onTime, jamaat: false)),
+            PrayerLog(id: UUID(), prayer: .dhuhr, dayKey: todayKey,
+                      loggedAt: now.addingTimeInterval(-1800), tier: .prayed,
+                      xp: GameEngine.prayerXP(tier: .prayed, jamaat: false))
+        ]
+        sync.backfillWeek(week, asOf: now)
+        await sync.drain()
+
+        XCTAssertEqual(transport.sent.count, 2, "the facts are still shared")
+        XCTAssertTrue(recorder.ids.isEmpty, "and nobody's phone buzzes for them")
     }
 
     func testTwoQueuedWritesBothLandInOneDrain() async {

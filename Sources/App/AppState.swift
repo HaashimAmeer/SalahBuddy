@@ -13,6 +13,16 @@ final class AppState: ObservableObject {
             // Settings changes (calc method, location, notifications toggle,
             // onboarding completion) all affect the notification schedule.
             NotificationManager.shared.reschedule()
+            // v4 Phase D FIX: and the REMOTE half of the same switches. The
+            // device row was only ever written by `PushRegistrar.refresh`,
+            // whose callers are launch and foreground — so turning "Friend
+            // activity" off left `devices.notify_friend_activity = true` until
+            // the next background/foreground cycle, and the next push a person
+            // got was the one they had just opted out of. Hung off `didSet`
+            // rather than off the two Settings toggles because this is where
+            // EVERY path that can flip one arrives. It never prompts and costs
+            // nothing when nothing changed (see `preferencesChanged`).
+            Task { await PushRegistrar.shared.preferencesChanged() }
         }
     }
     @Published private(set) var todaySchedule: DaySchedule?
@@ -368,11 +378,17 @@ final class AppState: ObservableObject {
     /// each, and that is the intended trade: the alternative is two rows
     /// pointing at one object, where undoing either prayer tombstones the
     /// picture out from under the other.
-    private func mirrorLogged(_ added: [PrayerLog], travelCombined: Bool) {
+    ///
+    /// `announce` is §6's friend-activity push, and it is false for exactly one
+    /// caller: a retroactive make-up (`logPastMakeUp`). The alert reads
+    /// "📸 X posted first for Fajr", which a friend will read as *now* — and
+    /// last Thursday's fajr is not news, it is bookkeeping. The post still goes.
+    private func mirrorLogged(_ added: [PrayerLog], travelCombined: Bool,
+                              announce: Bool = true) {
         guard mirrorsToCircle, let sync = circleSync else { return }
         for entry in added {
             sync.postLogged(entry, photoFilename: entry.photoFilename,
-                            travelCombined: travelCombined)
+                            travelCombined: travelCombined, announce: announce)
         }
     }
 
@@ -454,8 +470,8 @@ final class AppState: ObservableObject {
         persist()
         // v4 §3: a retroactive make-up is still a post — it carries the PAST
         // `dayKey` it belongs to, and the server never re-derives one from
-        // `logged_at` (which is now).
-        mirrorLogged([entry], travelCombined: false)
+        // `logged_at` (which is now). No push: see `mirrorLogged`.
+        mirrorLogged([entry], travelCombined: false, announce: false)
         objectWillChange.send()
     }
 
@@ -893,8 +909,22 @@ final class AppState: ObservableObject {
         "\(dayKey)|\(prayer.rawValue)|\(member.id)"
     }
 
+    /// v4 §6: the nudge chip is now a REAL push.
+    ///
+    /// `nudgesSent` stays exactly what it was — the optimistic, session-scoped
+    /// tick — and it is inserted FIRST, before anything asynchronous: the chip
+    /// must settle the instant it is tapped, whatever the network does next.
+    /// The server rate-limits to one nudge per sender, per recipient, per
+    /// prayer window and answers `rate_limited`, which `PushRegistrar` reads as
+    /// "already nudged" rather than as a failure — so a second tap never
+    /// un-ticks the chip.
+    ///
+    /// Demo mode stays entirely offline: the `member:` overload parses the
+    /// member id as a uuid, and a simulated buddy's name (or "you") isn't one,
+    /// so it never reaches the network.
     func sendNudge(to member: CircleMember, prayer: Prayer, dayKey: String) {
         nudgesSent.insert(nudgeKey(member: member, prayer: prayer, dayKey: dayKey))
+        Task { await PushRegistrar.shared.nudge(member: member, dayKey: dayKey, prayer: prayer) }
     }
 
     /// Grid order: buddies first, you LAST (isYou flag set).
@@ -1176,7 +1206,28 @@ final class AppState: ObservableObject {
         objectWillChange.send()
     }
 
+    /// Whether THIS device may retract that challenge.
+    ///
+    /// v4 §5: a custom challenge belongs to the CIRCLE, and the server agrees —
+    /// `custom_challenges_delete` is `created_by = auth.uid()`. A delete aimed
+    /// at somebody else's row therefore matches zero rows and *succeeds*
+    /// (PostgREST answers 204, not an error): the card would vanish here, the
+    /// outbox would call the op done, and the next full pull would put it
+    /// straight back. Refusing locally is the honest version of the same
+    /// answer, and it keeps `ChallengeEngine` scoring the same set on every
+    /// device in the circle, which is the whole point of syncing them.
+    ///
+    /// Demo mode has no server and no author — every challenge there is yours.
+    /// A challenge the mirror has never heard of is yours too: it is one you
+    /// just made, still queued.
+    func canDeleteCustomChallenge(id: String) -> Bool {
+        guard settings.circleMode == .real else { return true }
+        guard let row = circleSnapshot.challenges.first(where: { $0.id == id }) else { return true }
+        return row.createdBy == circleSnapshot.me
+    }
+
     func deleteCustomChallenge(id: String) {
+        guard canDeleteCustomChallenge(id: id) else { return }
         profile.customChallenges.removeAll { $0.id == id }
         persistProfile()
         mirrorChallengeDeleted(id: id)
@@ -1256,26 +1307,278 @@ final class AppState: ObservableObject {
     /// one of your logs, so a new account doesn't get an empty trophy card.
     /// Personal only: no buddy data, so it reads the same solo or in a circle.
     func lastCompletedWeekRecap() -> WeeklyRecap? {
+        guard let weekDayKeys: [String] = lastCompletedWeekDayKeys() else { return nil }
+        return GameEngine.weeklyRecap(logs: logs,
+                                      weekDayKeys: weekDayKeys,
+                                      excusedDayKeys: profile.excusedDayKeys)
+    }
+
+    /// The Mon–Sun keys of the most recent FINISHED week, or nil while that
+    /// week is still undecided.
+    ///
+    /// Split out of `lastCompletedWeekRecap()` (behaviour unchanged) because
+    /// the v4 circle page has to recap the SAME week: two independent
+    /// derivations would eventually disagree, and the day they did, the Journey
+    /// would show your week beside somebody else's.
+    ///
+    /// Sunday's isha window runs past midnight (it ends at Monday's fajr), so on
+    /// Monday morning the week isn't decided yet — the same rule
+    /// `reconcileStreakIfNeeded` follows. Wait one more window rather than
+    /// publish a total a 1 AM isha log would silently change.
+    private func lastCompletedWeekDayKeys() -> [String]? {
         let calendar = Calendar.current
         let thisWeekStart = BuddySimulator.weekStart(for: AppClock.now, calendar: calendar)
         guard let lastWeekDay = calendar.date(byAdding: .day, value: -1, to: thisWeekStart)
         else { return nil }
         let weekDayKeys = BuddySimulator.weekDayKeys(for: lastWeekDay, calendar: calendar)
 
-        // Sunday's isha window runs past midnight (it ends at Monday's fajr), so
-        // on Monday morning the week isn't decided yet — the same rule
-        // reconcileStreakIfNeeded follows. Wait one more window rather than
-        // publish a total a 1 AM isha log would silently change.
         if let prev = previousIshaWindow,
            AppClock.now < prev.end,
            weekDayKeys.last == previousDayKey,
            !hasLog(prayer: .isha, dayKey: previousDayKey) {
             return nil
         }
+        return weekDayKeys
+    }
 
-        return GameEngine.weeklyRecap(logs: logs,
-                                      weekDayKeys: weekDayKeys,
-                                      excusedDayKeys: profile.excusedDayKeys)
+    // MARK: - The circle's week (v4 §5)
+
+    /// The circle page of the weekly recap: who wore the crown, and the best
+    /// single day anybody in the circle had, for the same finished week the
+    /// personal card above it recaps.
+    ///
+    /// v4 DECISION: **real circles only.** It is computed from the MIRROR —
+    /// synced posts, synced rest days, synced recovery totals — and demo mode
+    /// has no mirror, only a deterministic function of a buddy's name. Crowning
+    /// a simulated friend for a week the simulator invented would be a trophy
+    /// for nobody. A solo account has no circle either, so both of v3.9's
+    /// states render exactly as they do today: no page at all.
+    ///
+    /// Your own row comes from LOCAL logs rather than from your posts in the
+    /// mirror, which is the same choice `weeklyScores()` makes: your device is
+    /// the source of truth for your own week, and reading it back off the wire
+    /// would make the number quietly depend on whether the queue had drained.
+    func lastCompletedWeekCircleRecap() -> CircleWeekRecap? {
+        guard let weekDayKeys: [String] = lastCompletedWeekDayKeys() else { return nil }
+        let mine: Set<String> = Set(weekDayKeys)
+        var myRecovery: Int = 0
+        for key in weekDayKeys {
+            myRecovery += profile.recoveryXPByDay[key] ?? 0
+        }
+        let you = CircleWeekEntry(member: youMember,
+                                  logs: logs.filter { mine.contains($0.dayKey) },
+                                  excusedDayKeys: profile.excusedDayKeys,
+                                  recoveryXP: myRecovery)
+        return AppState.circleRecap(mode: settings.circleMode, mirror: circleSnapshot,
+                                    weekDayKeys: weekDayKeys, now: AppClock.now, you: you)
+    }
+
+    /// Everything the card needs, derived from the mirror — PURE, so the mode
+    /// gate, the roster derivation and the math are all testable without an
+    /// `AppState`, a clock or a schedule (which matters here: a real circle
+    /// pins the developer clock to real time, so a test could not travel to a
+    /// fixed week to exercise this any other way).
+    ///
+    /// `you` is passed in rather than dug out of the mirror because your own
+    /// device is the source of truth for your own week — the same choice
+    /// `weeklyScores()` makes.
+    static func circleRecap(mode: CircleMode,
+                            mirror: CircleSnapshot,
+                            weekDayKeys: [String],
+                            now: Date,
+                            you: CircleWeekEntry) -> CircleWeekRecap? {
+        guard mode == .real else { return nil }
+        guard let lastDayKey: String = weekDayKeys.last else { return nil }
+        // v4 Phase D FIX: only members who were IN the circle that week.
+        //
+        // Nothing used to compare membership to the week at all. Create a
+        // circle on Tuesday and two friends join: the mirror holds only the
+        // current week's backfill (§2), so for LAST week every buddy scores 0
+        // while your own row comes from full local logs — and the card said
+        // "You wore the crown 👑 / First in the circle to the weekly target"
+        // for a week your friends were not in the circle. A crown nobody could
+        // have raced you for is worse than no card.
+        let buddies: [CircleMember] = mirror.buddyMembers.filter { member in
+            AppState.wasInCircle(member: member, mirror: mirror, byDayKey: lastDayKey)
+        }
+        guard !buddies.isEmpty else { return nil }
+        // The same question about you: a circle you joined this week has no
+        // last week to recap, however full your own logs are.
+        guard AppState.wasInCircle(userID: mirror.me, mirror: mirror, byDayKey: lastDayKey) else {
+            return nil
+        }
+
+        // One Mon-start week is exactly one ISO week key — the same identity
+        // `weeklyScores()` relies on for the live scoreboard.
+        var weekKeys: [String] = []
+        if let first = weekDayKeys.first, let day = AppClock.date(fromDayKey: first) {
+            weekKeys.append(BuddySimulator.weekKey(for: day))
+        }
+
+        var entries: [CircleWeekEntry] = []
+        for member in buddies {
+            guard let userID = UUID(uuidString: member.id) else { continue }
+            let theirs: [PrayerLog] = mirror.prayerLogs(userID: userID, dayKeys: weekDayKeys)
+            // The same reveal the grid uses: nothing counts before its
+            // `loggedAt`, so a post stamped in the future by a device with a
+            // wrong clock cannot win a crown it hasn't earned yet.
+            let visible: [PrayerLog] = theirs.filter { $0.loggedAt <= now }
+            entries.append(CircleWeekEntry(member: member,
+                                           logs: visible,
+                                           excusedDayKeys: mirror.excusedDayKeys(userID: userID),
+                                           recoveryXP: mirror.recoveryXP(userID: userID,
+                                                                         weekKeys: weekKeys)))
+        }
+        entries.append(you)
+        return AppState.circleRecap(weekDayKeys: weekDayKeys, entries: entries)
+    }
+
+    /// Was this member in the circle on or before `dayKey`?
+    ///
+    /// Compared as DAY KEYS rather than as dates: `joined_at` is an instant and
+    /// `dayKey` is the local schedule day, and every other comparison in the app
+    /// crosses that boundary the same way. Someone who joined on the Sunday of
+    /// the recapped week counts — the join backfill publishes their week so far
+    /// (§2), so they really do have a week in the circle.
+    ///
+    /// A member with NO `joined_at` counts too: the column is only ever nil on a
+    /// mirror written before it was read back, and excluding somebody because an
+    /// old `circle.json` is thin would hide the card rather than fix it.
+    private static func wasInCircle(member: CircleMember, mirror: CircleSnapshot,
+                                    byDayKey dayKey: String) -> Bool {
+        guard let userID: UUID = UUID(uuidString: member.id) else { return false }
+        return AppState.wasInCircle(userID: userID, mirror: mirror, byDayKey: dayKey)
+    }
+
+    private static func wasInCircle(userID: UUID?, mirror: CircleSnapshot,
+                                    byDayKey dayKey: String) -> Bool {
+        guard let userID: UUID = userID else { return false }
+        guard let row = mirror.members.first(where: { $0.userID == userID }) else { return false }
+        guard let joinedAt: Date = row.joinedAt else { return true }
+        return AppClock.dayKey(for: joinedAt) <= dayKey
+    }
+
+    /// The recap itself — PURE, so it is testable without an `AppState`, a
+    /// clock or a schedule. Every number below is `GameEngine`'s or
+    /// `ChallengeEngine`'s; nothing here scores anything.
+    static func circleRecap(weekDayKeys: [String],
+                            entries: [CircleWeekEntry]) -> CircleWeekRecap? {
+        guard let first = weekDayKeys.first, let last = weekDayKeys.last else { return nil }
+        // A race of one is not a race — the same rule `race300WinnerID` follows
+        // for the live crown, so the recap can never crown somebody the
+        // scoreboard never did.
+        guard entries.count >= 2 else { return nil }
+
+        let keySet: Set<String> = Set(weekDayKeys)
+        var standings: [CircleWeekRecap.Standing] = []
+        var memberWeekLogs: [(member: CircleMember, logs: [PrayerLog])] = []
+        var bestDay: CircleWeekRecap.BestDay?
+        var anyLogs: Bool = false
+
+        for entry in entries {
+            let weekLogs: [PrayerLog] = entry.logs.filter { keySet.contains($0.dayKey) }
+            if !weekLogs.isEmpty { anyLogs = true }
+            var prayerXP: Int = 0
+            for key in weekDayKeys {
+                let dayXP: Int = GameEngine.xp(forDay: key, logs: weekLogs,
+                                               excusedDayKeys: entry.excusedDayKeys)
+                prayerXP += dayXP
+                let candidate = CircleWeekRecap.BestDay(member: entry.member, dayKey: key,
+                                                        xp: dayXP)
+                if AppState.isBetterDay(candidate, than: bestDay) {
+                    bestDay = candidate
+                }
+            }
+            // The scoreboard's number, so the recap agrees with what the Circle
+            // tab showed all week: prayer XP plus the OPAQUE weekly recovery
+            // total (§3). The crown below stays prayer-only, which is the split
+            // SCORING.md already describes.
+            standings.append(CircleWeekRecap.Standing(member: entry.member,
+                                                      xp: prayerXP + max(0, entry.recoveryXP)))
+            memberWeekLogs.append((entry.member, weekLogs))
+        }
+        guard anyLogs else { return nil }
+
+        standings.sort { (lhs: CircleWeekRecap.Standing, rhs: CircleWeekRecap.Standing) -> Bool in
+            if lhs.xp != rhs.xp { return lhs.xp > rhs.xp }
+            return lhs.member.name < rhs.member.name
+        }
+        // The SAME function the live crown uses, at the same threshold, over
+        // the same shape of input — the recap re-runs the race rather than
+        // remembering who won it.
+        let crownID: String? = ChallengeEngine.raceWinnerID(memberWeekLogs: memberWeekLogs)
+        return CircleWeekRecap(weekStartDayKey: first, weekEndDayKey: last,
+                               standings: standings, bestDay: bestDay, crownHolderID: crownID)
+    }
+
+    /// Which of two days is "the best day in the circle". PURE, and — the whole
+    /// point — VIEWER-INDEPENDENT.
+    ///
+    /// v4 Phase D FIX: this used to be a plain `dayXP > best.xp` walked in
+    /// "roster order, then you". That order is different on every phone, because
+    /// every phone puts ITSELF last: on your device the walk is
+    /// [Amina, Yusuf, you], on Amina's it is [you, Yusuf, Amina]. Two people
+    /// with equally perfect Mondays — the common case, not an edge — therefore
+    /// read two different "best day in the circle" for the same week.
+    ///
+    /// So the order is a property of the DATA: more XP, else the earlier day,
+    /// else the lower name. Name and not id, because `youMember.id` is the
+    /// literal "you" on whichever device is looking, while the name is what the
+    /// standings already sort by. A 0-XP day never wins.
+    static func isBetterDay(_ candidate: CircleWeekRecap.BestDay,
+                            than current: CircleWeekRecap.BestDay?) -> Bool {
+        guard let current: CircleWeekRecap.BestDay = current else { return candidate.xp > 0 }
+        if candidate.xp != current.xp { return candidate.xp > current.xp }
+        if candidate.dayKey != current.dayKey { return candidate.dayKey < current.dayKey }
+        return candidate.member.name < current.member.name
+    }
+
+    /// One member's finished week as the circle recap sees it. Assembled by
+    /// `lastCompletedWeekCircleRecap()` and handed to the pure function above,
+    /// which is what keeps that function free of the mirror, the clock and the
+    /// difference between you and everybody else.
+    struct CircleWeekEntry {
+        let member: CircleMember
+        let logs: [PrayerLog]
+        let excusedDayKeys: Set<String>
+        /// The opaque weekly dhikr/deeds total (§3) — a number, never what
+        /// earned it.
+        let recoveryXP: Int
+    }
+
+    /// Journey → "The circle's week", for the most recent COMPLETED Mon–Sun
+    /// week. Lives here rather than in `Models.swift` because it is assembled
+    /// here and read by exactly one card.
+    struct CircleWeekRecap: Equatable {
+        let weekStartDayKey: String
+        let weekEndDayKey: String
+        /// Everyone, highest first, scored the way the weekly scoreboard scores
+        /// them (prayer XP + the opaque recovery total).
+        let standings: [Standing]
+        /// The best single DAY anyone in the circle had — prayer XP only.
+        let bestDay: BestDay?
+        /// Who crossed the weekly target first that week; nil when nobody did,
+        /// which is a perfectly normal week and says so on the card.
+        let crownHolderID: String?
+
+        struct Standing: Equatable, Identifiable {
+            let member: CircleMember
+            let xp: Int
+            var id: String { member.id }
+        }
+
+        struct BestDay: Equatable {
+            let member: CircleMember
+            let dayKey: String
+            let xp: Int
+        }
+
+        var crownHolder: CircleMember? {
+            guard let crownHolderID else { return nil }
+            return standings.first { $0.member.id == crownHolderID }?.member
+        }
+
+        var topScorer: CircleMember? { standings.first?.member }
     }
 
     private func recap(forDayKey key: String, date: Date) -> DayRecap {

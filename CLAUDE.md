@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-SalahBuddy is an iOS (SwiftUI, iOS 17+) prayer-tracking app: you log each of the five daily prayers by snapping a photo, earn XP scaled by how early in the window you pray, and keep all five together with a small "circle" of friends. The circle members are **simulated locally** (this is a demo/TestFlight build, bundle id `org.amacvoters.salahbuddymock`) — there is no backend or networking.
+SalahBuddy is an iOS (SwiftUI, iOS 17+) prayer-tracking app: you log each of the five daily prayers by snapping a photo, earn XP scaled by how early in the window you pray, and keep all five together with a small "circle" of friends. Bundle id `org.amacvoters.salahbuddymock`; TestFlight today.
+
+Since v4 this is a **monorepo**: the iOS app at the root, a **Supabase backend under `backend/`** (Postgres + Auth + Storage + Realtime + Deno edge functions), and a circle that can be either **simulated locally** (demo, `BuddySimulator`, exactly as v3.9 shipped) or **real friends on real devices** (`Sources/Core/Sync/`). A solo user still needs no account and the app still works fully offline — the backend only enters the picture at the social boundary. `SPEC-V4.md` is the contract; `backend/README.md` is the backend's own manual and is more detailed than this file.
 
 ## Build, run, test
 
@@ -41,9 +43,25 @@ xcodebuild test -project SalahBuddy.xcodeproj -scheme SalahBuddy \
 
 **Signing:** `DEVELOPMENT_TEAM` is declared in `project.yml`, so regenerating is signing-safe (it does *not* wipe the team — unlike projects that set the team only in Xcode). Simulator builds/tests need no signing at all.
 
-The only SPM dependency is **Adhan** (`batoulapps/adhan-swift`, pinned 1.4.0) for prayer-time calculation.
+SPM dependencies (all declared in `project.yml`): **Adhan** (`batoulapps/adhan-swift` 1.4.0) for prayer times, **supabase-swift** (2.55.1+) for the circle, **GoogleSignIn-iOS** (9.2.0+) for one of the two sign-in providers. `Package.resolved` is refreshed by CI after a dependency change — never hand-edit it, and pull the bot commit before pushing again. `SalahBuddy.entitlements` (Sign in with Apple + `aps-environment`) is wired from `project.yml` and lives OUTSIDE `Sources/` so XcodeGen cannot mistake it for a resource.
 
-### CI — local pre-push hook (no GitHub-hosted runners)
+### The backend (`backend/`)
+
+```
+backend/supabase/migrations/*.sql   # schema, RLS, column-scoped grants, triggers, RPCs — applied in order
+backend/supabase/functions/         # Deno: notify (post/join/nudge push), retention (photo sweep), _shared/
+backend/tests/run_sql_tests.sh      # scratch DB -> shim -> migrations -> tests/sql/*.sql -> seed twice
+backend/tests/deno/                 # unit tests for the function helpers (no network, no permissions)
+```
+
+Two hard constraints for any cloud session, both real and both already worked around:
+
+- **No Docker**, so `supabase start` is not an option, and **`*.supabase.co` is blocked by egress policy** — you cannot reach the staging project from here. SQL runs against a plain local Postgres with `backend/tests/shim/` applied (it fakes `auth.*`, the API roles, and — deliberately — Supabase's default `public` grants, so the migrations have to revoke for real). `backend/tests/run_sql_tests.sh` is the whole loop and it is FAST: run it after any migration change.
+- **Deno only resolves `npm:` and `node:` specifiers** here (`jsr:`, `deno.land`, `esm.sh` are blocked). `deno check` + `deno test backend/tests/deno/` is the function suite.
+
+Deploys are CI's job (`.github/workflows/backend.yml`, path-filtered to `backend/**`): migrations + functions go to the **staging** project on a push. There is no production project yet — see `backend/README.md`'s TODO.
+
+### CI — a local pre-push hook, GitHub Actions, and Xcode Cloud
 
 The repo is **PUBLIC** — never commit credentials, and GitHub Actions workflows must be push-triggered only (no `pull_request_target`, nothing that exposes repo secrets to fork PRs). Local CI is a **git pre-push hook** that runs `make test` on your Mac and blocks the push if tests fail. The hook is tracked at **`.githooks/pre-push`** and activated with `make hooks` (`git config core.hooksPath .githooks`) — run that once after cloning. Bypass deliberately for a doc-only/WIP push with `git push --no-verify`.
 
@@ -61,6 +79,8 @@ There is **no `main`** — it was renamed to `production`. See `BRANCHING.md` fo
 
 The app is a single `@main App` → `RootView` → 5-tab `TabView` (Today / Circle / Journey / Dhikr / Settings). State and rules are cleanly separated from views:
 
+`Sources/App/` also holds **`SalahBuddyApp`/`CircleStack`** — THE launch sequence, whose order matters at every step (restore the session → bootstrap the mirror → sync profile → start `CircleSync` → refresh push, last, because it can put a permission sheet on screen) — and **`AppDelegate`**, wired with `@UIApplicationDelegateAdaptor` purely for the APNs token callbacks and foreground presentation of remote notifications.
+
 ### The clock — `AppClock` (Sources/App/AppClock.swift)
 **Every time read in the app goes through `AppClock.now`, never `Date()` directly.** It applies a persisted debug offset so the in-app developer time-travel controls work everywhere. Because all logic derives from `AppClock.now` and simulated data is seeded (see BuddySimulator), time-travel is fully deterministic — jumping the clock forward/back re-derives the same world. `BuildEnv.showsDeveloperTools` gates those controls (on in DEBUG and TestFlight, off in App Store).
 
@@ -75,6 +95,24 @@ JSON files in Documents (`profile.json`, `logs.json`, `settings.json`). Corrupt/
 
 ### The simulated circle — `BuddySimulator` (Sources/Core/BuddySimulator.swift)
 There are no real friends. A fixed pool of buddies has outcomes derived as a **pure function of `(buddyName, dayKey, prayer)`** via FNV-1a seeding + `SplitMix64` (a deterministic PRNG, defined here). A buddy's post only becomes visible once `AppClock.now >= its derived loggedAt`, so the circle "fills in live" and time-travel reproduces it exactly. Buddy photos are never real images — they're seeded SwiftUI illustrations (`PostContent.illustration(seed:)`). `member(for:)` converts a buddy to a `CircleMember`.
+
+### The real circle — `Sources/Core/Sync/` (v4)
+
+Demo and real are mutually exclusive and chosen by **`AppSettings.circleMode`** (`CircleMode.demo` / `.real`), which **defaults to `.demo` when absent** — so every v3.9 save, and every pre-v4 test, behaves byte-for-byte as it did. `.real` is entered only by creating or joining a real circle; leaving returns to `.demo`.
+
+Everything the Circle/Today screens need about OTHER members goes through one seam, **`CircleDataSource`**: `SimulatedCircleDataSource` (wraps `BuddySimulator`) or `RemoteCircleDataSource` (answers from the mirror). `AppState.circleSource` picks one, and `isSoloMode` is `circleSource.members.isEmpty`.
+
+- **`CircleSnapshot`** — the offline mirror (circle, profiles, members, posts, excused days, recovery weeks, custom challenges), persisted as `circle.json` with a tolerant decoder. Every screen reads the mirror, never the wire.
+- **`CircleService`** — session + circle CRUD (create/join/leave/rename, `delete_account`), and the owner of the mirror. `PhotoReports` (the §4 report action and its local hide) lives in this file too.
+- **`CircleSync`** — the ONE door to the network: `postLogged`/`postRetracted`/…, a persisted FIFO **`CircleOutbox`**, a backing-off drain, a reconciling pull, and realtime as a *signal to pull sooner* (never a data path). Everything degrades to "stay offline, keep the queue".
+- **`AuthService`** (Apple + Google; note the nonce rule — the provider gets `sha256Hex(rawNonce)`, Supabase gets `rawNonce`), **`PhotoSync`** + **`BuddyPhotoCache`**, **`PushRegistrar`** (APNs registration via the `register_device` RPC, and the three `notify` calls), **`Reachability`**, **`CircleError`** (the SQLSTATE → copy table).
+
+Rules that do not bend:
+- **All scoring stays in `GameEngine`.** Remote posts become `PrayerLog` values (`CircleSnapshot.prayerLogs`) and the same pure math runs on every device. There is no server-side scoring.
+- **`breakReason` NEVER leaves the device.** Excused days sync as a bare flag — `CircleOp.setExcused` has no field a reason could travel in, and that is enforced by the shape of the type, not by call sites remembering.
+- **Recovery XP is one opaque weekly integer** per member (SPEC-V4 §3, SCORING.md).
+- **Time travel is off in a real circle**: `AppClock.offset` is pinned to 0 while `circleMode == .real`, because posting fictional timestamps to real friends breaks everything time travel exists to test. Demo keeps it.
+- **DTO rule (learned twice, the hard way):** a DTO that serves BOTH the wire and the on-disk mirror must encode a column outside the INSERT grant **only** under `CodingUserInfoKey.persistingMirror` — `Store` sets that flag on its coders. A single unconditional `encode(to:)` either gets the write refused (42501) or silently drops the column on cold launch.
 
 ### Other Core pieces
 - **`PrayerTimeService`** — wraps Adhan to produce a `DaySchedule` (5 `PrayerWindow`s) from coords + `CalcMethod`/`AsrMadhab`.
@@ -91,11 +129,11 @@ Home of the shared value types: `Prayer`, `LogTier` (onTime 30 / prayed 20 / las
 
 ### Views — `Sources/Views/<Area>/`
 - **Home/** — Today: prayer-times strip, current-prayer photo grid + camera CTA, make-up / earlier-today / upcoming sections, break flow.
-- **Circle/** — weekly scoreboard (Mon-start, race-to-target crown), group week grid, group challenges.
-- **Stats/** — "Journey": levels, badges, perfect-day streaks, memories, `LevelRoadSheet`, "How scoring works".
+- **Circle/** — weekly scoreboard (Mon-start, race-to-target crown), group week grid, group challenges, the invite/join flow for a real circle.
+- **Stats/** — "Journey": levels, badges, perfect-day streaks, memories, `LevelRoadSheet`, "How scoring works", and (real circles only) the weekly recap's circle page.
 - **Dhikr/Recovery/** — `DhikrView` is defined in `Sources/Views/Recovery/RecoverySheet.swift`: tasbih counter + good-deeds with the state-aware soft XP cap.
 - **Camera/** — `CameraFlowSheet`: capture (or demo fallback) + place tag + jamaat toggle.
-- **Onboarding/**, **Settings/** — first-run flow; notification toggles, location, calc method/madhab, travel mode, break flow.
+- **Onboarding/**, **Settings/** — first-run flow; notification toggles, location, calc method/madhab, travel mode, break flow, and the v4 account card (sign in, leave the circle, delete account).
 - **Components/** — reusable blocks (PhotoSquare, PrayerPhotoGrid, WeekGridView, ChunkyButton, ProgressRing, ConfettiBurstView, MascotView, StreakFlameView, XPChip, BadgeIcon, ChallengeCard, IllustratedPrayerCard, CameraCaptureView).
 
 ### Design system — `Sources/UI/Theme.swift`
@@ -106,4 +144,5 @@ Soft-mint palette (bg `0xECF6EE`, white surfaces, dark-green ink `0x16382A`, **n
 - **Read time via `AppClock.now`**, never `Date()` — anything else breaks time-travel and tests.
 - **Put scoring logic in `GameEngine`** (pure) and cover it in `Tests/GameEngineTests.swift` / `V2CoreTests.swift`; keep `AppState` as orchestration.
 - **Adding a persisted field?** Update the model's hand-written `init(from:)` with a tolerant default so old saves still load.
-- The spec/design history lives in `SPEC.md`, `SPEC-V2.md`, `SPEC-V3.8.md`, and `SCORING.md` — `SCORING.md` mirrors the in-app "How scoring works" and is the canonical XP reference. The version markers (v3.x) in code comments trace decisions back to those design sessions.
+- **Touching the backend?** Change the SQL under `backend/supabase/migrations/` and run `backend/tests/run_sql_tests.sh` — it is seconds, and it is the only way to find out anything here. Never edit an already-applied migration: `supabase db push` records versions and will not re-run one, so a fix goes in a NEW timestamped file.
+- The spec/design history lives in `SPEC.md`, `SPEC-V2.md`, `SPEC-V3.8.md`, `SPEC-V4.md`, and `SCORING.md` — `SCORING.md` mirrors the in-app "How scoring works" and is the canonical XP reference; `SPEC-V4.md` is the contract for accounts, circles, sync, photos and push. The version markers (v3.x/v4) in code comments trace decisions back to those design sessions.

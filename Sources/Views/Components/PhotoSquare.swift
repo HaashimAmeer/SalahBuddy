@@ -33,7 +33,35 @@ struct PhotoSquare: View {
     /// The metric the overlays scale off (layout still uses `size`).
     private var t: CGFloat { typeSize ?? size }
 
+    /// v4 §4: the photo this tile reported, this session. `PhotoReports` has
+    /// already persisted the hide by the time this is set — this is purely what
+    /// tells SwiftUI to redraw the square in the same frame as the tap, since
+    /// the tile deliberately doesn't observe the shared book (a tile per grid
+    /// cell, all observing one object, to redraw one of them).
+    @State private var reportedPath: String?
+    @State private var showReportConfirm: Bool = false
+
     var body: some View {
+        // Resolved once: it is a scan of the mirror's posts, and `body` would
+        // otherwise pay for it twice on every render of every square.
+        let reportable: RemotePost? = reportablePost
+        if let post = reportable {
+            tile
+                .contextMenu { reportButton }
+                .confirmationDialog("Report this photo?",
+                                    isPresented: $showReportConfirm,
+                                    titleVisibility: .visible) {
+                    Button("Report and hide it", role: .destructive) { fileReport(post) }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text(PhotoSquare.reportMessage)
+                }
+        } else {
+            tile
+        }
+    }
+
+    private var tile: some View {
         content
             .frame(width: size, height: size)
             .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
@@ -214,12 +242,72 @@ struct PhotoSquare: View {
     /// Answers nil for your own square, for demo buddies, for a mirror with no
     /// circle and for any id this grid did not build (a SwiftUI preview) —
     /// every case where the seeded illustration is already the right answer.
+    ///
+    /// v4 §4: and for a photo this device has REPORTED. The reporter never sees
+    /// it again — not while the report is in flight, not after a sync replaces
+    /// the mirror, not after a relaunch — because the hide is a set of paths on
+    /// disk rather than an edit to the mirror, and the mirror is rewritten by
+    /// every pull. What is left is the seeded illustration, which is what a
+    /// post with no picture legitimately looks like anyway.
     private var remotePhotoPath: String? {
         guard !entry.member.isYou, circleMirror.hasCircle else { return nil }
         guard let coords = AppState.gridEntryCoordinates(entry.id) else { return nil }
         let source: RemoteCircleDataSource = RemoteCircleDataSource(snapshot: circleMirror)
-        return source.photoPath(forMember: coords.memberID, prayer: coords.prayer,
-                                dayKey: coords.dayKey)
+        let path: String? = source.photoPath(forMember: coords.memberID, prayer: coords.prayer,
+                                             dayKey: coords.dayKey)
+        // The `@State` half covers this frame; the book covers every other tile
+        // and every render after it. Compared rather than assumed, so a
+        // recycled cell now drawing a DIFFERENT photo is not hidden by the last
+        // one's report.
+        guard path != reportedPath else { return nil }
+        return PhotoReports.shared.visiblePath(path)
+    }
+
+    // MARK: - Report (v4 §4, App Store guideline 1.2)
+
+    /// Calm, and it says exactly what happens — including the part the person
+    /// actually cares about, which is that nobody is told they did it.
+    private static let reportMessage: String =
+        "We'll hide it from your grid right away and send it to us to look at. "
+        + "Nobody in your circle is told.\n\n"
+        + "If you'd rather not see someone's posts at all, you can leave the circle "
+        + "from the Circle tab."
+
+    private var reportButton: some View {
+        Button(role: .destructive) {
+            showReportConfirm = true
+        } label: {
+            Label("Report this photo", systemImage: "flag")
+        }
+    }
+
+    /// The post behind this tile's picture — the thing a report names, and the
+    /// only thing that makes the action available at all.
+    ///
+    /// Nil unless this is a BUDDY's square in a REAL circle showing a post that
+    /// really has a photo in the bucket and hasn't already been reported. So
+    /// your own tile keeps its long-press for undo, demo buddies have nothing
+    /// to report, and a tile whose picture is already hidden stops offering it.
+    private var reportablePost: RemotePost? {
+        guard !entry.member.isYou, circleMirror.hasCircle else { return nil }
+        guard case .posted = entry.state else { return nil }
+        guard let coords = AppState.gridEntryCoordinates(entry.id) else { return nil }
+        guard let userID = UUID(uuidString: coords.memberID) else { return nil }
+        guard let post = circleMirror.post(userID: userID, dayKey: coords.dayKey,
+                                           prayer: coords.prayer) else { return nil }
+        guard let path: String = post.photoPath, path != reportedPath else { return nil }
+        guard PhotoReports.shared.visiblePath(path) != nil else { return nil }
+        return post
+    }
+
+    private func fileReport(_ post: RemotePost) {
+        // Cleared by hand: filing hides the photo, which takes the dialog's own
+        // modifier off this tile — and a flag left `true` behind it would pop a
+        // dialog unbidden the next time this recycled cell drew a reportable
+        // square.
+        showReportConfirm = false
+        reportedPath = post.photoPath
+        PhotoReports.shared.report(post)
     }
 
     private var nameFontSize: CGFloat { max(9, t * 0.085) }

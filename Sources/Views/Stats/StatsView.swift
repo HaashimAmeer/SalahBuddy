@@ -34,6 +34,9 @@ struct StatsView: View {
                         // v3.9: last week's payoff sits right under the live
                         // 7-day chart — recent past, then all-time below.
                         weeklyRecapCard
+                        // v4 §5: the same week, seen by the circle. Second, and
+                        // invisible unless there is a real circle to recap.
+                        circleRecapCard
                         // v3.8: challenges surfaced above memories (design
                         // session) — they were buried at the bottom.
                         challengesCard
@@ -421,8 +424,14 @@ struct StatsView: View {
 
     /// "Aug 11 – 17", or "Aug 28 – Sep 3" when the week straddles a month.
     private func weekRangeLabel(_ recap: WeeklyRecap) -> String {
-        guard let start = AppClock.date(fromDayKey: recap.weekStartDayKey),
-              let end = AppClock.date(fromDayKey: recap.weekEndDayKey) else { return "" }
+        weekRangeLabel(startDayKey: recap.weekStartDayKey, endDayKey: recap.weekEndDayKey)
+    }
+
+    /// The same label from bare day keys — the circle page recaps the same week
+    /// and must print it the same way.
+    private func weekRangeLabel(startDayKey: String, endDayKey: String) -> String {
+        guard let start = AppClock.date(fromDayKey: startDayKey),
+              let end = AppClock.date(fromDayKey: endDayKey) else { return "" }
         let sameMonth = Calendar.current.isDate(start, equalTo: end, toGranularity: .month)
         let endText = sameMonth
             ? end.formatted(.dateTime.day())
@@ -442,6 +451,127 @@ struct StatsView: View {
         case 1...4: return "\(recap.daysWithAllFive) full days in the book ✨"
         default: return "Every prayer counted — let's build on it 🌱"
         }
+    }
+
+    // MARK: - "The circle's week" (v4 §5)
+
+    /// The circle page of the weekly recap: the crown and the best day anybody
+    /// in the circle had, for the SAME finished week the personal card above
+    /// recaps. It sits under that card and never in front of it — your own week
+    /// is the thing you came to see.
+    ///
+    /// Absent entirely for a solo account and in demo mode, where
+    /// `lastCompletedWeekCircleRecap()` answers nil: v3.9's Journey is
+    /// byte-for-byte unchanged for both.
+    @ViewBuilder
+    private var circleRecapCard: some View {
+        if let recap = state.lastCompletedWeekCircleRecap() {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 8) {
+                    sectionTitle("The circle's week", symbol: "person.2.fill", color: Theme.green)
+                    Text(weekRangeLabel(startDayKey: recap.weekStartDayKey,
+                                        endDayKey: recap.weekEndDayKey))
+                        .font(Theme.sans(12, .bold))
+                        .foregroundStyle(Theme.inkMuted)
+                }
+                crownRow(recap)
+                if let best = recap.bestDay {
+                    circleRow(symbol: "bolt.fill", tint: Theme.green,
+                              title: bestDayTitle(best), subtitle: "Best day in the circle")
+                }
+                if let placing = placingLine(recap) {
+                    Text(placing)
+                        .font(Theme.sans(12.5, .semibold))
+                        .foregroundStyle(Theme.inkMuted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(18)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .cardStyle()
+        }
+    }
+
+    private func crownRow(_ recap: AppState.CircleWeekRecap) -> some View {
+        circleRow(symbol: "crown.fill", tint: Theme.gold,
+                  title: crownTitle(recap), subtitle: crownSubtitle(recap))
+    }
+
+    /// One glyph-and-two-lines row. Broken out with explicit `String`
+    /// parameters so the card's body stays small — this file has already cost
+    /// CI a type-check budget once.
+    private func circleRow(symbol: String, tint: Color,
+                           title: String, subtitle: String) -> some View {
+        HStack(spacing: 12) {
+            ZStack {
+                Circle().fill(tint.opacity(0.16))
+                Image(systemName: symbol)
+                    .font(.system(size: 17, weight: .bold))
+                    .foregroundStyle(tint)
+            }
+            .frame(width: 42, height: 42)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(Theme.sans(15, .bold))
+                    .foregroundStyle(Theme.inkDeep)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(subtitle)
+                    .font(Theme.sans(12, .semibold))
+                    .foregroundStyle(Theme.inkMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.bg, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private func crownTitle(_ recap: AppState.CircleWeekRecap) -> String {
+        guard let holder = recap.crownHolder else { return "No crown last week" }
+        if holder.isYou { return "You wore the crown 👑" }
+        return "\(holder.name) wore the crown 👑"
+    }
+
+    /// Deliberately says "the weekly target" rather than a number: the crown is
+    /// decided by `ChallengeEngine.raceWinnerID`, and quoting a figure here
+    /// would be a second place for it to drift from.
+    private func crownSubtitle(_ recap: AppState.CircleWeekRecap) -> String {
+        if recap.crownHolder != nil { return "First in the circle to the weekly target." }
+        guard let top = recap.standings.first, top.xp > 0 else {
+            return "A quiet week — this one's wide open."
+        }
+        let who: String = top.member.isYou ? "You led" : "\(top.member.name) led"
+        return "Nobody reached the weekly target. \(who) with \(top.xp) XP."
+    }
+
+    private func bestDayTitle(_ best: AppState.CircleWeekRecap.BestDay) -> String {
+        let who: String = best.member.isYou ? "You" : best.member.name
+        guard let date = AppClock.date(fromDayKey: best.dayKey) else {
+            return "\(who) · \(best.xp) XP"
+        }
+        return "\(who) · \(shortWeekday(date)) · \(best.xp) XP"
+    }
+
+    /// Where you finished — skipped when you wore the crown, because the row
+    /// above has already said it better.
+    private func placingLine(_ recap: AppState.CircleWeekRecap) -> String? {
+        guard recap.crownHolder?.isYou != true else { return nil }
+        guard let index = recap.standings.firstIndex(where: { $0.member.isYou }) else { return nil }
+        let mine = recap.standings[index]
+        // States the week, not the shortfall. Every neighbouring line in this
+        // file stays on the user's side (the personal card's own zero case is
+        // "Every prayer counted — let's build on it"), and this was the one
+        // string that told them off.
+        guard mine.xp > 0 else { return "A quiet week for you — this one's already running 🌱" }
+        return "You finished \(ordinal(index + 1)) of \(recap.standings.count) with \(mine.xp) XP."
+    }
+
+    private func ordinal(_ value: Int) -> String {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .ordinal
+        return formatter.string(from: NSNumber(value: value)) ?? "\(value)"
     }
 
     private var todayKey: String { AppClock.dayKey(for: AppClock.now) }

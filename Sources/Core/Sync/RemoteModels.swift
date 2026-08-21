@@ -513,3 +513,102 @@ struct RemoteCustomChallenge: Codable, Equatable, Sendable, Identifiable {
                               weekKey: weekKey, createdAt: challenge.createdAt)
     }
 }
+
+// MARK: - reports (v4 Phase D)
+
+/// A flagged photo (SPEC-V4 §4, App Store guideline 1.2).
+///
+/// `20260821000700_reports.sql` (+ `20260821000800_reports_subject.sql`) gives
+/// `authenticated` an INSERT on exactly seven columns and NO select, update or
+/// delete: the reporter writes and can never read back, because a readable
+/// `reports` table in a circle of eight people is an enumeration of who reported
+/// whom. Three consequences shape this type:
+///
+/// 1. **Every property below is inside the INSERT grant.** `created_at` is the
+///    server's, and it is not decoded either — there is no SELECT to decode it
+///    from. So unlike `RemoteCustomChallenge`, this encoder does NOT branch on
+///    `CodingUserInfoKey.persistingMirror`: the wire and the on-disk copy of a
+///    pending report want byte-identical JSON, and a flag with only one answer
+///    is a flag somebody will eventually get backwards.
+/// 2. **`id` is client-generated**, like `posts.id`, so a report replayed after
+///    a lost acknowledgement collides on the primary key instead of filing a
+///    second complaint.
+/// 3. **No `on_conflict` parameter, ever.** The natural target
+///    `(reporter_id, post_id)` is an ON CONFLICT *inference* clause, which needs
+///    SELECT on the arbiter columns — precisely the pair the grant withholds. A
+///    double-tap therefore surfaces as `23505` and is read as "already
+///    reported" (`SupabaseCircleTransport.isUniqueViolation`). The insert also
+///    has to ask for `returning: .minimal`: RETURNING needs SELECT too, and
+///    without it Postgres refuses the whole statement.
+struct RemoteReport: Codable, Equatable, Sendable, Identifiable {
+    var id: UUID
+    var reporterID: UUID
+    var postID: UUID
+    var circleID: UUID
+    /// WHO was reported, and WHERE the picture was.
+    ///
+    /// v4 Phase D FIX: without these a report was anonymised by the thing it was
+    /// designed to survive. Undo is an ordinary button for the whole schedule
+    /// day, it deletes the `posts` row, and every foreign key here is
+    /// `ON DELETE SET NULL` — so `post_id` went null and triage was left with a
+    /// timestamp, a reason and nobody to answer for it. A member could defeat
+    /// every report against them by tapping undo.
+    ///
+    /// Optional in Swift, required by the policy: `reports_insert` refuses a row
+    /// whose `reported_user_id` is null or is not the post's author, so a nil
+    /// here (an older queued report, a caller that forgot) is a refusal rather
+    /// than a quietly anonymous complaint. `PhotoReports` always fills it in.
+    var reportedUserID: UUID?
+    /// Nullable for the same reason the column is: a post can have no photo,
+    /// and the object ages out on the ~30-day sweep. Pinned to the post's own
+    /// `photo_path` by the policy, so it is evidence rather than free text.
+    var photoPath: String?
+    /// Free text, ≤ 500 chars server-side. Nil is fine — a report with no words
+    /// is still actionable, because a human looks at the photo.
+    var reason: String?
+
+    init(id: UUID = UUID(), reporterID: UUID, postID: UUID, circleID: UUID,
+         reportedUserID: UUID? = nil, photoPath: String? = nil, reason: String? = nil) {
+        self.id = id
+        self.reporterID = reporterID
+        self.postID = postID
+        self.circleID = circleID
+        self.reportedUserID = reportedUserID
+        self.photoPath = photoPath
+        self.reason = reason
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case reporterID = "reporter_id"
+        case postID = "post_id"
+        case circleID = "circle_id"
+        case reportedUserID = "reported_user_id"
+        case photoPath = "photo_path"
+        case reason
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        reporterID = try c.decode(UUID.self, forKey: .reporterID)
+        postID = try c.decode(UUID.self, forKey: .postID)
+        circleID = try c.decode(UUID.self, forKey: .circleID)
+        // Tolerant, like every persisted model here: a queue written by the
+        // build before these columns existed still loads.
+        reportedUserID = try c.decodeIfPresent(UUID.self, forKey: .reportedUserID)
+        photoPath = try c.decodeIfPresent(String.self, forKey: .photoPath)
+        reason = try c.decodeIfPresent(String.self, forKey: .reason)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(reporterID, forKey: .reporterID)
+        try c.encode(postID, forKey: .postID)
+        try c.encode(circleID, forKey: .circleID)
+        try c.encodeIfPresent(reportedUserID, forKey: .reportedUserID)
+        try c.encodeIfPresent(photoPath, forKey: .photoPath)
+        try c.encodeIfPresent(reason, forKey: .reason)
+    }
+}

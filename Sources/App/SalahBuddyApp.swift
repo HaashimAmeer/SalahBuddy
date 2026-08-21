@@ -2,6 +2,12 @@ import SwiftUI
 
 @main
 struct SalahBuddyApp: App {
+    /// v4 §6: APNs hands its device token to a `UIApplicationDelegate` and
+    /// nowhere else, and foreground presentation is a delegate decision too.
+    /// `AppDelegate` does those two things and nothing more — local
+    /// notifications stay `NotificationManager`'s.
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+
     @StateObject private var state = AppState()
     /// v4: the session and the circle it belongs to. They are created together
     /// because the service binds to the session (`CircleService(auth:)`), and
@@ -40,6 +46,10 @@ struct SalahBuddyApp: App {
 final class CircleStack: ObservableObject {
     let auth: AuthService
     let circle: CircleService
+    /// v4 §6. The shared instance, because the other call sites that fire a
+    /// push (a post that finished uploading, the nudge chip) reach it as
+    /// `PushRegistrar.shared` — one registrar, one device row, one token.
+    let push: PushRegistrar
 
     /// SwiftUI may run the launch task more than once across a scene's life;
     /// signing in and pulling a circle twice is harmless but pointless.
@@ -49,6 +59,7 @@ final class CircleStack: ObservableObject {
         let auth = AuthService()
         self.auth = auth
         self.circle = CircleService(auth: auth)
+        self.push = PushRegistrar.shared
     }
 
     /// Called once, from the root view's `.task`. THE launch sequence.
@@ -82,6 +93,8 @@ final class CircleStack: ObservableObject {
         // first second of launch should be queued rather than dropped.
         let sync: CircleSync = circle.ensureSync()
         host.attachCircleSync(sync)
+        // AFTER `ensureSync()`, which is where `joinWeekBackfill` is wired.
+        adoptPushHooks()
 
         await auth.restore()
         await circle.bootstrap()
@@ -96,6 +109,12 @@ final class CircleStack: ObservableObject {
         // drain whatever last session's flight left queued, reconcile, and open
         // the channel.
         await sync.start()
+        // LAST, deliberately. `PushRegistrar.refresh` can put a system
+        // permission sheet on screen, and nothing above should wait behind a
+        // person deciding. It is also the step that needs everything above to
+        // have happened: whether to ask at all is "is there a real circle",
+        // which only the restored session and the bootstrapped mirror know.
+        await refreshPush()
     }
 
     /// The app came back to the foreground. Called from `RootView`'s
@@ -112,6 +131,70 @@ final class CircleStack: ObservableObject {
         // and then fixed their name in Settings has a `profiles` row to repair
         // whether or not they have joined anything yet.
         await syncProfileIfNeeded()
+        // Also outside it, and for a similar reason: this is the moment a
+        // circle joined on another phone, a permission granted in system
+        // Settings, or a toggle flipped since launch reaches the `devices` row.
+        // It costs nothing when nothing has changed (see `RemoteDevice`'s
+        // fingerprint) and nothing at all for a solo user.
+        await refreshPush()
+    }
+
+    // MARK: - Push (SPEC-V4 §6)
+
+    /// Tell the registrar who we are and whether there is a real circle. It
+    /// decides everything else — including asking for permission, which it will
+    /// not do for a solo user (§1).
+    private func refreshPush() async {
+        await push.refresh(userID: auth.userID, hasCircle: circle.snapshot.hasCircle)
+    }
+
+    /// The two moments `CircleService` already has a hook for, which are also
+    /// the two moments push cares about.
+    ///
+    /// Wrapping rather than replacing: both hooks are already wired to
+    /// something that matters (the week backfill, the sign-out itself), and a
+    /// hook that some later reader assumes is free is a hook that quietly
+    /// unwires a feature.
+    private func adoptPushHooks() {
+        let push: PushRegistrar = self.push
+
+        // Sign-out has to take this device's `devices` row with it, and it can
+        // only do that while the session that owns the row still exists —
+        // hence BEFORE the handler that ends it. See `PushRegistrar.unregister`
+        // for what a row left behind would do to the next person to sign in on
+        // this phone.
+        let signOut: (() async -> Void)? = circle.signOutHandler
+        circle.signOutHandler = {
+            await push.unregister()
+            await signOut?()
+        }
+
+        // Entering a circle is the FIRST moment §1 allows a friend-activity
+        // permission prompt, and joining is the moment §6's "member joined"
+        // push has something to say.
+        let backfill: ((RemoteCircle, CircleService.CircleEntry) async -> Void)? = circle.joinWeekBackfill
+        circle.joinWeekBackfill = { [weak self] circleRow, entry in
+            await backfill?(circleRow, entry)
+            guard let self else { return }
+            // NOT awaited: this closure runs inside `createCircle`/`joinCircle`,
+            // whose spinner is on screen, and a permission sheet plus a notify
+            // round trip do not belong in front of the moment someone's circle
+            // appears.
+            Task { await self.circleEntered(entry) }
+        }
+    }
+
+    private func circleEntered(_ entry: CircleService.CircleEntry) async {
+        // FIRST, and not only because a new circle is the first moment §1 lets
+        // us ask for permission: this is also what tells the registrar who it
+        // is and that it is somewhere real, and `announceJoin` refuses to send
+        // without that.
+        await refreshPush()
+        // Only `.joined`: a circle you just created has nobody in it to tell,
+        // and `notify`'s join lease is one-per-member-per-circle — spending it
+        // on an empty room would be spending it for nothing.
+        guard entry == .joined else { return }
+        await push.announceJoin()
     }
 
     /// The profile mirror is deliberately non-fatal at sign-in (§1: it must not

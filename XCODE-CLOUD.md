@@ -1,9 +1,15 @@
-# Xcode Cloud → TestFlight
+# CI: Xcode Cloud → TestFlight, and GitHub Actions → Supabase
 
 Xcode Cloud builds every push to `staging` on Apple's macOS infrastructure and
 uploads it to TestFlight, so development can happen entirely from the cloud
 (Claude Code on the web, or any machine without Xcode) and each build lands on
 the iPhone a few minutes later.
+
+Since v4 there is a **second half**: the backend under `backend/` is tested and
+deployed by **`.github/workflows/backend.yml`** on Linux. The two are
+path-filtered against each other — Xcode Cloud does not start for a
+`backend/**`-only push, and `ios.yml`/`backend.yml` ignore each other's trees —
+so one repo costs one CI run per change, not two.
 
 ## How it fits this repo
 
@@ -46,6 +52,36 @@ the iPhone a few minutes later.
    uploaded build (e.g. `10`) so CI numbers never collide with the manual
    `1.0 (1)` / `1.0 (2)` uploads.
 
+## The backend half (`.github/workflows/backend.yml`)
+
+Three jobs, in order, on pushes touching `backend/**` (branches `staging`,
+`production` and `dev/**`; `backend/README.md` alone is excluded, because a
+typo fix must not deploy):
+
+1. **`test`** — every branch. Spins up a `postgres:16` service, applies
+   `backend/tests/shim/` + every migration to a scratch database, runs every
+   `backend/tests/sql/*.sql` assertion and `seed.sql` twice, then `deno check` +
+   `deno test backend/tests/deno/`. This is the same script a cloud session runs
+   locally (`backend/tests/run_sql_tests.sh`), so a green sandbox run means a
+   green CI run.
+2. **`deploy-staging`** — `staging` only, and only when the staging secrets
+   exist: `supabase link` → `db push` → `functions deploy`. **Migrations are
+   applied in filename order and a version is never re-run**, so a fix to an
+   already-deployed migration must go in a NEW timestamped file — editing the
+   old one changes the repo and nothing else.
+3. **`smoke-staging`** — SPEC-V4 §10's Phase A exit criterion executed on every
+   deploy: real HTTP against the live project with the **publishable (anon) key
+   only**, proving RLS is the security boundary rather than key custody.
+
+Public-repo safety rules this workflow must keep: push-triggered only (never
+`pull_request_target`), secrets reach the shell through `env:` and are never
+interpolated into a `run:` script, and no project ref, URL or key is written in
+the file.
+
+**Dev branches stop after `test`.** A `dev/**` push proves the migrations and
+the functions; it does not touch the live project, which is why a v4 session can
+iterate on SQL all day without a Supabase account.
+
 ## Current state (2026-08-21)
 
 - Workflow **"Staging"** is active: Branch Changes on `staging`, auto-cancel,
@@ -69,6 +105,27 @@ the iPhone a few minutes later.
   `SUPABASE_STAGING_PROJECT_REF`, `SUPABASE_STAGING_DB_PASSWORD`); the
   production pair does NOT exist yet, so backend CI must skip the
   `production` deploy path gracefully rather than reference missing secrets.
+
+### What production still needs
+
+- A **second Supabase project** (frees up when a slot does, or on a paid plan),
+  then `SUPABASE_PRODUCTION_PROJECT_REF` / `SUPABASE_PRODUCTION_DB_PASSWORD` as
+  repo secrets and a `deploy-production` job — a copy of `deploy-staging` with
+  the ref check and secret names swapped. **The smoke job stays pointed at
+  staging**: it creates users and inserts rows.
+- **APNs secrets on that project** (`supabase secrets set APNS_*`). Until they
+  exist every push path logs and skips, by design — so a missing secret is a
+  quiet no-op, not an outage.
+- **A schedule for `retention`** (the ~30-day photo sweep). Nothing calls it
+  yet; `pg_cron` + `pg_net` on the project, or an external scheduler presenting
+  the raw service-role key. Its lease makes over-calling safe.
+- **A reader for `reports`.** Triage today is a service-role query by hand;
+  App Store guideline 1.2 wants a human able to see the queue.
+- The app's `aps-environment` entitlement ships as `development`; Xcode Cloud
+  and TestFlight archives rewrite it to `production` at export, which is why
+  `PushRegistrar` keys the `devices.environment` column off `#if DEBUG`.
+- The full list, with the reasoning, is `backend/README.md` → "TODO before
+  production".
 
 ## Day-to-day from the cloud
 

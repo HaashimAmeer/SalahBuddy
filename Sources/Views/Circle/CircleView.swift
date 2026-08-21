@@ -176,7 +176,18 @@ struct CircleView: View {
                     ForEach(state.challenges().filter(\.isGroup)) { progress in
                         ChallengeCard(progress: progress)
                             .contextMenu {
-                                if progress.id.hasPrefix("custom-") {
+                                // v4 §5 FIX: offered only when it would DO
+                                // something. A custom challenge belongs to the
+                                // circle and only its author may retract it
+                                // (`custom_challenges_delete` is
+                                // `created_by = auth.uid()`), so
+                                // `deleteCustomChallenge` now refuses somebody
+                                // else's — and the menu item, still shown for
+                                // every `custom-` card, became a button that
+                                // did nothing at all: no removal, no message,
+                                // nothing to tap twice.
+                                if progress.id.hasPrefix("custom-"),
+                                   state.canDeleteCustomChallenge(id: progress.id) {
                                     Button(role: .destructive) {
                                         state.deleteCustomChallenge(id: progress.id)
                                     } label: {

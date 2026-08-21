@@ -30,13 +30,16 @@ backend/
       20260821000400_rpcs.sql       # create/join/leave/rename circle, nudges, retention, delete_account
       20260821000500_storage.sql    # private `prayer-photos` bucket + path-scoped object policies
       20260821000600_realtime.sql   # what is published (and what deliberately is not)
+      20260821000700_reports.sql    # UGC reports — insert-only for the reporter, read by nobody else
+      20260821000800_reports_subject.sql  # a report keeps its own copy of WHO and WHERE (undo-proof)
+      20260821000900_register_device.sql  # claim an APNs token that changed hands on one phone
     functions/
       _shared/                      # apns.ts, auth.ts, db.ts, http.ts, messages.ts, util.ts, validate.ts
       notify/index.ts               # post / join / nudge push fan-out (APNs, signed in-function)
       retention/index.ts            # the ~30-day photo sweep
   tests/
     shim/00_supabase_shim.sql       # fakes auth.*/storage.*/the API roles on vanilla Postgres
-    sql/01..24_*.sql                # assertion tests — RLS, cap-8, privacy, constraints
+    sql/01..25_*.sql                # assertion tests — RLS, cap-8, privacy, constraints
     run_sql_tests.sh                # scratch DB -> shim -> migrations -> assertions
     deno/*_test.ts                  # unit tests for the function helpers (offline, no permissions)
 ```
@@ -324,6 +327,18 @@ preferences.
   `nudge_hourly_cap()` per hour. A second nudge in the same window is not an
   error, it returns `false` — the caller gets
   `{sent:false, reason:"rate_limited"}` and nobody's phone buzzes twice.
+- **A phone's `devices` row follows its APNs token, and only `register_device()`
+  can move it.** `apns_token` is the primary key and one install keeps the same
+  token for life, so when a second person signs in on that phone the row has to
+  change hands. A client `upsert(on_conflict=apns_token)` cannot do it:
+  ON CONFLICT DO UPDATE tests the UPDATE policy's USING clause against the
+  EXISTING row, and `devices_all` is `user_id = auth.uid()`, so the previous
+  account's row is a `42501` the new account can neither update nor delete. It
+  would simply stay — the old circle pushing a friend's name and prayer to a
+  phone somebody else is now holding. The RPC is SECURITY DEFINER and deletes
+  any row carrying that token before inserting the caller's; deleting by token
+  alone is safe because a token is an unguessable value APNs issues to one
+  install. Test 26 pins both halves.
 - **Push is opt-in and first-only.** §6's friend-activity alert is
   `devices.notify_friend_activity`, which mirrors `AppSettings` and defaults to
   **false**; the fan-out filters on it, because iOS cannot suppress an alert it
@@ -425,6 +440,116 @@ own immediately, photos included.
 
 ---
 
+## Reporting a photo
+
+App Store guideline 1.2 wants a way to flag user-generated content before the
+app is public, and SPEC-V4 §4 parks exactly that: a **report** action on any
+buddy photo, with **leaving the circle as the block mechanism**. `reports` is
+the server half — `20260821000700_reports.sql`.
+
+```
+id               uuid    client-generated (like posts.id), default gen_random_uuid()
+reporter_id      uuid    -> auth.users     ON DELETE SET NULL
+post_id          uuid    -> public.posts   ON DELETE SET NULL
+circle_id        uuid    -> public.circles ON DELETE SET NULL
+reported_user_id uuid    -> auth.users     ON DELETE SET NULL   (pinned to posts.user_id)
+photo_path       text    nullable          (pinned to posts.photo_path)
+reason           text    nullable, <= 500 chars
+created_at       timestamptz  server-owned
+unique (reporter_id, post_id)
+```
+
+| role | privileges on `public.reports` |
+|---|---|
+| `anon` | none — explicitly revoked |
+| `authenticated` | `INSERT (id, reporter_id, post_id, circle_id, reported_user_id, photo_path, reason)` — column-scoped, and nothing else |
+| `service_role` | `SELECT, INSERT, UPDATE, DELETE` |
+
+**The reporter writes and cannot read.** That asymmetry is the design. A circle
+is eight people who know each other, so a readable `reports` table is an
+enumeration of *who reported whom*: one `select *` and a member learns that
+three of their friends flagged the same photo, or that somebody flagged theirs.
+There is no UPDATE or DELETE either — a report is a fact that was filed, not a
+message to be edited or withdrawn, and "I can see my own row" is one widened
+policy away from "I can see yours". RLS carries a single INSERT policy and no
+others, so even a mistakenly widened grant still reads zero rows.
+
+The policy re-derives the subject from the database rather than trusting the
+body (the rule the `notify` function follows): the row's `circle_id` must be the
+caller's current circle, and `post_id` must name a post that caller can actually
+see. Without that, a member could file reports against any uuid at all, or
+attribute one to a circle they have left.
+
+**Nothing that gets deleted takes a report with it.** All three foreign keys are
+`ON DELETE SET NULL`, and both alternatives are wrong in opposite directions:
+
+- `CASCADE` from `posts` would hand the reported member a retraction button —
+  undo is a button in the app, so "report me and I'll tap undo" erases the
+  complaint before a human reads it.
+- `NO ACTION` (the default) fails the other way: the post could no longer be
+  deleted while a report pointed at it, so undo, `delete_account()` and the
+  retention sweep would start erroring on precisely the rows a moderator cares
+  about. A reported photo would become the one photo nobody can remove — kept
+  alive in the bucket by the complaint against it.
+
+`SET NULL` keeps both promises: the delete proceeds untouched and the report
+survives it.
+
+**And what survives has to still name somebody.** `SET NULL` on its own only
+saved the ROW — `post_id` went null and triage was left with a timestamp, a
+reason and nobody to answer for it, so a member could defeat every report
+against them by tapping undo. `20260821000800_reports_subject.sql` gives the
+report its own copy of the subject: `reported_user_id` and `photo_path`, both
+**pinned by the insert policy against the `posts` row itself** rather than taken
+on trust from the body. A freely-chosen copy would be a way to name a friend in
+a complaint they had nothing to do with; the policy requires
+`p.user_id = reports.reported_user_id` and `reports.photo_path = p.photo_path`,
+and refuses a null subject outright. Test 25 asserts all of it, and the negative
+cases were verified by breaking the migration on purpose (a `CASCADE` fails
+"deleting the reported post erased the report", a `NO ACTION` fails the delete
+itself, and dropping the pin fails "filed a report that named no member").
+
+### Client contract
+
+- **Plain `insert`, and `returning: .minimal`.** `RETURNING` needs SELECT
+  privilege, so a default `return=representation` insert is refused outright,
+  whole statement, not just the echo.
+- **Treat `23505` (unique violation) as "already reported".** `CircleSync`'s
+  existing `isUniqueViolation(error)` is the check. Do **not** reach for
+  PostgREST's `on_conflict=reporter_id,post_id`: an `ON CONFLICT` *inference*
+  clause needs SELECT on the arbiter columns, and those two columns are exactly
+  the pair that would publish who reported whom, so the write-only grant and
+  that parameter are mutually exclusive by construction. (Test 25 pins both
+  halves — the targeted form is refused, the targetless one is not.)
+- **Send the subject with it.** `reported_user_id` is the post's author and
+  `photo_path` is the post's path; both are re-derived server-side, so sending
+  anything else is a `42501`, and sending nothing is one too.
+- **Hide the photo locally the moment the report is filed** (SPEC-V4 §4). The
+  server does not hide anything for the reporter; nothing here changes what the
+  circle sees.
+- **Keep the report queued unless the server actually answered.** A `23505` is
+  "already reported" (success); a refusal it uttered — `42501`, a post that is
+  gone — is final. Everything else (a 502, a paused project, a body that would
+  not decode) is transient and must NOT settle the report: the client gives
+  those a bounded number of attempts and charges nothing at all for being
+  offline. `PhotoReports.outcome(for:)` is that table.
+
+### Two things this deliberately does not do
+
+- **Triage has a deadline.** The reported photo ages out of Storage on the
+  normal ~30-day retention clock, so a report older than that points at a post
+  whose `photo_path` is already null. The evidence window is the retention
+  window, by design — reports are read on a human cadence well inside it.
+- **`delete_account()` does not touch `reports`.** Deleting your account must
+  not retract a complaint you filed about someone else's photo; the FK
+  anonymises it instead, when the orphaned `auth.users` shell is finally swept
+  (see the TODO below). If that sweep stays unbuilt and the lingering
+  `reporter_id` becomes uncomfortable, the one-line fix is
+  `update public.reports set reporter_id = null where reporter_id = v_uid`
+  inside the RPC — not a delete.
+
+---
+
 ## TODO before production
 
 - [ ] **No production project exists.** The free tier caps the account at two
@@ -434,10 +559,10 @@ own immediately, photos included.
       has no production deploy job — wiring one up is a copy of
       `deploy-staging` with the ref check and secret names swapped, and the
       smoke job must stay pointed at staging (it creates users and posts rows).
-- [ ] **Set `devices.notify_friend_activity` from the client.** It defaults to
-      `false`, which is the safe default and also means the friend-activity
-      push does nothing until the app writes the user's `AppSettings` toggle
-      into the `devices` row it registers (Phase D).
+- [x] **Set `devices.notify_friend_activity` from the client.** Done in Phase D:
+      `PushRegistrar` writes the `AppSettings` toggle into the row through
+      `register_device()`, and `AppState.settings.didSet` pushes a change
+      straight through rather than waiting for the next foreground.
 - [ ] **Client: re-fetch the roster and resting flags on a `posts` realtime
       event.** `circle_members` and `excused_days` are deliberately not
       published (see Privacy invariants), so those two are pull, not push.
@@ -461,8 +586,10 @@ own immediately, photos included.
       the circles they created, which linger on staging.
 - [ ] **APNs secrets on the real project** (`supabase secrets set APNS_*`).
       Until then every push path logs and skips, by design.
-- [ ] **UGC report action** — App Store guideline 1.2 needs a report control on
-      buddy photos before public release (SPEC-V4 §4). Leaving is the block
-      mechanism; the report side needs a server home.
+- [ ] **Triage tooling for `reports`.** The client half shipped in Phase D
+      (the control on a buddy photo, the local hide, the retry queue); what is
+      still missing is somewhere for a human to actually READ the table —
+      triage today means a service-role query by hand. App Store guideline 1.2
+      needs a reader before public release.
 - [ ] **Cross-timezone circles.** Accepted soft spot today. If circles stop
       being same-city, `day_key` has to grow a timezone story.

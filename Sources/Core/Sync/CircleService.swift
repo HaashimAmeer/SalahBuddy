@@ -341,6 +341,12 @@ final class CircleService: ObservableObject {
             syncPhase()
             return
         }
+        // v4 §4: launch and every foreground are also when a report filed on a
+        // plane gets its second chance. Fire-and-forget — nothing on screen is
+        // waiting for it, and the photo it names is already hidden locally.
+        // Gated on `persists` for the same reason every other write here is: a
+        // unit test must not reach the shared book (or the network through it).
+        if persists { PhotoReports.shared.drain() }
         let generation: Int = identityGeneration
         beginWorking()
         do {
@@ -494,6 +500,44 @@ final class CircleService: ObservableObject {
         syncPhase()
         kickSync()
         forgetBuddyPhotos()
+    }
+
+    /// SPEC-V4 §1: "Delete account". Removes the server's copy of you —
+    /// profile, membership, posts, photos, excused days, recovery totals,
+    /// custom challenges, nudges and this device's push token — and then puts
+    /// the app back exactly where a solo install starts.
+    ///
+    /// v4 DECISION: **the server first, the local half second, and never the
+    /// other way round.** A local wipe followed by a failed RPC would leave a
+    /// circle full of posts by somebody the app has forgotten how to sign in
+    /// as. So the RPC either commits (it is one plpgsql function, so it is one
+    /// transaction) or nothing happened at all and the throw says so.
+    ///
+    /// The local half is `signOutAndReset()` verbatim, deliberately: everything
+    /// deleting an account has to do on this phone — end the session, drop the
+    /// mirror and the queue, take down the `devices` row, forget the cached
+    /// buddy photos, return to solo mode — is what signing out already does,
+    /// and duplicating it is how the two drift. **Nothing here touches local
+    /// history**: `CircleServiceHost` has no door to a log, a photo, a streak
+    /// or an XP total, so the journey survives the account by construction.
+    ///
+    /// NOTE: `delete_account()` cannot delete the `auth.users` row itself —
+    /// that needs the service-role admin API, which no client may hold. The
+    /// sign-out below is what makes the orphaned shell unreachable from this
+    /// phone; a scheduled admin sweep removes it server-side (see
+    /// `backend/README.md`). Signing back in with the same Apple/Google
+    /// identity therefore yields the same uid with nothing attached to it —
+    /// a fresh account, which is what deletion promised.
+    func deleteAccount() async throws {
+        guard currentUserID() != nil else { throw failWith(CircleService.notSignedIn) }
+        beginWorking()
+        do {
+            let _: PostgrestResponse<Void> = try await Supa.client.rpc("delete_account").execute()
+        } catch {
+            record(error)
+            throw error
+        }
+        await signOutAndReset()
     }
 
     // MARK: - Local transitions (no network — which is also what makes them testable)
@@ -895,5 +939,291 @@ extension CircleService {
             guard let auth else { return }
             await auth.signOut()
         }
+    }
+}
+
+// MARK: - Reported photos (v4 Phase D, §4)
+
+/// What this device has on disk about reports: the photos it hides, and the
+/// reports it still owes the server.
+///
+/// A tolerant decoder like every other persisted model — a file written by an
+/// older or newer build must still load, because the alternative is a reported
+/// photo quietly coming back.
+struct ReportBook: Codable, Equatable {
+    /// Storage paths, not post ids. The path is already unique
+    /// (`<circle>/<user>/<uuid>.jpg`), it is the exact thing a tile draws, and
+    /// keying on it means the hide costs one set lookup at render time instead
+    /// of a post lookup per square.
+    var hiddenPaths: [String]
+    /// Reports written down but not yet accepted by the server.
+    var pending: [RemoteReport]
+
+    init(hiddenPaths: [String] = [], pending: [RemoteReport] = []) {
+        self.hiddenPaths = hiddenPaths
+        self.pending = pending
+    }
+
+    static let empty = ReportBook()
+
+    private enum CodingKeys: String, CodingKey {
+        case hiddenPaths, pending
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        hiddenPaths = (try? c.decodeIfPresent([String].self, forKey: .hiddenPaths)) ?? []
+        pending = (try? c.decodeIfPresent([RemoteReport].self, forKey: .pending)) ?? []
+    }
+}
+
+/// The report action behind a buddy's photo (SPEC-V4 §4, App Store guideline
+/// 1.2), and the local hide that goes with it.
+///
+/// Two halves, and the ORDER between them is the whole design:
+///
+/// 1. **Hide, immediately and locally.** The reporter never sees that photo
+///    again — not after a round trip, not after a moderator looks, not after a
+///    relaunch. It is a set of Storage paths on disk, consulted by `PhotoSquare`
+///    when it resolves a tile's picture, so it costs one lookup and survives
+///    every sync (the mirror is REPLACED wholesale by each pull; this is not).
+/// 2. **File, best-effort but durable.** The insert is queued in the same file
+///    and retried at launch and on every foreground, because a report lost to
+///    a tunnel is a report nobody ever reads. It is deliberately NOT a
+///    `CircleOp`: the outbox carries writes that change what the CIRCLE sees,
+///    in order, and a report changes nothing anybody in the circle can observe.
+///
+/// Nothing here tells the circle anything. Reporting is private to the reporter
+/// and whoever triages the table with the service-role key; blocking someone
+/// remains "leave the circle" (§4).
+@MainActor
+final class PhotoReports: ObservableObject {
+
+    /// The app-wide book. A singleton for the same reason `PushRegistrar` is
+    /// one: the call site is a tile buried three views deep in a grid, and
+    /// threading a dependency through `PrayerPhotoGrid` to reach it would put
+    /// a report parameter on every square that will never file one.
+    ///
+    /// Deliberately NOT used as a default argument anywhere — a default-value
+    /// expression is a nonisolated context in Swift 5 language mode (the trap
+    /// `Reachability.shared` documents).
+    static let shared: PhotoReports = PhotoReports()
+
+    private static let file = "reports.json"
+
+    /// Published so a future observer redraws; `PhotoSquare` deliberately does
+    /// NOT observe it (it flips its own `@State` on the tile it just reported,
+    /// which is the only tile that has to change this instant — every other
+    /// square catches up on its next render, and after a relaunch they all
+    /// read this set).
+    @Published private(set) var hiddenPaths: Set<String>
+
+    private var pending: [RemoteReport]
+    private let persists: Bool
+
+    /// Who is filing. A closure rather than a reach into the SDK's session, for
+    /// the same reason `CircleService.currentUserID` is one: it keeps the
+    /// Supabase client — and the session store behind it — out of a unit test.
+    /// `sessionUserID()` is `nonisolated` precisely so it can be named from a
+    /// default-value expression like this one.
+    var currentUserID: () -> UUID? = { CircleService.sessionUserID() }
+    /// One drain at a time. `refresh()` fires on launch and on every
+    /// foreground, and two overlapping drains would send the same report twice.
+    private var isDraining: Bool = false
+
+    /// Transient failures charged against each queued report — see `settles`.
+    /// Never persisted: it is retry policy, not the user's data, and the same
+    /// separation `CircleSync.attempts` keeps.
+    private var attempts: [UUID: Int] = [:]
+
+    /// `persists: false` is the unit-test shape — same flag, same reason as
+    /// `CircleService.persists`: there is one book on disk and a test must not
+    /// scribble in the app's Documents directory.
+    init(persists: Bool = true) {
+        self.persists = persists
+        let stored: ReportBook = persists ? Store.load(PhotoReports.file, default: .empty) : .empty
+        self.hiddenPaths = Set(stored.hiddenPaths)
+        self.pending = stored.pending
+    }
+
+    // MARK: - Reading
+
+    /// The path a tile should actually draw, or nil when this device has
+    /// reported it. Also folds in "no path at all", so callers have one
+    /// question to ask instead of two.
+    func visiblePath(_ path: String?) -> String? {
+        guard let path, !path.isEmpty else { return nil }
+        guard !hiddenPaths.contains(path) else { return nil }
+        return path
+    }
+
+    func isHidden(_ path: String) -> Bool { hiddenPaths.contains(path) }
+
+    /// Reports still owed to the server — for tests, and for anything that
+    /// wants to know the queue is empty.
+    var pendingCount: Int { pending.count }
+
+    /// The queue itself, read-only. Only `hide` and the drain may change it.
+    var pendingReports: [RemoteReport] { pending }
+
+    // MARK: - Writing
+
+    /// Report a buddy's photo: hide it here, then tell the server.
+    ///
+    /// Returns immediately. The hide is synchronous and already persisted by
+    /// the time this returns, which is what lets the tile redraw in the same
+    /// frame as the tap.
+    func report(_ post: RemotePost, reason: String? = nil) {
+        hide(post, reason: reason)
+        drain()
+    }
+
+    /// The local half on its own — hide the photo and write down what we owe.
+    /// Separate from `report` so it is exercisable without a network in sight.
+    func hide(_ post: RemotePost, reason: String? = nil) {
+        if let path: String = post.photoPath, !path.isEmpty {
+            hiddenPaths.insert(path)
+            // The bytes go too. They are a disposable cache entry (§4), and
+            // leaving them on disk would mean a reported photo sitting in
+            // Documents until retention swept the path that no longer renders.
+            if persists { BuddyPhotoCache.remove(forRemotePath: path) }
+        }
+        guard let reporter: UUID = currentUserID() else {
+            // No session, no report: `reporter_id = auth.uid()` is the insert
+            // policy, so there is nothing to queue. The hide still stands —
+            // it is the half the person can actually feel.
+            persist()
+            return
+        }
+        // One report per (reporter, post) — the same rule the unique index
+        // enforces, applied here so a double-tap never queues twice.
+        guard !pending.contains(where: { $0.postID == post.id }) else {
+            persist()
+            return
+        }
+        // The subject travels WITH the complaint (§4). `reported_user_id` and
+        // `photo_path` are both pinned server-side against the post itself, so
+        // this is a copy of the truth rather than a claim — and it is what
+        // survives the author tapping undo.
+        pending.append(RemoteReport(reporterID: reporter, postID: post.id,
+                                    circleID: post.circleID,
+                                    reportedUserID: post.userID,
+                                    photoPath: post.photoPath,
+                                    reason: reason))
+        persist()
+    }
+
+    /// Try to hand every pending report to the server.
+    ///
+    /// Fire-and-forget: no caller waits, and nothing on screen depends on the
+    /// answer — the photo is already gone from this device either way.
+    func drain() {
+        guard !pending.isEmpty, !isDraining else { return }
+        isDraining = true
+        Task { await drainPending() }
+    }
+
+    private func drainPending() async {
+        defer { isDraining = false }
+        // A snapshot of the queue, so a report filed WHILE this runs is left
+        // for the next drain rather than being dropped by the rewrite below.
+        let queue: [RemoteReport] = pending
+        var settled: Set<UUID> = []
+        for report in queue {
+            let outcome: ReportOutcome = await PhotoReports.send(report)
+            if settles(report, outcome: outcome) { settled.insert(report.id) }
+        }
+        guard !settled.isEmpty else { return }
+        pending.removeAll { settled.contains($0.id) }
+        for id in settled { attempts.removeValue(forKey: id) }
+        persist()
+    }
+
+    /// Whether that outcome takes the report OFF the queue.
+    ///
+    /// v4 Phase D FIX: this used to be `!CircleError.from(error).isOffline` —
+    /// i.e. anything that was not a `URLError` settled the report. A 500 from
+    /// PostgREST, a paused free-tier project or a reply that failed to decode
+    /// all map to `.unknown`, so one transient server hiccup silently threw the
+    /// complaint away, after the UI had told the person "we'll… send it to us
+    /// to look at". The distinction that matters is the one
+    /// `CircleSync.recordFailure` draws: a refusal the server actually uttered
+    /// is final, offline costs nothing, and everything else gets a bounded
+    /// number of tries.
+    private func settles(_ report: RemoteReport, outcome: ReportOutcome) -> Bool {
+        switch outcome {
+        case .filed, .refused:
+            return true
+        case .offline:
+            // A fortnight in airplane mode must never spend an attempt.
+            return false
+        case .failed:
+            let spent: Int = (attempts[report.id] ?? 0) + 1
+            attempts[report.id] = spent
+            return spent >= PhotoReports.maxAttempts
+        }
+    }
+
+    /// What one insert MEANT for the queue.
+    enum ReportOutcome: Equatable, Sendable {
+        /// The server has it — or already had it (`23505`, the double tap).
+        case filed
+        /// A refusal it will utter again forever: not in that circle any more,
+        /// no session, a post that no longer exists. Nothing to retry.
+        case refused
+        /// No usable network. Keep it, charge nothing.
+        case offline
+        /// Something transient — a 5xx, a body we could not read. Keep it, and
+        /// charge one of a bounded number of attempts.
+        case failed
+    }
+
+    /// The same shape of bound `CircleOutbox` puts on a poison write, for the
+    /// same reason: a report that cannot be filed must not be retried forever,
+    /// and one that CAN must not be lost to a bad afternoon. In memory rather
+    /// than on disk — a relaunch is a fresh budget, which is the right bias for
+    /// a complaint.
+    private static let maxAttempts: Int = CircleOutbox.maxAttempts
+
+    /// Send one report.
+    ///
+    /// Spelled `send` rather than `file` because this type already has a
+    /// `file` constant; `CircleSnapshot` proves the overload is legal, and
+    /// proving it twice is not worth a ten-minute CI round trip.
+    static func send(_ report: RemoteReport) async -> ReportOutcome {
+        do {
+            // `returning: .minimal` is NOT optional here: the grant carries no
+            // SELECT, RETURNING needs one, and a default `return=representation`
+            // insert is refused as a whole statement. No `onConflict` either —
+            // see `RemoteReport`.
+            let _: PostgrestResponse<Void> = try await Supa.client
+                .from("reports")
+                .insert(report, returning: .minimal)
+                .execute()
+            return .filed
+        } catch {
+            return PhotoReports.outcome(for: error)
+        }
+    }
+
+    /// Pure, so every branch above is testable without a network.
+    static func outcome(for error: any Error) -> ReportOutcome {
+        // "You already reported this photo" is the unique index doing its job.
+        if SupabaseCircleTransport.isUniqueViolation(error) { return .filed }
+        switch CircleError.from(error) {
+        case .offline:
+            return .offline
+        case .notSignedIn, .notInACircle, .notAllowed, .badRequest,
+             .unknownCode, .circleFull, .alreadyInACircle:
+            return .refused
+        case .tooManyAttempts, .unknown:
+            return .failed
+        }
+    }
+
+    private func persist() {
+        guard persists else { return }
+        let book = ReportBook(hiddenPaths: hiddenPaths.sorted(), pending: pending)
+        Store.save(book, to: PhotoReports.file)
     }
 }

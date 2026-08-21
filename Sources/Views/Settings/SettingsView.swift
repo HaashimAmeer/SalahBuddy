@@ -20,6 +20,12 @@ struct SettingsView: View {
     @State private var notificationStatus: UNAuthorizationStatus = .notDetermined
     @State private var showDeniedAlert = false
     @State private var showResetConfirm = false
+    // v4 §1: account deletion. Separate from `showResetConfirm` on purpose —
+    // one wipes this phone and leaves the server alone, the other does exactly
+    // the opposite, and sharing a flag between them is how they get confused.
+    @State private var showDeleteAccountConfirm = false
+    @State private var isDeletingAccount = false
+    @State private var deleteAccountFailed = false
 
     var body: some View {
         ZStack {
@@ -33,6 +39,11 @@ struct SettingsView: View {
                     locationCard
                     notificationsCard
                     aboutCard
+                    // v4 §1: an App Store build has no developer card, and
+                    // "Delete account" has to be reachable without one. Renders
+                    // nothing at all for a solo install, so v3.9's Settings is
+                    // unchanged for anyone who never signed in.
+                    accountCard
                     // v3.6: dev tools ship in DEBUG *and* TestFlight (so
                     // testers can time-travel / seed demo data), but auto-hide
                     // in a real App Store release — same binary, gated by the
@@ -658,6 +669,127 @@ struct SettingsView: View {
         }
     }
 
+    // MARK: - Account (v4 §1)
+
+    /// Sign out, and delete the account.
+    ///
+    /// v4 DECISION: this lives at the TOP LEVEL of Settings, not in the
+    /// developer card where sign-out started. Account deletion is an App Store
+    /// requirement the moment accounts exist, and `BuildEnv.showsDeveloperTools`
+    /// is false in a public release — so the one build that must offer it is
+    /// exactly the build that would have hidden it. Sign-out moved with it,
+    /// because a screen that offers to delete an account but not to leave it is
+    /// a strange screen.
+    ///
+    /// Absent entirely when nobody is signed in: a solo install never grew an
+    /// account, and v3.9's Settings had no such card.
+    @ViewBuilder
+    private var accountCard: some View {
+        if auth.isSignedIn {
+            VStack(alignment: .leading, spacing: 12) {
+                sectionTitle("Account", symbol: "person.crop.circle.fill", color: Theme.qadaBlue)
+
+                Text(signedInLine)
+                    .font(Theme.sans(15, .semibold))
+                    .foregroundStyle(Theme.inkDeep)
+                Text("Your account is only for your circle. Every prayer you've logged, your photos, streak, XP and badges live on this phone.")
+                    .font(Theme.sans(12.5, .semibold))
+                    .foregroundStyle(Theme.inkMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Divider()
+
+                Button {
+                    Task { await signOut() }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "rectangle.portrait.and.arrow.right")
+                        Text(auth.isWorking ? "Signing out…" : "Sign out")
+                    }
+                    .font(Theme.sans(15, .bold))
+                    .foregroundStyle(Theme.green)
+                }
+                .buttonStyle(.plain)
+                .disabled(auth.isWorking || isDeletingAccount)
+
+                Text("Signing out keeps your circle — sign back in on any phone and it's there.")
+                    .font(Theme.sans(12, .semibold))
+                    .foregroundStyle(Theme.inkMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Divider()
+
+                Button {
+                    showDeleteAccountConfirm = true
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "person.crop.circle.badge.xmark")
+                        Text(isDeletingAccount ? "Deleting…" : "Delete account")
+                    }
+                    .font(Theme.sans(15, .bold))
+                    .foregroundStyle(Theme.amber)
+                }
+                .buttonStyle(.plain)
+                .disabled(isDeletingAccount)
+
+                Text("Removes your profile, your circle membership and everything you've shared with your circle. What's on this phone stays.")
+                    .font(Theme.sans(12, .semibold))
+                    .foregroundStyle(Theme.inkMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(18)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .cardStyle()
+            // Attached HERE rather than to the screen: the root already carries
+            // two presentation modifiers, and stacking four on one view is how
+            // one of them quietly stops presenting. Both belong to this card
+            // anyway — neither can be triggered while it is off screen.
+            .confirmationDialog("Delete your account?",
+                                isPresented: $showDeleteAccountConfirm,
+                                titleVisibility: .visible) {
+                Button("Delete my account", role: .destructive) {
+                    Task { await deleteAccount() }
+                }
+                Button("Keep my account", role: .cancel) {}
+            } message: {
+                Text(SettingsView.deleteAccountMessage)
+            }
+            .alert("We couldn't finish that", isPresented: $deleteAccountFailed) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                // Says what is CERTAIN. The RPC is one transaction, so a
+                // failure means nothing was deleted server-side either — but
+                // the phone is the half the person is holding, so that is the
+                // half we promise.
+                Text("Your account is still here, and nothing on this phone has changed. Try again when you have a better connection.")
+            }
+        }
+    }
+
+    /// The confirm sheet's body. Destructive, and warm about the half that
+    /// isn't: it names what leaves the server AND what stays here, because
+    /// "delete account" in an app full of your own history reads like "delete
+    /// my history" unless it says otherwise.
+    private static let deleteAccountMessage: String =
+        "This permanently removes your profile, your circle membership, and every prayer "
+        + "post and photo you've shared with your circle. Your friends will see those "
+        + "posts disappear, and this can't be undone.\n\n"
+        + "Everything on this phone stays exactly as it is — your logs, your photos, your "
+        + "streak, XP and badges. SalahBuddy goes back to solo mode and carries on."
+
+    /// Delete server-side, then sign out — `CircleService.deleteAccount()` does
+    /// both in that order, and cannot reach a log, a photo or an XP point.
+    @MainActor
+    private func deleteAccount() async {
+        isDeletingAccount = true
+        do {
+            try await circleService.deleteAccount()
+        } catch {
+            deleteAccountFailed = true
+        }
+        isDeletingAccount = false
+    }
+
     // MARK: - Developer (DEBUG + TestFlight)
 
     private var developerCard: some View {
@@ -833,30 +965,17 @@ struct SettingsView: View {
 
     // MARK: - Developer: account (v4)
 
+    /// v4 §1: sign-out and account deletion moved to the top-level `accountCard`
+    /// (which a public App Store build still shows — this card is hidden there).
+    /// What is left here is the one line the developer card is actually for:
+    /// whether this build is looking at a session at all.
     @ViewBuilder
     private var accountSection: some View {
         if auth.isSignedIn {
-            VStack(alignment: .leading, spacing: 8) {
-                Text(signedInLine)
-                    .font(Theme.sans(15, .semibold))
-                    .foregroundStyle(Theme.inkDeep)
-                Text("You'll stay in your circle — sign back in on any phone and it's there. Your streak, XP and photos stay on this one either way.")
-                    .font(Theme.sans(12, .semibold))
-                    .foregroundStyle(Theme.inkMuted)
-                    .fixedSize(horizontal: false, vertical: true)
-                Button {
-                    Task { await signOut() }
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "rectangle.portrait.and.arrow.right")
-                        Text(auth.isWorking ? "Signing out…" : "Sign out")
-                    }
-                    .font(Theme.sans(15, .bold))
-                    .foregroundStyle(Theme.amber)
-                }
-                .buttonStyle(.plain)
-                .disabled(auth.isWorking)
-            }
+            Text("Signed in. Sign out and Delete account are in the Account card above.")
+                .font(Theme.sans(12, .semibold))
+                .foregroundStyle(Theme.inkMuted)
+                .fixedSize(horizontal: false, vertical: true)
         } else {
             Text("Not signed in. The Circle tab is where a real circle starts.")
                 .font(Theme.sans(12, .semibold))

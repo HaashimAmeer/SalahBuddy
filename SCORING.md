@@ -27,7 +27,7 @@ Toggle **Prayed in jamaat** (or **Jumma** on Friday Dhuhr) after the photo and t
 |---|---|---|
 | Perfect day | +25 | All 5 prayers in their windows; qada disqualifies |
 
-## Dhikr & deeds (v3.8 — permanent, for everyone)
+## Dhikr & deeds (v3.8 — permanent, for everyone; v4 — counts for everyone in the circle)
 
 Tasbih and good deeds live on the **Dhikr tab**, always available, and earn XP toward your level and the **weekly circle scoreboard**. The daily cap depends on your state:
 
@@ -35,6 +35,8 @@ Tasbih and good deeds live on the **Dhikr tab**, always available, and earn XP t
 - **Otherwise**: dhikr only tops a prayed-but-imperfect day **up to 150** total (prayer + dhikr). A strong/perfect prayer day (~175) always beats it, so praying early still wins.
 
 The act of dhikr is never blocked once the XP cap is reached — it just stops adding points.
+
+**On the scoreboard it is an OPAQUE weekly total** (SPEC-V4 §3). Every member's week carries one number for recovery XP — yours and every friend's alike — and that number is all anybody sees: never which day it came from, never whether it was tasbih or a good deed, never that somebody was resting. It is what keeps a break/period week competitive without the scoreboard announcing the break. The crown **race** stays prayer-only (see "The circle").
 
 ## Traveling (combining / jam')
 
@@ -60,6 +62,7 @@ XP needed to clear level n → n+1: `100 + (n−1) × 25`. New title every 5 lev
 
 ## The circle (weekly, resets Monday 00:00 local)
 
-- Weekly score = prayer XP + bonuses earned that week (dhikr excluded).
-- **Race**: first member to the weekly target wins the crown. The target starts at 300 and climbs +100 with every past win.
+- Weekly score = prayer XP + bonuses **+ that week's recovery (dhikr/deeds) XP as one opaque total** — the same rule for you and for every friend (SPEC-V4 §3).
+- **Race**: first member to the weekly target wins the crown — **prayer XP only**, so a big dhikr week never buys one. The target starts at 300 and climbs +100 with every past win.
+- **The weekly recap's circle page** (Journey, real circles only) recaps the last finished Mon–Sun week with the same two numbers: the standings as the scoreboard scored them, and the best single day anybody had — prayer XP, decided by the data (highest XP, then the earlier day, then the name) so every phone in the circle shows the same answer.
 - Hard-coded group challenges (everyone-prays-Isha ×3, Circle Perfect Day) plus **custom challenges** the circle creates (+ button): pick a prayer and a day count, everyone has to log it that many days in a row, reward = 15 XP × days.

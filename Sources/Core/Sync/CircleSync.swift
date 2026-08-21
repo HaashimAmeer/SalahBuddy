@@ -262,6 +262,20 @@ final class CircleSync: ObservableObject {
     }
     private var attempts: [UUID: Attempt] = [:]
 
+    /// Posts this device logged LIVE and has not yet announced (§6).
+    ///
+    /// In memory rather than in the queue on disk, and that is the decision:
+    /// `PushRegistrar` already says "a push whose moment has passed is not worth
+    /// a queue", so a post whose acknowledgement arrives after a relaunch is
+    /// posted silently. Persisting it would mean announcing yesterday's fajr
+    /// because the app was force-quit on a train.
+    private var announceablePostIDs: Set<UUID> = []
+
+    /// Where an announcement goes. Nil is the app: `PushRegistrar.shared`, the
+    /// same singleton the nudge chip and the join both use. A test supplies one
+    /// and gets to observe §6 without APNs, a network or a signed-in user.
+    var announcer: (@MainActor (UUID) -> Void)?
+
     private var isDraining: Bool = false
     private var isPulling: Bool = false
     private var isForeground: Bool = false
@@ -315,13 +329,22 @@ final class CircleSync: ObservableObject {
     /// `travelCombined` is passed by the caller because a `PrayerLog` alone
     /// cannot know it was half of a jam' pair; `logCombined` calls this twice,
     /// once per prayer, with `true` both times.
-    func postLogged(_ log: PrayerLog, photoFilename: String? = nil, travelCombined: Bool = false) {
+    ///
+    /// `announce` is what tells §6's friend-activity push apart from paperwork.
+    /// A prayer logged just now is worth waking a friend for; the join
+    /// backfill's week of already-prayed prayers is not (see `backfillWeek`).
+    func postLogged(_ log: PrayerLog, photoFilename: String? = nil,
+                    travelCombined: Bool = false, announce: Bool = true) {
         guard let circleID: UUID = liveCircleID, let userID: UUID = liveUserID else { return }
         let label: String? = AppState.placeLabel(for: log)
         let post: RemotePost = RemotePost.from(log: log, userID: userID, circleID: circleID,
                                                placeLabel: label, photoPath: nil,
                                                travelCombined: travelCombined)
         enqueue(.upsertPost(post))
+        // AFTER the enqueue, not before: `enqueue` re-anchors on an identity
+        // change, and re-anchoring clears this set. The drain it kicks is a
+        // `Task`, so nothing can read the set before this line runs.
+        if announce { announceablePostIDs.insert(post.id) }
         guard let filename: String = photoFilename else { return }
         // The object is named after the POST, not a fresh uuid: the path is
         // then a pure function of the log, so a re-queue after a lost
@@ -347,6 +370,10 @@ final class CircleSync: ObservableObject {
 
     func postRetracted(id: UUID) {
         guard liveCircleID != nil, liveUserID != nil else { return }
+        // Undo beats the drain often enough to matter: a post the user has
+        // already taken back must not wake anybody, even if its create is still
+        // on the wire.
+        announceablePostIDs.remove(id)
         enqueue(.deletePost(postID: id))
     }
 
@@ -396,7 +423,11 @@ final class CircleSync: ObservableObject {
         let todayKey: String = AppClock.dayKey(for: now)
         for log in logs where CircleSync.isBackfillable(log, weekKeys: weekKeys,
                                                         now: now, todayKey: todayKey) {
-            postLogged(log, photoFilename: nil, travelCombined: false)
+            // `announce: false` — the whole point of this call is to publish
+            // prayers that already happened, some of them days ago. Announcing
+            // them would fire "📸 X posted first for Fajr" up to 35 times the
+            // moment somebody joins, for windows that closed on Monday.
+            postLogged(log, photoFilename: nil, travelCombined: false, announce: false)
         }
         // v4 Phase C FIX: the rest days go too. Someone who joins mid-period
         // used to have that week's `excusedDayKeys` stay on their own device,
@@ -644,6 +675,43 @@ final class CircleSync: ObservableObject {
         return false
     }
 
+    /// What an acknowledgement means to the rest of the app.
+    ///
+    /// v4 Phase D FIX: `.upsertPost` used to fall through the guard below and
+    /// tell nobody, so `PushRegistrar.announcePost` — the whole client half of
+    /// §6's headline push — had no call site anywhere in `Sources/`. Two phones
+    /// in a real circle with "Friend activity" on: A logs Fajr, the post uploads
+    /// and is acked, B's phone never buzzes, and the server's `kind: "post"`
+    /// path was never once exercised in the shipping app. This is the one place
+    /// a post is known to be on the server, which is what `announcePost`
+    /// requires (the function answers `post_not_found` for a row that isn't
+    /// there yet).
+    private func applyAcknowledged(_ op: CircleOp) {
+        switch op {
+        case .upsertPost(let post):
+            announceIfLive(post)
+        case .deleteChallenge(let challengeID):
+            removeAcknowledgedChallenge(challengeID)
+        default:
+            return
+        }
+    }
+
+    /// Fire-and-forget, exactly like the nudge chip: a push is garnish on an
+    /// action that has already succeeded, nothing waits for it, and no failure
+    /// is ever shown. Deliberately NOT gated on this device's friend-activity
+    /// toggle — that is a RECEIVING preference the server applies per recipient,
+    /// and muting your own would otherwise silence every friend who asked for it.
+    private func announceIfLive(_ post: RemotePost) {
+        guard announceablePostIDs.remove(post.id) != nil else { return }
+        let postID: UUID = post.id
+        if let hook = announcer {
+            hook(postID)
+            return
+        }
+        Task { await PushRegistrar.shared.announcePost(postID: postID) }
+    }
+
     /// The one op whose acknowledgement the MIRROR has to hear about.
     ///
     /// v4 Phase C FIX: a custom challenge is the only mirror-backed thing a
@@ -656,8 +724,7 @@ final class CircleSync: ObservableObject {
     ///
     /// Nothing else needs this: posts and excused days render your own row from
     /// local state, so the mirror disagreeing about them is invisible.
-    private func applyAcknowledged(_ op: CircleOp) {
-        guard case .deleteChallenge(let challengeID) = op else { return }
+    private func removeAcknowledgedChallenge(_ challengeID: String) {
         guard let host: any CircleSyncHost = self.host else { return }
         var next: CircleSnapshot = host.syncSnapshot
         let before: Int = next.challenges.count
@@ -1090,6 +1157,9 @@ final class CircleSync: ObservableObject {
         guard seen != generation else { return }
         lastSeenGeneration = generation
         attempts.removeAll()
+        // Whatever was owed belonged to the circle (or the account) that just
+        // went away — including a push that would have named it.
+        announceablePostIDs.removeAll()
         retryTask?.cancel()
         retryTask = nil
         outbox = persists ? CircleOutbox.load() : .empty
