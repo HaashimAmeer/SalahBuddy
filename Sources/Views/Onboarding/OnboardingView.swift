@@ -128,7 +128,9 @@ struct OnboardingView: View {
                 Text("Hi! I'm Hilal 🌙")
                     .font(Theme.sans(28, .bold))
                     .foregroundStyle(Theme.inkDeep)
-                Text("You and your circle, lifting each other up —\none salah at a time.")
+                // v3.9: everyone starts solo, so the tagline can't promise a
+                // circle on day one — it points at one instead.
+                Text("One salah at a time — just you to start,\nand a circle whenever you want one.")
                     .font(Theme.sans(15, .semibold))
                     .foregroundStyle(Theme.inkMuted)
                     .multilineTextAlignment(.center)
@@ -349,7 +351,7 @@ struct OnboardingView: View {
             // v3.6 (design session): notifications are surfaced HERE, worded
             // strongly — they're the heartbeat of the app.
             if !notifGranted {
-                Text("We strongly encourage turning notifications on — it's how you and your circle keep each other on time. You can fine-tune which kinds in Settings.")
+                Text("We strongly encourage turning notifications on — it's how you stay on time, and later how your circle cheers you on. You can fine-tune which kinds in Settings.")
                     .font(Theme.sans(12, .semibold))
                     .foregroundStyle(Theme.gold)
                     .fixedSize(horizontal: false, vertical: true)
@@ -398,6 +400,10 @@ struct OnboardingView: View {
     private func finish() {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty { state.setName(trimmed) }
+        // v3.9: new accounts start solo — the circle begins empty and grows one
+        // invite at a time. Set before the settings write so the refresh it
+        // triggers already derives the empty circle.
+        state.markStartedSolo()
         var s = state.settings
         s.memberKind = kind
         s.hardestPrayer = hardest          // seeds the goal3 challenge

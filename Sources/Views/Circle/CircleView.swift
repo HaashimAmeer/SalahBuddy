@@ -10,6 +10,12 @@ import SwiftUI
 //   4. Group challenges (ChallengeCard for the isGroup entries).
 //   5. Tasteful empty state with a small MascotView when nothing has been
 //      posted this week yet.
+//
+// v3.9 (solo-first): when the circle is EMPTY (`state.isSoloMode` — a new solo
+// account, or a legacy one that removed everybody) the whole tab body is
+// replaced by a single warm "build your circle" pitch. There's no leaderboard
+// of one, no group grid, and no group challenges — the core already refuses to
+// award those without a circle, and the tab shouldn't tease them either.
 struct CircleView: View {
     @EnvironmentObject private var state: AppState
 
@@ -54,65 +60,21 @@ struct CircleView: View {
     }
 
     private var content: some View {
-        let scores = state.weeklyScores()
-        let weekIsEmpty = scores.allSatisfy { $0.xp == 0 }
-        let crownID = state.race300WinnerID
-
-        return ScrollViewReader { proxy in
+        ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     header
                         .id("tour-circle-top")
 
-                    Group {
-                        if weekIsEmpty {
-                            CircleEmptyStateCard()
-                        } else {
-                            ScoreboardCard(scores: scores, crownID: crownID) { member in
-                                withAnimation(Theme.spring) { selectedMember = member }
-                            }
-                        }
+                    if state.isSoloMode {
+                        // v3.9: no circle yet — the whole tab is the pitch.
+                        // Still a tour target, so step 4 spotlights something
+                        // real instead of dimming an empty page.
+                        SoloCircleCard { showInvite = true }
+                            .tutorialTarget(.leaderboard)
+                    } else {
+                        circleBody
                     }
-                    .tutorialTarget(.leaderboard)
-
-                    if !weekIsEmpty {
-                        SectionHeader(title: "This week together", accent: "✦")
-                        WeekGridView(rows: state.weekRows())
-                    }
-
-                    // v3.7: header + cards in one container so the guided tour
-                    // can spotlight the whole challenges section.
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack {
-                            SectionHeader(title: "Group challenges", accent: "✦")
-                            Spacer()
-                            // v3.2: circles can make their own challenges.
-                            Button {
-                                creatingChallenge = true
-                            } label: {
-                                Image(systemName: "plus.circle.fill")
-                                    .font(.system(size: 24, weight: .semibold))
-                                    .foregroundStyle(Theme.green)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        VStack(spacing: 12) {
-                            ForEach(state.challenges().filter(\.isGroup)) { progress in
-                                ChallengeCard(progress: progress)
-                                    .contextMenu {
-                                        if progress.id.hasPrefix("custom-") {
-                                            Button(role: .destructive) {
-                                                state.deleteCustomChallenge(id: progress.id)
-                                            } label: {
-                                                Label("Remove challenge", systemImage: "trash")
-                                            }
-                                        }
-                                    }
-                            }
-                        }
-                    }
-                    .tutorialTarget(.challenges)
-                    .id("tour-challenges")
                 }
                 .padding(.horizontal, 20)
                 .padding(.top, 16)
@@ -123,9 +85,82 @@ struct CircleView: View {
                 guard let step else { return }
                 withAnimation(Theme.spring) {
                     if step == Tour.leaderboardIndex { proxy.scrollTo("tour-circle-top", anchor: .top) }
-                    if step == Tour.challengesIndex { proxy.scrollTo("tour-challenges", anchor: .center) }
+                    // v3.9: solo has no challenges section — the tour step
+                    // falls back to its centered card, so don't chase the id.
+                    if step == Tour.challengesIndex, !state.isSoloMode {
+                        proxy.scrollTo("tour-challenges", anchor: .center)
+                    }
                 }
             }
+        }
+    }
+
+    // MARK: Circle body (someone else is in here)
+
+    /// Scoreboard + group week grid + group challenges. Only ever built when
+    /// the circle has at least one friend, so none of it has to reason about
+    /// a leaderboard of one.
+    @ViewBuilder
+    private var circleBody: some View {
+        let scores = state.weeklyScores()
+        // NOTE: this is an empty WEEK (nobody has posted yet), not an empty
+        // CIRCLE — the solo path above takes precedence over it.
+        let weekIsEmpty = scores.allSatisfy { $0.xp == 0 }
+        let crownID = state.race300WinnerID
+
+        Group {
+            if weekIsEmpty {
+                CircleEmptyStateCard()
+            } else {
+                ScoreboardCard(scores: scores, crownID: crownID) { member in
+                    withAnimation(Theme.spring) { selectedMember = member }
+                }
+            }
+        }
+        .tutorialTarget(.leaderboard)
+
+        if !weekIsEmpty {
+            SectionHeader(title: "This week together", accent: "✦")
+            WeekGridView(rows: state.weekRows())
+        }
+
+        // v3.7: header + cards in one container so the guided tour
+        // can spotlight the whole challenges section.
+        // v3.9 (belt and braces): group challenges never render without a
+        // circle — the core stops awarding them, and `circleBody` is only
+        // reached with friends present, but the guard keeps the two honest.
+        if !state.isSoloMode {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    SectionHeader(title: "Group challenges", accent: "✦")
+                    Spacer()
+                    // v3.2: circles can make their own challenges.
+                    Button {
+                        creatingChallenge = true
+                    } label: {
+                        Image(systemName: "plus.circle.fill")
+                            .font(.system(size: 24, weight: .semibold))
+                            .foregroundStyle(Theme.green)
+                    }
+                    .buttonStyle(.plain)
+                }
+                VStack(spacing: 12) {
+                    ForEach(state.challenges().filter(\.isGroup)) { progress in
+                        ChallengeCard(progress: progress)
+                            .contextMenu {
+                                if progress.id.hasPrefix("custom-") {
+                                    Button(role: .destructive) {
+                                        state.deleteCustomChallenge(id: progress.id)
+                                    } label: {
+                                        Label("Remove challenge", systemImage: "trash")
+                                    }
+                                }
+                            }
+                    }
+                }
+            }
+            .tutorialTarget(.challenges)
+            .id("tour-challenges")
         }
     }
 
@@ -145,7 +180,9 @@ struct CircleView: View {
                         .foregroundStyle(Theme.green.opacity(0.55))
                         .offset(y: -6)
                 }
-                Text(weekCountdownText)
+                // v3.9: a week countdown over an empty page is noise — solo
+                // gets the invitation instead.
+                Text(state.isSoloMode ? "Nobody here yet" : weekCountdownText)
                     .font(Theme.sans(14, .medium))
                     .foregroundStyle(Theme.inkMuted)
             }
@@ -369,6 +406,91 @@ private struct XPBar: View {
     }
 }
 
+// MARK: - Solo state (v3.9 — solo-first)
+
+/// The whole Circle tab when there's nobody in it: a warm pitch for what a
+/// circle actually buys you, then the one button that starts it. Deliberately
+/// shows no leaderboard, no grid and no challenges — an empty scoreboard with
+/// only your own row in it reads as a bug, not an invitation.
+private struct SoloCircleCard: View {
+    let onBuild: () -> Void
+
+    private struct Perk: Identifiable {
+        let icon: String
+        let title: String
+        let detail: String
+        var id: String { title }
+    }
+
+    private static let perks: [Perk] = [
+        Perk(icon: "photo.on.rectangle.angled", title: "Prayer photos",
+             detail: "Their squares fill in next to yours, live through the day."),
+        Perk(icon: "square.grid.3x3.fill", title: "A shared week",
+             detail: "One grid for all of you — see who's keeping all five."),
+        Perk(icon: "flag.checkered", title: "Group challenges",
+             detail: "Take on Fajr streaks together and everyone earns the bonus."),
+    ]
+
+    var body: some View {
+        VStack(spacing: 16) {
+            MascotView(mood: .happy, size: 76)
+
+            VStack(spacing: 8) {
+                Text("Better with company ✦")
+                    .font(Theme.sans(20, .bold))
+                    .foregroundStyle(Theme.inkDeep)
+                Text("Keeping all five is easier when someone's keeping it with you. Add a friend and this page comes alive.")
+                    .font(Theme.sans(14, .medium))
+                    .foregroundStyle(Theme.inkMuted)
+                    .multilineTextAlignment(.center)
+                    .lineSpacing(3)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            VStack(alignment: .leading, spacing: 12) {
+                ForEach(Self.perks) { perk in
+                    perkRow(perk)
+                }
+            }
+            .padding(.top, 2)
+
+            ChunkyButton(title: "Build your circle", color: Theme.green, isEnabled: true) {
+                onBuild()
+            }
+
+            Text("Up to \(BuddySimulator.maxFriends) friends — five photos a day is an intimate thing.")
+                .font(Theme.sans(12, .medium))
+                .foregroundStyle(Theme.inkMuted)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 26)
+        .padding(.horizontal, 20)
+        .cardStyle()
+    }
+
+    private func perkRow(_ perk: Perk) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: perk.icon)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(Theme.green)
+                .frame(width: 34, height: 34)
+                .background(Circle().fill(Theme.greenSoft))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(perk.title)
+                    .font(Theme.sans(14, .bold))
+                    .foregroundStyle(Theme.inkDeep)
+                Text(perk.detail)
+                    .font(Theme.sans(12, .medium))
+                    .foregroundStyle(Theme.inkMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+    }
+}
+
 // MARK: - Empty state
 
 private struct CircleEmptyStateCard: View {
@@ -401,6 +523,11 @@ extension AppState {
     /// nil while nobody has crossed. Pure function of AppClock.now + logs —
     /// time-travel safe (no caching).
     var race300WinnerID: String? {
+        // v3.9: a race of one isn't a race. The core already drops the race300
+        // challenge without a circle; this keeps the crown off the (never
+        // rendered) solo scoreboard too, so the two can't disagree.
+        guard !isSoloMode else { return nil }
+
         let now = AppClock.now
         let coords = activeCoordinates
         let dayKeys = BuddySimulator.weekDayKeys(for: now)
@@ -554,25 +681,38 @@ struct MemberDetailContent: View {
 /// Add a friend: a shareable invite link, plus (demo) pool friends who can
 /// "accept" so the add → celebration flow is tangible. Capped at 8 friends —
 /// five photos a day is an intimate thing.
+///
+/// v3.9: with nobody in the circle this is the "your circle begins here"
+/// moment rather than an "0 of 8" tally, and the pickable list is the whole
+/// roster (`state.invitableBuddies` already widens for solo accounts) — so it
+/// scrolls.
 struct InviteSheet: View {
     @EnvironmentObject private var state: AppState
     @Environment(\.dismiss) private var dismiss
 
     private let inviteLink = "https://salahbuddy.app/join/HML7-MOON"
 
+    /// Nobody in the circle yet — this invite is the one that starts it.
+    private var isFirstInvite: Bool { state.activeBuddies.isEmpty }
+
     var body: some View {
-        VStack(spacing: 18) {
+        VStack(spacing: 16) {
             Capsule()
                 .fill(Theme.mist.opacity(0.6))
                 .frame(width: 38, height: 5)
                 .padding(.top, 10)
 
-            Text("Invite a friend 🤝")
-                .font(Theme.sans(22, .bold))
-                .foregroundStyle(Theme.inkDeep)
-            Text("Your circle: \(state.activeBuddies.count) of \(BuddySimulator.maxFriends) friends")
-                .font(Theme.sans(13, .semibold))
-                .foregroundStyle(Theme.inkMuted)
+            VStack(spacing: 6) {
+                Text(isFirstInvite ? "Start your circle 🤝" : "Invite a friend 🤝")
+                    .font(Theme.sans(22, .bold))
+                    .foregroundStyle(Theme.inkDeep)
+                Text(subtitle)
+                    .font(Theme.sans(13, .semibold))
+                    .foregroundStyle(Theme.inkMuted)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 30)
+            }
 
             if state.circleIsFull {
                 VStack(spacing: 6) {
@@ -587,57 +727,74 @@ struct InviteSheet: View {
                         .multilineTextAlignment(.center)
                 }
                 .padding(.horizontal, 30)
+                Spacer(minLength: 8)
             } else {
-                ShareLink(item: URL(string: inviteLink)!) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "link")
-                            .font(.system(size: 14, weight: .bold))
-                        Text("Share your invite link")
-                            .font(Theme.sans(15, .bold))
-                    }
-                    .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 13)
-                    .background(Capsule().fill(Theme.green))
-                }
-                .padding(.horizontal, 24)
-
-                if !state.invitableBuddies.isEmpty {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Demo · pretend someone accepted")
-                            .font(Theme.sans(11, .bold))
-                            .foregroundStyle(Theme.inkMuted)
-                            .textCase(.uppercase)
-                        ForEach(state.invitableBuddies, id: \.name) { buddy in
-                            Button {
-                                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                                withAnimation(Theme.spring) { state.acceptInvite(name: buddy.name) }
-                                dismiss()
-                            } label: {
-                                HStack(spacing: 10) {
-                                    Text(buddy.emoji).font(.system(size: 20))
-                                    Text(buddy.name)
-                                        .font(Theme.sans(15, .semibold))
-                                        .foregroundStyle(Theme.inkDeep)
-                                    Spacer()
-                                    Text("Joins instantly")
-                                        .font(Theme.sans(12, .bold))
-                                        .foregroundStyle(Theme.green)
-                                }
-                                .padding(12)
-                                .background(Theme.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                // The roster can run to 11 names on a solo account, so the
+                // pickable list scrolls instead of overflowing the sheet.
+                ScrollView {
+                    VStack(spacing: 16) {
+                        ShareLink(item: URL(string: inviteLink)!) {
+                            HStack(spacing: 8) {
+                                Image(systemName: "link")
+                                    .font(.system(size: 14, weight: .bold))
+                                Text("Share your invite link")
+                                    .font(Theme.sans(15, .bold))
                             }
-                            .buttonStyle(.plain)
+                            .foregroundStyle(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 13)
+                            .background(Capsule().fill(Theme.green))
+                        }
+
+                        if !state.invitableBuddies.isEmpty {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text(isFirstInvite ? "Demo · tap someone to begin"
+                                                   : "Demo · pretend someone accepted")
+                                    .font(Theme.sans(11, .bold))
+                                    .foregroundStyle(Theme.inkMuted)
+                                    .textCase(.uppercase)
+                                ForEach(state.invitableBuddies, id: \.name) { buddy in
+                                    buddyRow(buddy)
+                                }
+                            }
                         }
                     }
                     .padding(.horizontal, 24)
+                    .padding(.bottom, 24)
                 }
+                .scrollBounceBehavior(.basedOnSize)
             }
-
-            Spacer(minLength: 8)
         }
         .frame(maxWidth: .infinity)
         .background(Theme.bg)
+    }
+
+    private var subtitle: String {
+        isFirstInvite
+            ? "Your first friend is where it begins — up to \(BuddySimulator.maxFriends), so it stays close."
+            : "Your circle: \(state.activeBuddies.count) of \(BuddySimulator.maxFriends) friends"
+    }
+
+    private func buddyRow(_ buddy: BuddySimulator.Buddy) -> some View {
+        Button {
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            withAnimation(Theme.spring) { state.acceptInvite(name: buddy.name) }
+            dismiss()
+        } label: {
+            HStack(spacing: 10) {
+                Text(buddy.emoji).font(.system(size: 20))
+                Text(buddy.name)
+                    .font(Theme.sans(15, .semibold))
+                    .foregroundStyle(Theme.inkDeep)
+                Spacer()
+                Text(isFirstInvite ? "Starts your circle" : "Joins instantly")
+                    .font(Theme.sans(12, .bold))
+                    .foregroundStyle(Theme.green)
+            }
+            .padding(12)
+            .background(Theme.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -652,9 +809,10 @@ struct NewMemberCelebration: View {
     @EnvironmentObject private var state: AppState
     @State private var sent = false
 
+    /// v3.9: one roster lookup — a solo circle's first friend can come from
+    /// the base 8 just as easily as from the invitable extras.
     private var emoji: String {
-        (BuddySimulator.invitablePool + BuddySimulator.buddies)
-            .first { $0.name == name }?.emoji ?? "🎉"
+        BuddySimulator.buddy(named: name)?.emoji ?? "🎉"
     }
 
     var body: some View {

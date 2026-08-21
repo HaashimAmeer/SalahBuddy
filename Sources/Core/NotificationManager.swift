@@ -3,7 +3,8 @@ import UserNotifications
 
 /// Schedules the next 48h of local prayer notifications:
 /// - at each prayer's window start: "📸 {Prayer} just came in — be the first
-///   in your circle to post!"
+///   in your circle to post!" (v3.9: solo, there's no circle to be first in,
+///   so the body nudges the photo itself instead)
 /// - 30 minutes before a window closes, if that prayer is still unlogged:
 ///   "Last call for {Prayer}!"
 ///
@@ -104,6 +105,11 @@ final class NotificationManager {
         let now = AppClock.now
         let profile = Store.load(Store.profileFile, default: UserProfile.fresh(now: now))
         let logs = Store.load(Store.logsFile, default: [PrayerLog]())
+        // v3.9: solo accounts have no circle yet — derive it the same way
+        // AppState.isSoloMode does, so removing every buddy counts too.
+        let hasCircle = !BuddySimulator.activeBuddies(removed: profile.removedBuddyNames,
+                                                      invited: profile.invitedBuddyNames,
+                                                      startedSolo: profile.startedSolo).isEmpty
 
         let horizon = now.addingTimeInterval(Self.horizonHours * 3600)
         let coords = activeCoordinates(settings: settings)
@@ -125,7 +131,7 @@ final class NotificationManager {
                 if settings.notifyPrayerStart {
                     scheduleStart(for: window, dayKey: schedule.dayKey,
                                   now: now, horizon: horizon, streak: profile.streak,
-                                  center: center)
+                                  hasCircle: hasCircle, center: center)
                 }
                 if settings.notifyLastCall {
                     scheduleLastCall(for: window, dayKey: schedule.dayKey,
@@ -147,7 +153,8 @@ final class NotificationManager {
                                         now: Date, horizon: Date, profile: UserProfile,
                                         center: UNUserNotificationCenter) {
         let buddies = BuddySimulator.activeBuddies(removed: profile.removedBuddyNames,
-                                                   invited: profile.invitedBuddyNames)
+                                                   invited: profile.invitedBuddyNames,
+                                                   startedSolo: profile.startedSolo)
         let firstPost: (buddy: BuddySimulator.Buddy, at: Date)? = buddies
             .compactMap { buddy in
                 if case .inWindow(_, let loggedAt, _) = BuddySimulator.outcome(for: buddy, dayKey: dayKey,
@@ -172,13 +179,16 @@ final class NotificationManager {
 
     private func scheduleStart(for window: PrayerWindow, dayKey: String,
                                now: Date, horizon: Date, streak: Int,
+                               hasCircle: Bool,
                                center: UNUserNotificationCenter) {
         guard window.start > now, window.start <= horizon else { return }
 
         // v2 copy: "📸 {Prayer} just came in — be the first in your circle to post!"
+        // v3.9: solo, there's no circle to be first in — nudge the photo itself.
         let content = UNMutableNotificationContent()
         content.title = "📸 \(window.prayer.displayName) just came in"
-        content.body = "Be the first in your circle to post!"
+        content.body = hasCircle ? "Be the first in your circle to post!"
+                                 : "Snap your photo and log it while it's early!"
         content.sound = .default
 
         add(content: content,

@@ -122,9 +122,13 @@ struct SettingsView: View {
                 }
             }
 
-            Text("Your name and photo are what your circle sees.")
+            // v3.9: solo users have no circle to be seen by yet.
+            Text(state.isSoloMode
+                 ? "Your name and photo go on your posts — and are what your circle will see once you add friends."
+                 : "Your name and photo are what your circle sees.")
                 .font(Theme.sans(11.5, .semibold))
                 .foregroundStyle(Theme.inkMuted)
+                .fixedSize(horizontal: false, vertical: true)
 
             Divider()
 
@@ -492,11 +496,17 @@ struct SettingsView: View {
                 notifOption(title: "Last call",
                             subtitle: "30 minutes before a window closes",
                             isOn: subToggle(\.notifyLastCall))
-                notifOption(title: "Friend activity",
-                            subtitle: "When someone in your circle posts first",
-                            isOn: subToggle(\.notifyFriendActivity))
+                // v3.9: nothing to ping about with an empty circle — hide the
+                // row rather than offer a toggle that can never fire.
+                if !state.isSoloMode {
+                    notifOption(title: "Friend activity",
+                                subtitle: "When someone in your circle posts first",
+                                isOn: subToggle(\.notifyFriendActivity))
+                }
             } else {
-                Text("A nudge the moment each prayer comes in, a last call before it closes, and optional friend activity.")
+                Text(state.isSoloMode
+                     ? "A nudge the moment each prayer comes in, and a last call before it closes."
+                     : "A nudge the moment each prayer comes in, a last call before it closes, and optional friend activity.")
                     .font(Theme.sans(13, .semibold))
                     .foregroundStyle(Theme.inkMuted)
             }
@@ -782,8 +792,12 @@ struct BreakAndTravelCard: View {
                     Text(state.isOnBreak ? "On a break — streak safe" : "Can't pray right now")
                         .font(Theme.sans(15, .semibold))
                         .foregroundStyle(Theme.inkDeep)
+                    // v3.9: the "resting" reassurance is about what the circle
+                    // sees — solo, it's just about your own days.
                     Text(state.isOnBreak
-                         ? "Your circle just sees a gentle \"resting\". Turn off to resume."
+                         ? (state.isSoloMode
+                            ? "Your days just show a gentle \"resting\" — no misses. Turn off to resume."
+                            : "Your circle just sees a gentle \"resting\". Turn off to resume.")
                          : "Pauses everything — your streak stays safe until you resume.")
                         .font(Theme.sans(11.5, .semibold))
                         .foregroundStyle(Theme.inkMuted)

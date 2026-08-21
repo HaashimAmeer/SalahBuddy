@@ -36,6 +36,7 @@ struct RootView: View {
             if let step = state.tutorialStep, state.settings.hasOnboarded {
                 TutorialOverlay(stepIndex: step,
                                 frames: tourFrames,
+                                solo: state.isSoloMode,
                                 onNext: { advanceTour(from: step) },
                                 onSkip: { withAnimation(Theme.spring) { state.endTutorial() } })
                     .zIndex(30)
@@ -196,6 +197,12 @@ struct TourStep {
     let message: String
     /// Shown when the target isn't on screen (empty section, below the fold).
     var emptyMessage: String? = nil
+    /// v3.9: copy for someone with no circle yet — same steps, same targets,
+    /// but the pitch becomes STARTING a circle instead of keeping up with one.
+    /// nil falls back to the copy above.
+    var soloTitle: String? = nil
+    var soloMessage: String? = nil
+    var soloEmptyMessage: String? = nil
 }
 
 enum Tour {
@@ -208,22 +215,31 @@ enum Tour {
     static let steps: [TourStep] = [
         TourStep(tab: 0, target: nil,
                  title: "Welcome to SalahBuddy 🌙",
-                 message: "You and your circle, keeping all five prayers together — one photo at a time. Here's a quick tour of how it works."),
+                 message: "You and your circle, keeping all five prayers together — one photo at a time. Here's a quick tour of how it works.",
+                 soloMessage: "All five prayers, one photo at a time — and friends to keep them with, whenever you're ready. Here's a quick tour of how it works."),
         TourStep(tab: 0, target: .postPhoto,
                  title: "Post your prayer 📸",
                  message: "When a prayer comes in, log it by snapping a quick photo — your square fills in here, next to your circle's photos as they come in live.",
-                 emptyMessage: "When a prayer window is open, a camera square appears here — snap a quick photo to log it, right next to your circle's photos."),
+                 emptyMessage: "When a prayer window is open, a camera square appears here — snap a quick photo to log it, right next to your circle's photos.",
+                 soloMessage: "When a prayer comes in, log it by snapping a quick photo — it fills in right here, and it's yours to keep.",
+                 soloEmptyMessage: "When a prayer window is open, a camera square appears here — snap a quick photo to log it."),
         TourStep(tab: 0, target: .earlierToday,
                  title: "Earlier today",
                  message: "Finished prayers gather here — tap one to see a timeline of who prayed and when.",
-                 emptyMessage: "As the day goes on, finished prayers gather in an \"Earlier today\" list — tap any of them for a timeline of who prayed and when."),
+                 emptyMessage: "As the day goes on, finished prayers gather in an \"Earlier today\" list — tap any of them for a timeline of who prayed and when.",
+                 soloMessage: "Finished prayers gather here — tap one to see exactly when you prayed, or make up one you missed.",
+                 soloEmptyMessage: "As the day goes on, finished prayers gather in an \"Earlier today\" list — tap any of them to see when you prayed, or to make one up."),
         TourStep(tab: 1, target: .leaderboard,
                  title: "Your circle 🏆",
-                 message: "Every prayer earns XP — the earlier in its window, the more. The leaderboard shows where everyone stands this week (it resets every Monday)."),
+                 message: "Every prayer earns XP — the earlier in its window, the more. The leaderboard shows where everyone stands this week (it resets every Monday).",
+                 soloTitle: "Start your circle 🤝",
+                 soloMessage: "Every prayer earns XP — the earlier in its window, the more. Invite a friend from this tab and you'll both land on a weekly leaderboard that resets every Monday."),
         TourStep(tab: 1, target: .challenges,
                  title: "Group challenges 🤝",
                  message: "Take these on together — like everyone logging Fajr three days straight — and the whole circle earns bonus XP. You can create your own, too.",
-                 emptyMessage: "Further down, group challenges live — take them on together for bonus XP, or create your own."),
+                 emptyMessage: "Further down, group challenges live — take them on together for bonus XP, or create your own.",
+                 soloTitle: "Challenges 🤝",
+                 soloMessage: "The moment someone joins you, group challenges open up — like everyone logging Fajr three days straight — and you all earn bonus XP together."),
         TourStep(tab: 2, target: .journey,
                  title: "Your Journey 🗺️",
                  message: "Your levels, badges, and photo memories live here — and \"How scoring works\" explains the point system whenever you want it."),
@@ -239,6 +255,8 @@ enum Tour {
 struct TutorialOverlay: View {
     let stepIndex: Int
     let frames: [String: CGRect]
+    /// v3.9: no circle yet — swaps in each step's solo copy (same steps).
+    var solo: Bool = false
     let onNext: () -> Void
     let onSkip: () -> Void
 
@@ -329,10 +347,20 @@ struct TutorialOverlay: View {
 
     private var messageText: String {
         // Target defined but not spotlightable right now → fallback copy.
-        if step.target != nil, cutoutAvailable == false, let empty = step.emptyMessage {
+        let needsFallback = step.target != nil && cutoutAvailable == false
+        if solo, let text = needsFallback ? (step.soloEmptyMessage ?? step.soloMessage)
+                                          : step.soloMessage {
+            return text
+        }
+        if needsFallback, let empty = step.emptyMessage {
             return empty
         }
         return step.message
+    }
+
+    private var titleText: String {
+        if solo, let soloTitle = step.soloTitle { return soloTitle }
+        return step.title
     }
 
     private var cutoutAvailable: Bool {
@@ -342,7 +370,7 @@ struct TutorialOverlay: View {
 
     private var cardBody: some View {
         VStack(spacing: 14) {
-            Text(step.title)
+            Text(titleText)
                 .font(Theme.sans(20, .bold))
                 .foregroundStyle(Theme.inkDeep)
                 .multilineTextAlignment(.center)

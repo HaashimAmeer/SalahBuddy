@@ -280,4 +280,53 @@ enum GameEngine {
             return total + xp(forDay: key, logs: logs, excusedDayKeys: excusedDayKeys)
         }
     }
+
+    // MARK: - Weekly recap (v3.9)
+
+    /// How many photo highlights the "Your week" card shows.
+    static let weeklyRecapPhotoCap = 6
+
+    /// v3.9: Journey's "Your week" card for one finished week. Pure — the
+    /// caller supplies the week's dayKeys (Mon-first) and today's excused set;
+    /// no clock reads here. nil when the week holds none of the user's logs,
+    /// which is how the card stays hidden for a brand-new account.
+    static func weeklyRecap(logs: [PrayerLog], weekDayKeys: [String],
+                            excusedDayKeys: Set<String> = [],
+                            photoLimit: Int = weeklyRecapPhotoCap) -> WeeklyRecap? {
+        guard let firstKey = weekDayKeys.first, let lastKey = weekDayKeys.last else { return nil }
+        let keySet = Set(weekDayKeys)
+        let weekLogs = logs.filter { keySet.contains($0.dayKey) }
+        guard !weekLogs.isEmpty else { return nil }
+
+        var totalXP = 0
+        var daysWithAllFive = 0
+        var bestDay: WeeklyRecap.BestDay?
+        for key in weekDayKeys {
+            let dayXP = xp(forDay: key, logs: weekLogs, excusedDayKeys: excusedDayKeys)
+            totalXP += dayXP
+            if isDayComplete(logs: weekLogs, dayKey: key) { daysWithAllFive += 1 }
+            if dayXP > 0, dayXP > (bestDay?.xp ?? 0) {
+                bestDay = WeeklyRecap.BestDay(dayKey: key, xp: dayXP)
+            }
+        }
+
+        // Highlights are spread evenly across the week's photos rather than
+        // clipped to the first few, so a heavy Monday can't fill the strip.
+        // v3.3: a travel-combined pair is TWO logs sharing ONE photo, so the same
+        // filename can land here twice — de-dupe (first occurrence wins) before
+        // the cap, or the strip repeats a photo and ForEach gets duplicate ids.
+        var seenPhotos = Set<String>()
+        let allPhotos = weekLogs.sorted { $0.loggedAt < $1.loggedAt }
+            .compactMap(\.photoFilename)
+            .filter { seenPhotos.insert($0).inserted }
+        let limit = max(0, photoLimit)
+        let photos = allPhotos.count <= limit
+            ? allPhotos
+            : (0..<limit).map { allPhotos[$0 * allPhotos.count / limit] }
+
+        return WeeklyRecap(weekStartDayKey: firstKey, weekEndDayKey: lastKey,
+                           totalXP: totalXP, prayersLogged: weekLogs.count,
+                           daysWithAllFive: daysWithAllFive, bestDay: bestDay,
+                           photoFilenames: photos)
+    }
 }

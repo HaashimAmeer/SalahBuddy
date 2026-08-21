@@ -15,6 +15,14 @@ struct PhotoSquare: View {
     /// location pill, so a 2×2 fills the card edge-to-edge (the outer card does
     /// the rounding). Other surfaces keep the rounded standalone tile.
     var flush: Bool = false
+    /// v3.9: overlay metrics (name, timestamp, tier dot, state glyph) normally
+    /// scale with `size`. The solo Today tile is a ~2× hero, which would make
+    /// its caption larger than the block title — it passes a smaller `typeSize`
+    /// to keep the type near grid scale. Defaults to `size` (unchanged).
+    var typeSize: CGFloat? = nil
+
+    /// The metric the overlays scale off (layout still uses `size`).
+    private var t: CGFloat { typeSize ?? size }
 
     var body: some View {
         content
@@ -50,9 +58,9 @@ struct PhotoSquare: View {
                 .strokeBorder(
                     Theme.inkMuted.opacity(0.45),
                     style: StrokeStyle(lineWidth: 1.5, dash: [6, 5]))
-            VStack(spacing: size * 0.05) {
+            VStack(spacing: t * 0.05) {
                 Text(entry.member.emoji)
-                    .font(.system(size: size * 0.26))
+                    .font(.system(size: t * 0.26))
                 Text(entry.member.name)
                     .font(Theme.sans(nameFontSize, .semibold))
                     .foregroundStyle(Theme.inkMuted)
@@ -98,23 +106,24 @@ struct PhotoSquare: View {
                         .minimumScaleFactor(0.7)
                     Spacer(minLength: 2)
                     Text(Self.timeFormatter.string(from: at))
-                        .font(Theme.sans(max(8, size * 0.075), .semibold))
+                        .font(Theme.sans(max(8, t * 0.075), .semibold))
                         .opacity(0.9)
                         .lineLimit(1)
                         .minimumScaleFactor(0.7)
                 }
             }
             .foregroundStyle(.white)
-            .padding(.horizontal, size * 0.07)
-            .padding(.bottom, size * 0.055)
+            .padding(.horizontal, t * 0.07)
+            .padding(.bottom, t * 0.055)
         }
         .overlay(alignment: .topTrailing) {
-            // Tier dot — §2 grid color language.
+            // Tier dot — §2 grid color language. v3.9: the ring scales too, so
+            // the hero tile keeps a crisp edge instead of a hairline.
             Circle()
                 .fill(Theme.color(for: .inWindow(tier)))
-                .frame(width: size * 0.11, height: size * 0.11)
-                .overlay(Circle().stroke(.white, lineWidth: 1.5))
-                .padding(size * 0.06)
+                .frame(width: t * 0.11, height: t * 0.11)
+                .overlay(Circle().stroke(.white, lineWidth: max(1.5, t * 0.009)))
+                .padding(t * 0.06)
         }
     }
 
@@ -123,11 +132,11 @@ struct PhotoSquare: View {
     private func qadaTile(at: Date) -> some View {
         ZStack {
             Theme.qadaBlue.opacity(0.16)
-            VStack(spacing: size * 0.045) {
+            VStack(spacing: t * 0.045) {
                 Text(entry.member.emoji)
-                    .font(.system(size: size * 0.20))
+                    .font(.system(size: t * 0.20))
                 Image(systemName: "arrow.uturn.backward.circle.fill")
-                    .font(.system(size: size * 0.16, weight: .semibold))
+                    .font(.system(size: t * 0.16, weight: .semibold))
                     .foregroundStyle(Theme.qadaBlue)
                 Text("Made up")
                     .font(Theme.sans(nameFontSize, .bold))
@@ -144,9 +153,9 @@ struct PhotoSquare: View {
     private var missedTile: some View {
         ZStack {
             Theme.mist.opacity(0.4)
-            VStack(spacing: size * 0.05) {
+            VStack(spacing: t * 0.05) {
                 Text(entry.member.emoji)
-                    .font(.system(size: size * 0.22))
+                    .font(.system(size: t * 0.22))
                     .saturation(0)
                     .opacity(0.55)
                 Text(entry.member.name)
@@ -163,9 +172,9 @@ struct PhotoSquare: View {
     private var excusedTile: some View {
         ZStack {
             Theme.lilac.opacity(0.20)
-            VStack(spacing: size * 0.05) {
+            VStack(spacing: t * 0.05) {
                 Image(systemName: "moon.fill")
-                    .font(.system(size: size * 0.22, weight: .semibold))
+                    .font(.system(size: t * 0.22, weight: .semibold))
                     .foregroundStyle(Theme.lilac)
                 Text(entry.member.name)
                     .font(Theme.sans(nameFontSize, .semibold))
@@ -179,7 +188,7 @@ struct PhotoSquare: View {
                 .strokeBorder(Theme.lilac.opacity(0.35), lineWidth: 1.5))
     }
 
-    private var nameFontSize: CGFloat { max(9, size * 0.085) }
+    private var nameFontSize: CGFloat { max(9, t * 0.085) }
 
     private static let timeFormatter: DateFormatter = {
         let f = DateFormatter()

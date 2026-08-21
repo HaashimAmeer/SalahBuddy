@@ -68,6 +68,15 @@ enum ChallengeEngine {
         let hardestPrayer: Prayer?
         let completions: [String: Date]
         var customChallenges: [CustomChallenge] = []   // v3.2: circle-made group challenges
+        /// v3.9: false when the circle is empty (solo). Group challenges are
+        /// then neither shown nor awarded — with only you in `memberWeekLogs`
+        /// their "everyone did it" tests are trivially true, which used to
+        /// hand out isha3/circleperfect/race300 XP for praying alone.
+        var hasCircle: Bool = true
+        /// v3.9: true for the rest of the week after the circle shrank. Group
+        /// progress still renders — only the payout is withheld (see
+        /// `newlyCompleted`).
+        var groupAwardsFrozen: Bool = false
     }
 
     /// v3.2: Race target escalates each time the race is won — first goal is
@@ -78,11 +87,14 @@ enum ChallengeEngine {
 
     /// Hard-coded definitions adjusted for context: race target escalates,
     /// custom circle challenges are appended as group definitions.
+    /// v3.9: with no circle, every group challenge drops out entirely — both
+    /// `progressList` and `newlyCompleted` run through here, so solo users
+    /// neither see nor earn them.
     static func activeDefinitions(_ ctx: Context) -> [Definition] {
         let target = raceTarget(completions: ctx.completions)
         // circleperfect's target is the live circle size (every member, incl. you).
         let circleSize = max(1, ctx.memberWeekLogs.count)
-        var defs = definitions.map { def -> Definition in
+        var defs = definitions.filter { ctx.hasCircle || !$0.isGroup }.map { def -> Definition in
             switch def.id {
             case "race300":
                 return Definition(id: def.id, title: "Race to \(target)",
@@ -95,9 +107,11 @@ enum ChallengeEngine {
                 return def
             }
         }
-        defs += ctx.customChallenges.map { c in
-            Definition(id: c.id, title: c.title, detail: c.detail,
-                       emoji: "🤝", isGroup: true, target: c.days, rewardXP: c.rewardXP)
+        if ctx.hasCircle {
+            defs += ctx.customChallenges.map { c in
+                Definition(id: c.id, title: c.title, detail: c.detail,
+                           emoji: "🤝", isGroup: true, target: c.days, rewardXP: c.rewardXP)
+            }
         }
         return defs
     }
@@ -193,6 +207,10 @@ enum ChallengeEngine {
     static func newlyCompleted(_ ctx: Context) -> [(key: String, definition: Definition)] {
         activeDefinitions(ctx).compactMap { def in
             if def.id == "goal3", ctx.hardestPrayer == nil { return nil }
+            // v3.9: a circle that shrank this week can't pay out group challenges —
+            // removing members collapses every "everyone did it" target, and a solo
+            // account can re-invite them for free the moment the XP lands.
+            if def.isGroup, ctx.groupAwardsFrozen { return nil }
             let key = completionKey(for: def, weekKey: ctx.weekKey)
             guard ctx.completions[key] == nil, isCompletedNow(def, ctx: ctx) else { return nil }
             return (key, def)

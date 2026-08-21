@@ -61,12 +61,32 @@ enum BuddySimulator {
     /// a day is an intimate thing; past ~8 it stops feeling like a circle.
     static let maxFriends = 8
 
-    /// The circle as the user shaped it: base buddies minus removals, plus
-    /// accepted invites from the pool.
-    static func activeBuddies(removed: [String], invited: [String]) -> [Buddy] {
+    /// v3.9: every demo friend that can ever be in a circle — the base 8 plus
+    /// the invitable extras. Solo accounts build their circle out of this whole
+    /// roster, one invite at a time.
+    static let roster: [Buddy] = buddies + invitablePool
+
+    static func buddy(named name: String) -> Buddy? {
+        roster.first { $0.name == name }
+    }
+
+    /// The circle as the user shaped it.
+    ///
+    /// - `startedSolo` (v3.9): the circle starts EMPTY, so it's exactly the
+    ///   invites that were accepted, resolved against the full roster.
+    /// - Legacy accounts keep the v3.6 shape: the base 8 minus removals, plus
+    ///   accepted invites from the pool.
+    ///
+    /// Either way the result is roster-ordered and capped by `maxFriends` at
+    /// the invite site (`AppState.acceptInvite`).
+    static func activeBuddies(removed: [String], invited: [String], startedSolo: Bool) -> [Buddy] {
         let removedSet = Set(removed)
+        let invitedSet = Set(invited)
+        if startedSolo {
+            return roster.filter { invitedSet.contains($0.name) && !removedSet.contains($0.name) }
+        }
         let base = buddies.filter { !removedSet.contains($0.name) }
-        let extras = invitablePool.filter { invited.contains($0.name) && !removedSet.contains($0.name) }
+        let extras = invitablePool.filter { invitedSet.contains($0.name) && !removedSet.contains($0.name) }
         return base + extras
     }
 

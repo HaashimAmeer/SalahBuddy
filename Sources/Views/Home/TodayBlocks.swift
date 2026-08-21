@@ -44,6 +44,7 @@ struct CurrentPrayerBlock: View {
 
             LiveCircleGrid(entries: entries,
                            showCTA: isWindowOpen && !excusedForBlockDay,
+                           isSolo: state.isSoloMode,
                            onPost: onPost,
                            onUndoMine: { undoMine() },
                            onTapEntry: { onEnlarge($0) })
@@ -168,9 +169,13 @@ struct CurrentPrayerBlock: View {
                 }
                 .foregroundStyle(Theme.lilac)
 
+                // v3.9: no circle yet → drop the "never shown to your circle"
+                // reassurance; there's nobody to be shown to.
                 Text(state.breakReason == "period"
                      ? "These prayers are waived — nothing to make up. Stay connected with a little dhikr; those points are just for you."
-                     : "Stay connected with a little dhikr — those points are just for you, never shown to your circle.")
+                     : state.isSoloMode
+                       ? "Stay connected with a little dhikr — those points are just for you."
+                       : "Stay connected with a little dhikr — those points are just for you, never shown to your circle.")
                     .font(Theme.sans(12.5, .semibold))
                     .foregroundStyle(Theme.inkMuted)
                     .fixedSize(horizontal: false, vertical: true)
@@ -274,6 +279,9 @@ struct CurrentPrayerBlock: View {
 struct LiveCircleGrid: View {
     let entries: [GridEntry]
     let showCTA: Bool
+    /// v3.9: no circle yet — there's only your square, so it takes the whole
+    /// width instead of sitting in a half-width cell with dead space beside it.
+    var isSolo: Bool = false
     let onPost: () -> Void
     let onUndoMine: () -> Void
     let onTapEntry: (GridEntry) -> Void
@@ -286,7 +294,9 @@ struct LiveCircleGrid: View {
 
     var body: some View {
         Group {
-            if displayEntries.count <= perPage {
+            if isSolo {
+                soloTile
+            } else if displayEntries.count <= perPage {
                 gridPage(displayEntries)
             } else {
                 // v3.3: page the circle 4 at a time (2×2) so the Today screen
@@ -330,8 +340,29 @@ struct LiveCircleGrid: View {
     /// Square edge from the measured content width (two flush columns + one
     /// hairline divider).
     private var square: CGFloat {
-        let w = width > 0 ? width : UIScreen.main.bounds.width - 64
-        return max(60, (w - line) / 2)
+        max(60, (contentWidth - line) / 2)
+    }
+
+    /// Measured width, with a sensible pre-measurement fallback (screen minus
+    /// the Today padding + card padding).
+    private var contentWidth: CGFloat {
+        width > 0 ? width : UIScreen.main.bounds.width - 64
+    }
+
+    /// v3.9 (solo): your one tile, full width. Same flush treatment as the
+    /// grid — the cell itself is un-rounded and the outer shape does the
+    /// rounding — just a single hero square instead of a 2×2. On a break your
+    /// (excused) square is filtered out entirely, so this renders nothing and
+    /// the break card carries the block.
+    @ViewBuilder
+    private var soloTile: some View {
+        if let mine = displayEntries.first {
+            cell(mine)
+                .frame(width: contentWidth, height: contentWidth)
+                .background(Theme.mist.opacity(0.55))
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
     /// v3.8 (design session): one page is a flush 2×2 — square cells, hairline
@@ -416,33 +447,37 @@ struct LiveCircleGrid: View {
 
     private func sizedSquare(_ entry: GridEntry) -> some View {
         GeometryReader { geo in
-            PhotoSquare(entry: entry, size: geo.size.width, flush: true)
+            // v3.9: solo the tile is full-width (~2× a grid cell). Scale the
+            // overlays like ctaSquare does (~1.4×), not linearly with the tile.
+            PhotoSquare(entry: entry, size: geo.size.width, flush: true,
+                        typeSize: isSolo ? geo.size.width * 0.7 : nil)
         }
         .contentShape(Rectangle())
     }
 
     /// Your square as the camera CTA — flush soft-green tile with a dashed
     /// inset so it still reads as "tap me" inside the edge-to-edge grid.
+    /// v3.9: solo it's a full-width hero, so the icon and label scale with it.
     private var ctaSquare: some View {
         Button {
             UIImpactFeedbackGenerator(style: .medium).impactOccurred()
             onPost()
         } label: {
-            VStack(spacing: 8) {
+            VStack(spacing: isSolo ? 12 : 8) {
                 Image(systemName: "camera.fill")
-                    .font(.system(size: 26, weight: .semibold))
+                    .font(.system(size: isSolo ? 40 : 26, weight: .semibold))
                     .foregroundStyle(Theme.green)
                 Text("Tap to post 📸")
-                    .font(Theme.sans(13, .bold))
+                    .font(Theme.sans(isSolo ? 17 : 13, .bold))
                     .foregroundStyle(Theme.inkDeep)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Theme.greenSoft.opacity(0.6))
             .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                RoundedRectangle(cornerRadius: isSolo ? 18 : 12, style: .continuous)
                     .strokeBorder(Theme.green.opacity(0.7),
                                   style: StrokeStyle(lineWidth: 2, dash: [7, 5]))
-                    .padding(8)
+                    .padding(isSolo ? 12 : 8)
             )
             .contentShape(Rectangle())
         }
@@ -751,8 +786,11 @@ struct PrayerTimeline: View {
                          dotColor: Theme.lilac)
             }
             notLoggedRow
+            yourNotLoggedRow
             if posted.isEmpty && madeUp.isEmpty && excused.isEmpty && notLogged.isEmpty {
-                Text("No one's logged this one yet.")
+                Text(state.isSoloMode
+                     ? "You haven't logged this one yet."
+                     : "No one's logged this one yet.")
                     .font(Theme.sans(12, .semibold))
                     .foregroundStyle(Theme.inkMuted.opacity(0.7))
             }
@@ -857,6 +895,58 @@ struct PrayerTimeline: View {
             }
             .padding(.top, 10)
         }
+    }
+
+    /// v3.9: `notLoggedRow` is friends-only (you can't nudge yourself), so with
+    /// no circle an unlogged prayer expanded to an empty body. Solo, your own
+    /// row stands in — with a one-tap make-up when the window has passed.
+    @ViewBuilder
+    private var yourNotLoggedRow: some View {
+        if state.isSoloMode, let mine = notLogged.first(where: { $0.member.isYou }) {
+            HStack(spacing: 10) {
+                Color.clear.frame(width: 56, height: 1)
+                Circle().fill(Theme.mist.opacity(0.7)).frame(width: 8, height: 8)
+                Text(mine.member.emoji)
+                    .font(.system(size: 14))
+                    .grayscale(0.9)
+                    .opacity(0.75)
+                Text("You")
+                    .font(Theme.sans(13, .bold))
+                    .foregroundStyle(Theme.inkDeep)
+                Spacer(minLength: 8)
+                if canMakeUp(mine) {
+                    makeUpButton
+                } else {
+                    Text("Not logged")
+                        .font(Theme.sans(11.5, .bold))
+                        .foregroundStyle(Theme.inkMuted)
+                }
+            }
+            .padding(.top, 10)
+        }
+    }
+
+    /// Only for today's already-passed windows — the same candidates the
+    /// "Make up" section offers, so the two can't disagree.
+    private func canMakeUp(_ mine: GridEntry) -> Bool {
+        mine.state == .missed && dayKey == state.todayKey
+            && state.makeUpPrayers.contains(prayer)
+            && !state.isExcused(prayer: prayer, dayKey: dayKey)
+    }
+
+    private var makeUpButton: some View {
+        Button {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            withAnimation(Theme.spring) { state.logQada(prayer) }
+        } label: {
+            Text("Make up +\(LogTier.qada.xp) XP")
+                .font(Theme.sans(12, .bold))
+                .foregroundStyle(Theme.qadaBlue)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Capsule().fill(Theme.qadaBlue.opacity(0.12)))
+        }
+        .buttonStyle(.plain)
     }
 
     private func nudgeAllButton(_ members: [CircleMember]) -> some View {

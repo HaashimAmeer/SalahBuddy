@@ -31,6 +31,9 @@ struct StatsView: View {
                         }
                         .tutorialTarget(.journey)
                         weeklyXPCard
+                        // v3.9: last week's payoff sits right under the live
+                        // 7-day chart — recent past, then all-time below.
+                        weeklyRecapCard
                         // v3.8: challenges surfaced above memories (design
                         // session) — they were buried at the bottom.
                         challengesCard
@@ -250,39 +253,195 @@ struct StatsView: View {
 
     private var weeklyXPCard: some View {
         let recaps = state.recaps(daysBack: 7)
+        // v3.9: a brand-new (or long-idle) account used to get bare axes with
+        // zero-height bars — say something friendly instead.
+        let isEmpty = recaps.allSatisfy { $0.loggedCount == 0 }
         return VStack(alignment: .leading, spacing: 12) {
             sectionTitle("Last 7 days", symbol: "bolt.fill", color: Theme.gold)
 
-            Chart(recaps, id: \.dayKey) { recap in
-                BarMark(
-                    x: .value("Day", shortWeekday(recap.date)),
-                    y: .value("XP", recap.xp)
-                )
-                .foregroundStyle(recap.dayKey == todayKey
-                                 ? Theme.green.gradient
-                                 : Theme.gold.gradient)
-                .cornerRadius(6)
-            }
-            .chartYAxis {
-                AxisMarks(position: .leading) { _ in
-                    AxisGridLine().foregroundStyle(Theme.inkMuted.opacity(0.2))
-                    AxisValueLabel()
-                        .font(Theme.sans(11, .semibold))
-                        .foregroundStyle(Theme.inkMuted)
+            if isEmpty {
+                weeklyXPEmptyState
+            } else {
+                Chart(recaps, id: \.dayKey) { recap in
+                    BarMark(
+                        x: .value("Day", shortWeekday(recap.date)),
+                        y: .value("XP", recap.xp)
+                    )
+                    .foregroundStyle(recap.dayKey == todayKey
+                                     ? Theme.green.gradient
+                                     : Theme.gold.gradient)
+                    .cornerRadius(6)
                 }
-            }
-            .chartXAxis {
-                AxisMarks { _ in
-                    AxisValueLabel()
-                        .font(Theme.sans(11, .bold))
-                        .foregroundStyle(Theme.inkMuted)
+                .chartYAxis {
+                    AxisMarks(position: .leading) { _ in
+                        AxisGridLine().foregroundStyle(Theme.inkMuted.opacity(0.2))
+                        AxisValueLabel()
+                            .font(Theme.sans(11, .semibold))
+                            .foregroundStyle(Theme.inkMuted)
+                    }
                 }
+                .chartXAxis {
+                    AxisMarks { _ in
+                        AxisValueLabel()
+                            .font(Theme.sans(11, .bold))
+                            .foregroundStyle(Theme.inkMuted)
+                    }
+                }
+                .frame(height: 160)
             }
-            .frame(height: 160)
         }
         .padding(18)
         .frame(maxWidth: .infinity)
         .cardStyle()
+    }
+
+    /// Same height as the chart so the card doesn't jump on the first log.
+    private var weeklyXPEmptyState: some View {
+        VStack(spacing: 7) {
+            Image(systemName: "chart.bar.fill")
+                .font(.system(size: 24, weight: .bold))
+                .foregroundStyle(Theme.gold.opacity(0.6))
+            Text("Your week will fill in here")
+                .font(Theme.sans(15, .bold))
+                .foregroundStyle(Theme.inkDeep)
+            Text("Log your first prayer and this chart starts growing.")
+                .font(Theme.sans(13, .semibold))
+                .foregroundStyle(Theme.inkMuted)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, 14)
+        .frame(maxWidth: .infinity)
+        .frame(height: 160)
+        .background(Theme.bg, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    // MARK: - "Your week" recap (v3.9)
+
+    /// A small victory lap for the most recent COMPLETED Mon–Sun week — the
+    /// BeReal-style payoff for a week of posts. Personal only (no buddy data),
+    /// so it reads the same solo or in a circle, and it stays hidden entirely
+    /// until that week holds at least one of your logs.
+    @ViewBuilder
+    private var weeklyRecapCard: some View {
+        if let recap = state.lastCompletedWeekRecap() {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(spacing: 8) {
+                    sectionTitle("Your week", symbol: "trophy.fill", color: Theme.gold)
+                    Text(weekRangeLabel(recap))
+                        .font(Theme.sans(12, .bold))
+                        .foregroundStyle(Theme.inkMuted)
+                }
+
+                // The XP hero — the one number the week is remembered by.
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(alignment: .firstTextBaseline, spacing: 5) {
+                            Text("\(recap.totalXP)")
+                                .font(Theme.sans(32, .heavy))
+                                .foregroundStyle(Theme.inkDeep)
+                            Text("XP")
+                                .font(Theme.sans(14, .heavy))
+                                .foregroundStyle(Theme.gold)
+                        }
+                        Text(weekPraise(recap))
+                            .font(Theme.sans(12.5, .semibold))
+                            .foregroundStyle(Theme.inkMuted)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 8)
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 24, weight: .semibold))
+                        .foregroundStyle(Theme.gold.opacity(0.75))
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+                .frame(maxWidth: .infinity)
+                .background(
+                    LinearGradient(colors: [Theme.gold.opacity(0.20), Theme.greenSoft.opacity(0.5)],
+                                   startPoint: .leading, endPoint: .trailing),
+                    in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+                )
+
+                if recap.photoFilenames.isEmpty {
+                    Text("No photos that week — snap one and next week's recap gets a highlight reel.")
+                        .font(Theme.sans(12.5, .semibold))
+                        .foregroundStyle(Theme.inkMuted)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(recap.photoFilenames, id: \.self) { filename in
+                                PhotoThumb(filename: filename, pixelSize: 320)
+                                    .frame(width: 96, height: 96)
+                                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            }
+                        }
+                        .padding(.vertical, 1)
+                    }
+                }
+
+                HStack(spacing: 10) {
+                    recapTile(symbol: "star.fill", color: Theme.gold,
+                              value: "\(recap.daysWithAllFive)", label: "Days all 5")
+                    recapTile(symbol: "hands.sparkles.fill", color: Theme.qadaBlue,
+                              value: "\(recap.prayersLogged)", label: "Prayers")
+                    if let best = recap.bestDay {
+                        recapTile(symbol: "bolt.fill", color: Theme.green,
+                                  value: bestDayLabel(best), label: "Best · \(best.xp) XP")
+                    }
+                }
+            }
+            .padding(18)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .cardStyle()
+        }
+    }
+
+    private func recapTile(symbol: String, color: Color, value: String, label: String) -> some View {
+        VStack(spacing: 4) {
+            Image(systemName: symbol)
+                .font(.system(size: 15, weight: .bold))
+                .foregroundStyle(color)
+            Text(value)
+                .font(Theme.sans(20, .heavy))
+                .foregroundStyle(Theme.inkDeep)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+            Text(label)
+                .font(Theme.sans(11, .semibold))
+                .foregroundStyle(Theme.inkMuted)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 10)
+        .background(Theme.bg, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    /// "Aug 11 – 17", or "Aug 28 – Sep 3" when the week straddles a month.
+    private func weekRangeLabel(_ recap: WeeklyRecap) -> String {
+        guard let start = AppClock.date(fromDayKey: recap.weekStartDayKey),
+              let end = AppClock.date(fromDayKey: recap.weekEndDayKey) else { return "" }
+        let sameMonth = Calendar.current.isDate(start, equalTo: end, toGranularity: .month)
+        let endText = sameMonth
+            ? end.formatted(.dateTime.day())
+            : end.formatted(.dateTime.month(.abbreviated).day())
+        return "\(start.formatted(.dateTime.month(.abbreviated).day())) – \(endText)"
+    }
+
+    private func bestDayLabel(_ best: WeeklyRecap.BestDay) -> String {
+        guard let date = AppClock.date(fromDayKey: best.dayKey) else { return "—" }
+        return shortWeekday(date)
+    }
+
+    private func weekPraise(_ recap: WeeklyRecap) -> String {
+        switch recap.daysWithAllFive {
+        case 7: return "A perfect seven — masha'Allah 🌟"
+        case 5, 6: return "Almost every day complete. Strong week 💪"
+        case 1...4: return "\(recap.daysWithAllFive) full days in the book ✨"
+        default: return "Every prayer counted — let's build on it 🌱"
+        }
     }
 
     private var todayKey: String { AppClock.dayKey(for: AppClock.now) }
@@ -697,13 +856,44 @@ private struct DayPhotoSheet: View {
             .background(Capsule().fill(color.opacity(0.18)))
     }
 
+    /// v3.9: photo-less days used to open with a silent empty strip — since
+    /// v3.6 ANY past day opens here, so most of them have no photos at all.
+    @ViewBuilder
     private var photoStrip: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
+        if summary.photoFilenames.isEmpty {
             HStack(spacing: 10) {
-                ForEach(summary.photoFilenames, id: \.self) { filename in
-                    PhotoThumb(filename: filename, pixelSize: 640)
-                        .frame(width: 190, height: 190)
-                        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                Image(systemName: "camera.fill")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(Theme.green.opacity(0.55))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("No photos from this day")
+                        .font(Theme.sans(14, .bold))
+                        .foregroundStyle(Theme.inkDeep)
+                    Text("Prayers you post with the camera show up here.")
+                        .font(Theme.sans(12, .semibold))
+                        .foregroundStyle(Theme.inkMuted)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(Theme.surface)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .strokeBorder(Theme.greenSoft,
+                                          style: StrokeStyle(lineWidth: 2, dash: [6, 5]))
+                    )
+            )
+        } else {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    ForEach(summary.photoFilenames, id: \.self) { filename in
+                        PhotoThumb(filename: filename, pixelSize: 640)
+                            .frame(width: 190, height: 190)
+                            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    }
                 }
             }
         }

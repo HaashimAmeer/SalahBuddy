@@ -190,6 +190,14 @@ struct UserProfile: Codable {
     var pendingNewMemberName: String?          // shows the "X just joined!" celebration once
     var partialExcuseStart: [String: Prayer]   // dayKey → first EXCUSED prayer that day (break started mid-day)
     var partialExcuseEnd: [String: Prayer]     // dayKey → first prayer that COUNTS again (resumed mid-day)
+    /// v3.9 (solo-first): this account onboarded as an INDIVIDUAL — the circle
+    /// starts empty and is built one invite at a time. False for every profile
+    /// saved before v3.9, so existing users keep the 8-buddy demo circle.
+    var startedSolo: Bool
+    /// v3.9: weekKey whose group awards a mid-week removal voided. Shrinking the
+    /// circle makes every group target easier, and for solo accounts the removal
+    /// is free to undo — so a removal costs this week's group challenges.
+    var groupAwardsFrozenWeek: String?
 
     init(name: String, totalXP: Int, streak: Int, longestStreak: Int, streakFreezes: Int,
          lastStreakDayKey: String?, lastReconciledDayKey: String?, earnedBadges: [String: Date],
@@ -200,7 +208,8 @@ struct UserProfile: Codable {
          recoveryXPByDay: [String: Int] = [:], deedsByDay: [String: [String]] = [:],
          avatarFilename: String? = nil, removedBuddyNames: [String] = [],
          invitedBuddyNames: [String] = [], pendingNewMemberName: String? = nil,
-         partialExcuseStart: [String: Prayer] = [:], partialExcuseEnd: [String: Prayer] = [:]) {
+         partialExcuseStart: [String: Prayer] = [:], partialExcuseEnd: [String: Prayer] = [:],
+         startedSolo: Bool = false, groupAwardsFrozenWeek: String? = nil) {
         self.name = name
         self.totalXP = totalXP
         self.streak = streak
@@ -225,6 +234,8 @@ struct UserProfile: Codable {
         self.pendingNewMemberName = pendingNewMemberName
         self.partialExcuseStart = partialExcuseStart
         self.partialExcuseEnd = partialExcuseEnd
+        self.startedSolo = startedSolo
+        self.groupAwardsFrozenWeek = groupAwardsFrozenWeek
     }
 
     // Migration-safe decoding: v1 profiles lack the v2 fields.
@@ -236,6 +247,7 @@ struct UserProfile: Codable {
         case recoveryXPByDay, deedsByDay
         case avatarFilename, removedBuddyNames, invitedBuddyNames, pendingNewMemberName
         case partialExcuseStart, partialExcuseEnd
+        case startedSolo, groupAwardsFrozenWeek
     }
 
     init(from decoder: Decoder) throws {
@@ -264,12 +276,18 @@ struct UserProfile: Codable {
         pendingNewMemberName = (try? c.decodeIfPresent(String.self, forKey: .pendingNewMemberName)) ?? nil
         partialExcuseStart = (try? c.decodeIfPresent([String: Prayer].self, forKey: .partialExcuseStart)) ?? [:]
         partialExcuseEnd = (try? c.decodeIfPresent([String: Prayer].self, forKey: .partialExcuseEnd)) ?? [:]
+        // v3.9: absent → false, so a pre-v3.9 save keeps its 8-buddy circle.
+        startedSolo = (try? c.decodeIfPresent(Bool.self, forKey: .startedSolo)) ?? false
+        groupAwardsFrozenWeek = (try? c.decodeIfPresent(String.self, forKey: .groupAwardsFrozenWeek)) ?? nil
     }
 
+    /// A brand-new account. v3.9: everyone starts solo — onboarding also sets
+    /// the flag explicitly, so a new profile is safe either way.
     static func fresh(now: Date) -> UserProfile {
         UserProfile(name: "", totalXP: 0, streak: 0, longestStreak: 0,
                     streakFreezes: 0, lastStreakDayKey: nil, lastReconciledDayKey: nil,
-                    earnedBadges: [:], perfectDayCount: 0, joinedAt: now)
+                    earnedBadges: [:], perfectDayCount: 0, joinedAt: now,
+                    startedSolo: true)
     }
 }
 
@@ -572,4 +590,31 @@ struct DayPhotoSummary: Identifiable {
     let date: Date
     let photoFilenames: [String]
     let recap: DayRecap
+}
+
+// MARK: - Weekly recap (v3.9)
+
+/// Journey's "Your week" card for the most recent COMPLETED Mon–Sun week.
+/// Personal only — no buddy data, so it reads the same solo or in a circle.
+/// Built by `GameEngine.weeklyRecap` (pure) from `AppState.lastCompletedWeekRecap()`.
+struct WeeklyRecap: Equatable {
+    /// Monday of the recapped week, "yyyy-MM-dd".
+    let weekStartDayKey: String
+    /// Sunday of the recapped week, "yyyy-MM-dd".
+    let weekEndDayKey: String
+    let totalXP: Int
+    /// Prayers logged that week, any tier (qada included).
+    let prayersLogged: Int
+    /// Days all 5 were logged (any tier) — the same rule the streak uses.
+    let daysWithAllFive: Int
+    /// Highest-XP day of the week; nil when the week earned nothing.
+    let bestDay: BestDay?
+    /// Photo highlights, chronological, spread across the week and capped at
+    /// `GameEngine.weeklyRecapPhotoCap`. May be empty (a photo-less week).
+    let photoFilenames: [String]
+
+    struct BestDay: Equatable {
+        let dayKey: String
+        let xp: Int
+    }
 }

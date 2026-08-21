@@ -544,27 +544,43 @@ final class AppState: ObservableObject {
     // MARK: - Circle (v2)
 
     /// v3.6: the circle as the user shaped it (removals + accepted invites).
+    /// v3.9: a solo account's circle is its invites and nothing else.
     var activeBuddies: [BuddySimulator.Buddy] {
         BuddySimulator.activeBuddies(removed: profile.removedBuddyNames,
-                                     invited: profile.invitedBuddyNames)
+                                     invited: profile.invitedBuddyNames,
+                                     startedSolo: profile.startedSolo)
     }
 
-    /// Pool entries that can still accept an invite.
+    /// v3.9: the single source of truth for solo presentation everywhere.
+    /// DERIVED from the live circle, so it also covers the legacy path where
+    /// someone removes all 8 members.
+    var isSoloMode: Bool { activeBuddies.isEmpty }
+
+    /// Friends who can still accept an invite. An EMPTY circle (`isSoloMode` —
+    /// a fresh solo account, or a legacy one whose members were all removed)
+    /// rebuilds from the FULL roster; an established legacy circle draws from
+    /// the extra pool plus anyone it removed, so a removal is always
+    /// reversible — `acceptInvite` clears the name as it re-adds them.
     var invitableBuddies: [BuddySimulator.Buddy] {
-        BuddySimulator.invitablePool.filter { buddy in
-            !profile.invitedBuddyNames.contains(buddy.name)
-                && !profile.removedBuddyNames.contains(buddy.name)
+        let active = Set(activeBuddies.map(\.name))
+        let solo = isSoloMode
+        return BuddySimulator.roster.filter { buddy in
+            guard !active.contains(buddy.name),
+                  !profile.invitedBuddyNames.contains(buddy.name) else { return false }
+            return solo
+                || profile.removedBuddyNames.contains(buddy.name)
+                || BuddySimulator.invitablePool.contains { $0.name == buddy.name }
         }
     }
 
     var circleIsFull: Bool { activeBuddies.count >= BuddySimulator.maxFriends }
 
     /// Demo invite acceptance: adds the friend and queues the one-time
-    /// "just joined" celebration.
+    /// "just joined" celebration. Their simulated week backfills immediately —
+    /// that's the deterministic derivation doing its job, not a bug.
     func acceptInvite(name: String) {
         guard !circleIsFull,
-              BuddySimulator.invitablePool.contains(where: { $0.name == name }),
-              !profile.invitedBuddyNames.contains(name) else { return }
+              invitableBuddies.contains(where: { $0.name == name }) else { return }
         profile.invitedBuddyNames.append(name)
         profile.removedBuddyNames.removeAll { $0 == name }
         profile.pendingNewMemberName = name
@@ -573,11 +589,20 @@ final class AppState: ObservableObject {
     }
 
     func removeMember(name: String) {
-        if profile.invitedBuddyNames.contains(name) {
-            profile.invitedBuddyNames.removeAll { $0 == name }
-        } else {
-            guard !profile.removedBuddyNames.contains(name) else { return }
+        let before = activeBuddies.count
+        profile.invitedBuddyNames.removeAll { $0 == name }
+        // A BASE buddy invited back into a legacy circle sits in both lists —
+        // dropping the invite alone leaves them in the base 8 — so anyone still
+        // standing after that gets recorded as removed.
+        if activeBuddies.contains(where: { $0.name == name }),
+           !profile.removedBuddyNames.contains(name) {
             profile.removedBuddyNames.append(name)
+        }
+        // v3.9: a smaller circle makes every group target easier, and a removal
+        // is free to undo (one tap re-invites, and their week backfills), so a
+        // shrink voids THIS week's group awards. Self-expires on Monday.
+        if activeBuddies.count < before {
+            profile.groupAwardsFrozenWeek = BuddySimulator.weekKey(for: AppClock.now)
         }
         persistProfile()
         objectWillChange.send()
@@ -845,7 +870,10 @@ final class AppState: ObservableObject {
                                        weekKey: BuddySimulator.weekKey(for: now),
                                        hardestPrayer: settings.hardestPrayer,
                                        completions: profile.challengeCompletions,
-                                       customChallenges: profile.customChallenges)
+                                       customChallenges: profile.customChallenges,
+                                       hasCircle: !isSoloMode,
+                                       groupAwardsFrozen: profile.groupAwardsFrozenWeek
+                                           == BuddySimulator.weekKey(for: now))
     }
 
     // MARK: - Custom group challenges (v3.2)
@@ -891,7 +919,7 @@ final class AppState: ObservableObject {
         while day < interval.end {
             let key = AppClock.dayKey(for: day)
             let dayLogs = logs.filter { $0.dayKey == key }.sorted { $0.loggedAt < $1.loggedAt }
-            let photos = dayLogs.compactMap(\.photoFilename)
+            let photos = Self.distinctPhotos(of: dayLogs)
             if !photos.isEmpty {
                 result.append(DayPhotoSummary(id: key, date: day,
                                               photoFilenames: photos,
@@ -908,8 +936,16 @@ final class AppState: ObservableObject {
     func daySummary(dayKey: String, date: Date) -> DayPhotoSummary {
         let dayLogs = logs.filter { $0.dayKey == dayKey }.sorted { $0.loggedAt < $1.loggedAt }
         return DayPhotoSummary(id: dayKey, date: date,
-                               photoFilenames: dayLogs.compactMap(\.photoFilename),
+                               photoFilenames: Self.distinctPhotos(of: dayLogs),
                                recap: recap(forDayKey: dayKey, date: date))
+    }
+
+    /// v3.3: a travel-combined pair is TWO logs sharing ONE photo, so a day's
+    /// filenames can repeat — de-dupe (first occurrence wins) before they reach
+    /// the photo strips, which key their ForEach on the filename itself.
+    private static func distinctPhotos(of dayLogs: [PrayerLog]) -> [String] {
+        var seen = Set<String>()
+        return dayLogs.compactMap(\.photoFilename).filter { seen.insert($0).inserted }
     }
 
     // MARK: - Recaps
@@ -924,6 +960,33 @@ final class AppState: ObservableObject {
             result.append(recap(forDayKey: AppClock.dayKey(for: date), date: date))
         }
         return result
+    }
+
+    /// v3.9: Journey's "Your week" card — the most recent COMPLETED Mon–Sun
+    /// week (never the week in progress). nil until that week holds at least
+    /// one of your logs, so a new account doesn't get an empty trophy card.
+    /// Personal only: no buddy data, so it reads the same solo or in a circle.
+    func lastCompletedWeekRecap() -> WeeklyRecap? {
+        let calendar = Calendar.current
+        let thisWeekStart = BuddySimulator.weekStart(for: AppClock.now, calendar: calendar)
+        guard let lastWeekDay = calendar.date(byAdding: .day, value: -1, to: thisWeekStart)
+        else { return nil }
+        let weekDayKeys = BuddySimulator.weekDayKeys(for: lastWeekDay, calendar: calendar)
+
+        // Sunday's isha window runs past midnight (it ends at Monday's fajr), so
+        // on Monday morning the week isn't decided yet — the same rule
+        // reconcileStreakIfNeeded follows. Wait one more window rather than
+        // publish a total a 1 AM isha log would silently change.
+        if let prev = previousIshaWindow,
+           AppClock.now < prev.end,
+           weekDayKeys.last == previousDayKey,
+           !hasLog(prayer: .isha, dayKey: previousDayKey) {
+            return nil
+        }
+
+        return GameEngine.weeklyRecap(logs: logs,
+                                      weekDayKeys: weekDayKeys,
+                                      excusedDayKeys: profile.excusedDayKeys)
     }
 
     private func recap(forDayKey key: String, date: Date) -> DayRecap {
@@ -1076,6 +1139,26 @@ final class AppState: ObservableObject {
         persistProfile()
     }
 
+    /// v3.9: onboarding marks a brand-new account as starting solo — its circle
+    /// begins empty and grows one invite at a time. Never unset: a legacy
+    /// profile must keep its existing circle.
+    ///
+    /// The "new account" signal (settings.hasOnboarded) lives in a DIFFERENT
+    /// file from the circle it decides, and Store.load falls back per file — so
+    /// a lost settings.json can replay onboarding over a populated profile.
+    /// Gate on the profile: only an account with no history and an untouched
+    /// circle may be flipped.
+    func markStartedSolo() {
+        guard !profile.startedSolo,
+              profile.totalXP == 0,
+              logs.isEmpty,
+              profile.removedBuddyNames.isEmpty,
+              profile.invitedBuddyNames.isEmpty else { return }
+        profile.startedSolo = true
+        persistProfile()
+        objectWillChange.send()
+    }
+
     /// v3.6: profile photo (settings rehaul). Stored via PhotoStore; the old
     /// file is cleaned up on replace.
     func setAvatar(_ image: UIImage) {
@@ -1138,6 +1221,11 @@ final class AppState: ObservableObject {
         var p = UserProfile.fresh(now: AppClock.now)
         p.name = profile.name
         p.joinedAt = calendar.date(byAdding: .day, value: -21, to: todayStart) ?? profile.joinedAt
+        // v3.9: this filler rebuilds HISTORY, not the circle — carry the solo
+        // flag and whatever circle the user shaped through untouched.
+        p.startedSolo = profile.startedSolo
+        p.invitedBuddyNames = profile.invitedBuddyNames
+        p.removedBuddyNames = profile.removedBuddyNames
 
         var dayKeys: [String] = []
         for offset in stride(from: 21, through: 1, by: -1) {

@@ -93,7 +93,9 @@ struct PostConfirmView: View {
                         .animation(Theme.spring, value: jamaat)
                 }
 
-                ChunkyButton(title: "Post to your circle 🎉", color: Theme.green, isEnabled: true) {
+                // v3.9: no circle yet → nowhere to post it "to".
+                ChunkyButton(title: state.isSoloMode ? "Post your prayer 🎉" : "Post to your circle 🎉",
+                             color: Theme.green, isEnabled: true) {
                     onPost(jamaat, place, resolvedPlaceName)
                 }
 
