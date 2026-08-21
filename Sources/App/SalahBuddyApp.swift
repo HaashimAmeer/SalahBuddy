@@ -51,11 +51,12 @@ final class CircleStack: ObservableObject {
         self.circle = CircleService(auth: auth)
     }
 
-    /// Called once, from the root view's `.task`.
+    /// Called once, from the root view's `.task`. THE launch sequence.
     ///
-    /// Order matters: the session has to be restored before "who is signed in"
-    /// has an answer, and `CircleService.bootstrap()` is documented to run
-    /// after it.
+    /// Order matters at every step: the session has to be restored before "who
+    /// is signed in" has an answer, `CircleService.bootstrap()` is documented
+    /// to run after it, and the sync engine's channel must not be opened before
+    /// either (see the note inside).
     func start(host: AppState) async {
         guard !started else { return }
         started = true
@@ -68,6 +69,20 @@ final class CircleStack: ObservableObject {
             host?.setName(name)
         }
 
+        // v4 Phase C FIX: the sync engine's launch belongs in THIS sequence.
+        // It used to be started from a second, independent `.task` on
+        // `RootView`, and two `.task`s have no order between them — so on some
+        // launches the engine opened its realtime channel before
+        // `auth.restore()` had put the session back, joined a channel that
+        // received nothing, and (because a failed join was never noticed) left
+        // realtime dead for the rest of the session. One sequence, one order.
+        //
+        // BUILT and handed over before the first await, though: `AppState`
+        // mirrors every log through this object, and a prayer logged in the
+        // first second of launch should be queued rather than dropped.
+        let sync: CircleSync = circle.ensureSync()
+        host.attachCircleSync(sync)
+
         await auth.restore()
         await circle.bootstrap()
         // A cold install signing back into an existing circle has no mirror to
@@ -77,6 +92,10 @@ final class CircleStack: ObservableObject {
             await circle.refresh()
         }
         await syncProfileIfNeeded()
+        // Now that "who is signed in" has an answer: adopt the network monitor,
+        // drain whatever last session's flight left queued, reconcile, and open
+        // the channel.
+        await sync.start()
     }
 
     /// The app came back to the foreground. Called from `RootView`'s

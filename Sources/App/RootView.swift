@@ -49,6 +49,10 @@ struct RootView: View {
         .animation(Theme.spring, value: state.profile.pendingNewMemberName)
         .animation(Theme.spring, value: state.tutorialStep)
         .environment(\.appNow, now)
+        // v4 §4: the synced mirror, so a grid tile can resolve a buddy's
+        // Storage photo path without every intermediate view having to thread
+        // one through. `.empty` in demo mode, which costs a tile nothing.
+        .environment(\.circleMirror, state.circleSnapshot)
         .onPreferenceChange(TutorialFramesKey.self) { tourFrames = $0 }
         .onAppear { maybeStartTour() }
         .onChange(of: state.settings.hasOnboarded) { _, onboarded in
@@ -64,19 +68,64 @@ struct RootView: View {
             if key != lastDayKey {
                 lastDayKey = key
                 state.refresh()      // new schedule + streak reconcile
+                // v4 Phase C: yesterday's grid is finished and today's is
+                // empty — the circle's day rolled over too.
+                Task { await dayChangedCircleSync() }
             }
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 state.refresh()
                 NotificationManager.shared.reschedule()
-                // v4: the circle may have moved on someone else's phone while
-                // we were away, and a profile write that failed offline is owed
-                // a retry. `CircleStack` owns both halves — going straight to
-                // `CircleService` here is what left the profile half unwired.
-                Task { await circles.handleForeground() }
+                Task { await foregroundCircleSync() }
+            } else if phase == .background {
+                Task { await backgroundCircleSync() }
             }
         }
+    }
+
+    // MARK: - The circle's lifecycle (v4 Phase C)
+
+    // LAUNCH is deliberately NOT here: building the engine, handing it to
+    // `AppState` and starting it are one ordered sequence with restoring the
+    // session, and that sequence lives in `CircleStack.start(host:)`. A second
+    // `.task` on this view ran in an undefined order against the first, which
+    // is how a realtime channel came to be joined before there was a session
+    // to join it with.
+
+    /// Back to the front. Roster first, then posts: the mirror's circle id is
+    /// what the post pull filters on, so a device whose membership changed on
+    /// another phone learns which circle it is in before it asks what happened
+    /// inside it.
+    private func foregroundCircleSync() async {
+        // v4: the circle may have moved on someone else's phone while we were
+        // away, and a profile write that failed offline is owed a retry.
+        // `CircleStack` owns both halves — going straight to `CircleService`
+        // here is what left the profile half unwired.
+        await circles.handleForeground()
+        if let sync: CircleSync = circles.circle.sync {
+            await sync.enteredForeground()
+        }
+        // §4: buddy photos expire with the server's ~30-day retention. The
+        // download actor already sweeps every 25 fetches; this is the hook that
+        // keeps the bound honest for someone who mostly reads the grid. Off the
+        // main actor — it is a directory scan.
+        Task.detached(priority: .utility) {
+            _ = BuddyPhotoCache.sweep()
+        }
+    }
+
+    /// Gone to the back: the realtime channel closes with the app. A socket
+    /// held open behind the user's back buys nothing — the next foreground
+    /// catches up in one request either way.
+    private func backgroundCircleSync() async {
+        guard let sync: CircleSync = circles.circle.sync else { return }
+        await sync.enteredBackground()
+    }
+
+    private func dayChangedCircleSync() async {
+        guard let sync: CircleSync = circles.circle.sync else { return }
+        await sync.dayChanged()
     }
 
     private var tabShell: some View {

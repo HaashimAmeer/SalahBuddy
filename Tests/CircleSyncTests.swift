@@ -154,6 +154,53 @@ final class CircleSyncTests: XCTestCase {
         XCTAssertNil(weekJSON["updated_at"])
     }
 
+    /// v4 Phase C REGRESSION: the challenge insert must not name `created_at`.
+    ///
+    /// `20260821000200_rls.sql` grants `authenticated`
+    /// `insert (id, circle_id, created_by, prayer, days, week_key)` and
+    /// `backend/tests/sql/12_rls_enabled_everywhere.sql` fails the backend
+    /// build if `created_at` is ever added. Sending it made every custom
+    /// challenge insert fail with `42501 permission denied for column
+    /// created_at` — a refusal, so the op spent its whole budget and was then
+    /// discarded, and the challenge never reached the circle at all.
+    func testCustomChallengeInsertNamesOnlyGrantedColumns() throws {
+        let challenge = RemoteCustomChallenge(id: "custom-1", circleID: circleID,
+                                              createdBy: userA, prayer: .fajr,
+                                              days: 3, weekKey: "2026-W24",
+                                              createdAt: stamp(0))
+        let json = try jsonObject(challenge)
+        XCTAssertNil(json["created_at"], "the column has no INSERT grant — the DB default fills it")
+        XCTAssertEqual(json.keys.sorted(),
+                       ["circle_id", "created_by", "days", "id", "prayer", "week_key"])
+    }
+
+    /// It still DECODES — `select` is granted on the whole table, so the value
+    /// comes back on the next pull.
+    func testCustomChallengeStillDecodesItsServerCreatedAt() throws {
+        var raw: String = "{\"id\":\"custom-1\","
+        raw += "\"circle_id\":\"" + circleID.uuidString + "\","
+        raw += "\"created_by\":\"" + userA.uuidString + "\","
+        raw += "\"prayer\":\"fajr\",\"days\":3,\"week_key\":\"2026-W24\","
+        raw += "\"created_at\":\"2026-06-08T09:00:00Z\"}"
+        let row = try decoder().decode(RemoteCustomChallenge.self, from: Data(raw.utf8))
+        XCTAssertNotNil(row.createdAt)
+    }
+
+    /// v4 Phase C REGRESSION: a slot repair says what a field IS now, `nil`
+    /// included. Synthesised `Encodable` emits `encodeIfPresent` for an
+    /// Optional, so a correction that DROPPED a place tag omitted the key and
+    /// the PATCH left the other device's stale pill sitting on the row.
+    func testAPostSlotPatchSendsAnAbsentPlaceLabelAsNull() throws {
+        let patch = PostSlotPatch(tier: .prayed, loggedAt: stamp(0), jamaat: false,
+                                  placeLabel: nil, travelCombined: false)
+        let text: String = String(decoding: try encoder().encode(patch), as: UTF8.self)
+        XCTAssertTrue(text.contains("\"place_label\":null"),
+                      "a dropped place tag has to be written, not omitted: " + text)
+        // photo_path stays OUT: the photo op owns it, and nulling it here would
+        // let a replayed upsert tombstone a picture that had already landed.
+        XCTAssertFalse(text.contains("photo_path"))
+    }
+
     // MARK: - RemotePost → PrayerLog
 
     func testAsPrayerLogMapsTierDayKeyAndJamaat() {
@@ -179,6 +226,60 @@ final class CircleSyncTests: XCTestCase {
     func testQadaPostKeepsQadaXPEvenWithJamaat() {
         let log = post(prayer: .fajr, tier: .qada, jamaat: true).asPrayerLog()
         XCTAssertEqual(log.xp, LogTier.qada.xp, "qada never takes the jamaat floor")
+    }
+
+    // MARK: - The late-edit rule crosses the wire (v4 Phase C regression)
+
+    /// A retroactive make-up is worth what `GameEngine.lateEditXP` says — on
+    /// EVERY device, not just the one that made it.
+    ///
+    /// `AppState.logPastMakeUp` scores an old day at 0 once it is past the
+    /// 2-day grace (same-day logging is the incentive), while `asPrayerLog()`
+    /// re-derived a flat `LogTier.qada.xp`. Every friend's device therefore
+    /// scored a stale make-up five points higher than the poster's own, and
+    /// both numbers sat on the same Mon-start scoreboard for the rest of the
+    /// week. The rule needs no clock: the day the EDIT was made is `logged_at`,
+    /// which is already on the wire.
+    func testAStaleMakeUpScoresTheSameOnEveryDevice() {
+        // Logged on the Sunday, for the Monday six days earlier.
+        let loggedAt: Date = date(2026, 6, 14, 20, 0)
+        let stale = RemotePost(id: postID, userID: userA, circleID: circleID,
+                               dayKey: monday, prayer: .fajr, tier: .qada,
+                               loggedAt: loggedAt)
+        let local: Int = GameEngine.lateEditXP(dayKey: monday,
+                                               todayKey: AppClock.dayKey(for: loggedAt),
+                                               calendar: cal)
+        XCTAssertEqual(local, 0, "six days late earns nothing locally")
+        XCTAssertEqual(stale.asPrayerLog().xp, local)
+    }
+
+    func testAFreshMakeUpStillScoresQadaXP() {
+        // Inside the grace window: logged the next day, for yesterday.
+        let loggedAt: Date = date(2026, 6, 9, 20, 0)
+        let fresh = RemotePost(id: postID, userID: userA, circleID: circleID,
+                               dayKey: monday, prayer: .fajr, tier: .qada,
+                               loggedAt: loggedAt)
+        XCTAssertEqual(fresh.asPrayerLog().xp, LogTier.qada.xp)
+    }
+
+    /// The isha-after-midnight case: yesterday's `day_key`, this morning's
+    /// `logged_at`. Comfortably inside the grace, exactly as the local path
+    /// scores it.
+    func testAPostMidnightQadaIsStillWorthFive() {
+        let loggedAt: Date = date(2026, 6, 9, 1, 15)
+        let overnight = RemotePost(id: postID, userID: userA, circleID: circleID,
+                                   dayKey: monday, prayer: .isha, tier: .qada,
+                                   loggedAt: loggedAt)
+        XCTAssertEqual(overnight.asPrayerLog().xp, LogTier.qada.xp)
+    }
+
+    /// In-window tiers are untouched by the fix.
+    func testInWindowTiersAreStillScoredByPrayerXP() {
+        let entry = RemotePost(id: postID, userID: userA, circleID: circleID,
+                               dayKey: monday, prayer: .maghrib, tier: .lastCall,
+                               loggedAt: stamp(0), jamaat: true)
+        XCTAssertEqual(entry.asPrayerLog().xp,
+                       GameEngine.prayerXP(tier: .lastCall, jamaat: true))
     }
 
     func testRoundTripThroughTheWirePreservesTheLog() throws {
@@ -368,7 +469,7 @@ final class CircleSyncTests: XCTestCase {
     func testDeleteAlsoDropsTheQueuedPhotoUpload() {
         let outbox = outboxWith([
             .upsertPost(post()),
-            .uploadPhoto(postID: postID, filename: "a.jpg", path: "c/u/a.jpg"),
+            .uploadPhoto(postID: postID, dayKey: monday, prayer: .dhuhr, filename: "a.jpg", path: "c/u/a.jpg"),
             .deletePost(postID: postID),
         ])
         XCTAssertTrue(outbox.isEmpty, "a photo for a post that is going away is moot")
@@ -412,7 +513,7 @@ final class CircleSyncTests: XCTestCase {
         // retention sweep enumerates paths from `posts` — so it would never be
         // collected, and would stay readable by the whole circle (§4).
         let path = "c/u/a.jpg"
-        var outbox = outboxWith([.uploadPhoto(postID: postID, filename: "a.jpg", path: path)])
+        var outbox = outboxWith([.uploadPhoto(postID: postID, dayKey: monday, prayer: .dhuhr, filename: "a.jpg", path: path)])
         _ = outbox.checkout()
 
         outbox.enqueue(.deletePost(postID: postID), id: UUID(), at: stamp(5))
@@ -425,7 +526,7 @@ final class CircleSyncTests: XCTestCase {
     func testAQueuedButUnsentPhotoUploadNeedsNoRetraction() {
         // Nothing reached Storage, so dropping the upload is the whole fix —
         // a `.deletePhoto` here would 404 for no reason.
-        var outbox = outboxWith([.uploadPhoto(postID: postID, filename: "a.jpg", path: "c/u/a.jpg")])
+        var outbox = outboxWith([.uploadPhoto(postID: postID, dayKey: monday, prayer: .dhuhr, filename: "a.jpg", path: "c/u/a.jpg")])
         outbox.enqueue(.deletePost(postID: postID), id: UUID(), at: stamp(5))
         XCTAssertEqual(outbox.items.map { $0.op.kind }, [CircleOp.Kind.deletePost])
     }
@@ -491,13 +592,13 @@ final class CircleSyncTests: XCTestCase {
 
     func testRepeatedPhotoUploadForOnePostCollapses() {
         let outbox = outboxWith([
-            .uploadPhoto(postID: postID, filename: "a.jpg", path: "c/u/a.jpg"),
-            .uploadPhoto(postID: postID, filename: "b.jpg", path: "c/u/b.jpg"),
-            .uploadPhoto(postID: otherPostID, filename: "c.jpg", path: "c/u/c.jpg"),
+            .uploadPhoto(postID: postID, dayKey: monday, prayer: .dhuhr, filename: "a.jpg", path: "c/u/a.jpg"),
+            .uploadPhoto(postID: postID, dayKey: monday, prayer: .dhuhr, filename: "b.jpg", path: "c/u/b.jpg"),
+            .uploadPhoto(postID: otherPostID, dayKey: monday, prayer: .asr, filename: "c.jpg", path: "c/u/c.jpg"),
         ])
         XCTAssertEqual(outbox.count, 2)
         XCTAssertEqual(outbox.peek?.op,
-                       CircleOp.uploadPhoto(postID: postID, filename: "b.jpg", path: "c/u/b.jpg"))
+                       CircleOp.uploadPhoto(postID: postID, dayKey: monday, prayer: .dhuhr, filename: "b.jpg", path: "c/u/b.jpg"))
     }
 
     func testALongOfflineStretchCollapsesToTheRealWork() {
@@ -520,7 +621,7 @@ final class CircleSyncTests: XCTestCase {
         let ids: [UUID] = (0..<4).map { _ in UUID() }
         let ops: [CircleOp] = [
             .upsertPost(post()),
-            .uploadPhoto(postID: postID, filename: "a.jpg", path: "c/u/a.jpg"),
+            .uploadPhoto(postID: postID, dayKey: monday, prayer: .dhuhr, filename: "a.jpg", path: "c/u/a.jpg"),
             .setExcused(dayKey: tuesday, excused: true),
             .setRecoveryWeek(weekKey: "2026-W24", xp: 30),
         ]

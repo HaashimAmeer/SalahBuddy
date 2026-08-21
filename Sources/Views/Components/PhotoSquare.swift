@@ -21,6 +21,15 @@ struct PhotoSquare: View {
     /// to keep the type near grid scale. Defaults to `size` (unchanged).
     var typeSize: CGFloat? = nil
 
+    /// v4 §4: the synced mirror, published by `RootView`. A tile needs it to
+    /// turn a buddy's post into a Storage path; in demo mode (and in a
+    /// preview) it is `.empty` and every lookup below short-circuits.
+    ///
+    /// Declared LAST on purpose: the three above are this view's memberwise
+    /// initializer, and an environment property has no business sitting in the
+    /// middle of an argument list two other files spell out.
+    @Environment(\.circleMirror) private var circleMirror: CircleSnapshot
+
     /// The metric the overlays scale off (layout still uses `size`).
     private var t: CGFloat { typeSize ?? size }
 
@@ -75,11 +84,17 @@ struct PhotoSquare: View {
 
     private func postedTile(content: PostContent, tier: LogTier, at: Date) -> some View {
         ZStack(alignment: .bottomLeading) {
+            // Still exactly two cases, and they still mean what they always
+            // meant: `.photo` is a JPEG in `PhotoStore`, which is YOURS and
+            // permanent, while `.illustration` is a post with no local file.
+            // v4 §4 adds one honest wrinkle to the second — a synced post may
+            // have a picture in the circle's bucket, and the illustration is
+            // what shows until (or unless) it arrives.
             switch content {
             case .photo(let filename):
                 LazyThumbnail(filename: filename, pixelSize: size)
             case .illustration(let seed):
-                IllustratedPrayerCard(seed: seed)
+                BuddyRemotePhoto(path: remotePhotoPath, seed: seed, pixelSize: size)
             }
 
             // Soft scrim so the caption reads on any image.
@@ -188,6 +203,25 @@ struct PhotoSquare: View {
                 .strokeBorder(Theme.lilac.opacity(0.35), lineWidth: 1.5))
     }
 
+    /// The Storage path behind this tile's picture, when there is one.
+    ///
+    /// Resolved HERE rather than carried on `GridEntry` because a remote path
+    /// is not a `PostContent.photo`: that case means "a file this app owns",
+    /// and everything downstream of it (the thumbnail loader, Memories) treats
+    /// it that way. A buddy's picture is a disposable cache entry (§4), so it
+    /// travels as a path and is resolved at the one place that draws it.
+    ///
+    /// Answers nil for your own square, for demo buddies, for a mirror with no
+    /// circle and for any id this grid did not build (a SwiftUI preview) —
+    /// every case where the seeded illustration is already the right answer.
+    private var remotePhotoPath: String? {
+        guard !entry.member.isYou, circleMirror.hasCircle else { return nil }
+        guard let coords = AppState.gridEntryCoordinates(entry.id) else { return nil }
+        let source: RemoteCircleDataSource = RemoteCircleDataSource(snapshot: circleMirror)
+        return source.photoPath(forMember: coords.memberID, prayer: coords.prayer,
+                                dayKey: coords.dayKey)
+    }
+
     private var nameFontSize: CGFloat { max(9, t * 0.085) }
 
     private static let timeFormatter: DateFormatter = {
@@ -227,6 +261,111 @@ struct MemberAvatarView: View {
                 return full.preparingThumbnail(of: CGSize(width: side, height: side)) ?? full
             }.value
         }
+    }
+}
+
+// MARK: - The circle mirror in the environment (v4 §4)
+
+/// Published once by `RootView` so a tile deep in a grid can resolve a buddy's
+/// photo path. A value type, `Equatable`, defaulting to `.empty` — which is
+/// exactly what demo mode, a solo install and a SwiftUI preview want, and why
+/// `PhotoSquare` can stay usable outside the app's environment.
+private struct CircleMirrorKey: EnvironmentKey {
+    static let defaultValue: CircleSnapshot = .empty
+}
+
+extension EnvironmentValues {
+    var circleMirror: CircleSnapshot {
+        get { self[CircleMirrorKey.self] }
+        set { self[CircleMirrorKey.self] = newValue }
+    }
+}
+
+// MARK: - Buddy photo (v4 §4)
+
+/// A buddy's synced photo, with the seeded illustration underneath it.
+///
+/// The illustration is NOT an apology for a missing image: it is what a post
+/// with no picture legitimately looks like — a join-week backfill never
+/// uploads one, and the server sweeps photos after ~30 days — so a path that
+/// never resolves lands on a tile that already looks finished. Nothing here
+/// shows a spinner, and nothing here shows an error.
+///
+/// Buddy photos live in `Documents/circlephotos/` and never in `PhotoStore`:
+/// they are disposable, they age out with the server's retention, and they
+/// must never reach Memories (§4).
+private struct BuddyRemotePhoto: View {
+    let path: String?
+    let seed: UInt64
+    let pixelSize: CGFloat
+
+    @State private var image: UIImage?
+    /// Which path `image` belongs to. SwiftUI reuses these views, so without it
+    /// a recycled cell keeps showing the previous member's photo — the same
+    /// bug `LazyThumbnail.loadedFor` exists to prevent.
+    @State private var loadedFor: String?
+
+    var body: some View {
+        ZStack {
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                IllustratedPrayerCard(seed: seed)
+            }
+        }
+        .task(id: path) { await load() }
+    }
+
+    private func load() async {
+        guard let path, !path.isEmpty else {
+            image = nil
+            loadedFor = nil
+            return
+        }
+        guard loadedFor != path else { return }
+        // v4 §4 FIX: a recycled cell arrives still holding the PREVIOUS path's
+        // photo. `loadedFor` stops it being re-LOADED; it never stopped it
+        // being re-DISPLAYED — so a tile whose path went A → B and whose fetch
+        // for B failed (offline, or the tombstone gate 403-ing a retracted
+        // post) kept rendering buddy A's picture under buddy B's name, tier and
+        // timestamp, indefinitely. Dropping both up front costs at most one
+        // frame of the illustration, which is what a post with no photo
+        // legitimately looks like anyway.
+        image = nil
+        loadedFor = nil
+        let side: CGFloat = max(80, pixelSize) * UIScreen.main.scale
+        // Disk first, so a photo we already hold never flashes the illustration
+        // on its way in.
+        if let cached: UIImage = await BuddyRemotePhoto.cachedThumbnail(path: path, side: side) {
+            image = cached
+            loadedFor = path
+            return
+        }
+        // Coalesced and non-throwing by design: the same photo appears in more
+        // than one grid at once, and one that will not load is not an error
+        // anybody should be shown.
+        guard let fetched: UIImage = await PhotoSync.buddyPhoto(path: path) else { return }
+        guard !Task.isCancelled else { return }
+        image = await BuddyRemotePhoto.downscaled(fetched, side: side)
+        loadedFor = path
+    }
+
+    /// Read + decode + downscale, all off the main actor — a grid must never
+    /// hold full-resolution images (§6.10), and decoding one on the main thread
+    /// is what makes it stutter.
+    private static func cachedThumbnail(path: String, side: CGFloat) async -> UIImage? {
+        await Task.detached(priority: .userInitiated) { () -> UIImage? in
+            guard let full: UIImage = PhotoSync.cachedBuddyPhoto(path: path) else { return nil }
+            return full.preparingThumbnail(of: CGSize(width: side, height: side)) ?? full
+        }.value
+    }
+
+    private static func downscaled(_ full: UIImage, side: CGFloat) async -> UIImage {
+        await Task.detached(priority: .userInitiated) { () -> UIImage in
+            full.preparingThumbnail(of: CGSize(width: side, height: side)) ?? full
+        }.value
     }
 }
 

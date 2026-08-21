@@ -3,12 +3,17 @@ import Supabase
 
 /// The slice of the app that `CircleService` is allowed to touch.
 ///
-/// v4 DECISION: **two methods, and neither can reach a log, a streak or an XP
-/// total.** §2 promises that leaving a circle "returns to solo mode with all
-/// local history intact", and the cheapest way to guarantee a promise is to
-/// make the alternative unreachable — so the seam through which the service
-/// talks to `AppState` simply has no door onto local history. It hands over a
-/// mirror to render and a mode to render it in, and that is the whole surface.
+/// v4 DECISION: **nothing here can reach a log, a streak or an XP total —
+/// except one read that §2 requires by name.** §2 promises that leaving a
+/// circle "returns to solo mode with all local history intact", and the
+/// cheapest way to guarantee a promise is to make the alternative unreachable,
+/// so the seam hands over a mirror to render and a mode to render it in.
+///
+/// Phase C added the third member because §2 also promises the opposite
+/// direction — "joining mid-week shows your week-so-far posts to the circle" —
+/// and that cannot be done without reading a week of logs. It is spelled as an
+/// answer rather than as access, and it is the only opening: see
+/// `circleBackfillLogs(forWeekOf:)`.
 ///
 /// `AppState` already implements `applyCircleSnapshot(_:)`; `setCircleMode(_:)`
 /// is a one-line wrapper around `settings.circleMode`, whose `didSet` persists
@@ -17,6 +22,36 @@ import Supabase
 protocol CircleServiceHost: AnyObject {
     func applyCircleSnapshot(_ snapshot: CircleSnapshot)
     func setCircleMode(_ mode: CircleMode)
+
+    /// The current Mon-start week's own logs, for the join backfill (§2:
+    /// "joining mid-week shows your week-so-far posts to the circle").
+    ///
+    /// v4 DECISION: the fence above gets exactly ONE opening, and it is shaped
+    /// as an ANSWER, not as access. It is read-only, it is a single week, the
+    /// host decides what to include, and the name says what it is for — none of
+    /// which is true of handing over `logs`. §2's promise is about what leaving
+    /// a circle *keeps*, and nothing reachable through this could delete a log,
+    /// a streak or an XP point.
+    ///
+    /// Defaulted to empty so a host that has no local history (every test
+    /// double) conforms without writing it.
+    func circleBackfillLogs(forWeekOf now: Date) -> [PrayerLog]
+
+    /// The same week's EXCUSED day keys, for the same backfill.
+    ///
+    /// v4 Phase C FIX: the backfill used to hand over logs and nothing else, so
+    /// someone who joined a circle mid-period had that week's rest days stay on
+    /// their own device — and every empty cell rendered to their new circle as a
+    /// plain `.missed`. §3 promises the gentle "resting" state, and
+    /// `rpcs.sql` calls the alternative out by name as the shaming outcome to
+    /// avoid. Bare day keys: there is no reason here either, and there is
+    /// nowhere for one to go.
+    func circleBackfillExcusedDayKeys(forWeekOf now: Date) -> [String]
+}
+
+extension CircleServiceHost {
+    func circleBackfillLogs(forWeekOf now: Date) -> [PrayerLog] { [] }
+    func circleBackfillExcusedDayKeys(forWeekOf now: Date) -> [String] { [] }
 }
 
 /// v4 Phase B3: real circles — create, join, leave, rename (SPEC-V4 §2).
@@ -127,6 +162,27 @@ final class CircleService: ObservableObject {
     /// returns early with no session to reconcile against.
     private(set) var identityGeneration: Int = 0
 
+    /// v4 Phase C: the outbox + pull engine (`CircleSync`), or nil until the
+    /// app asks for one.
+    ///
+    /// v4 DECISION: **created on demand, never in `init`.** The engine's
+    /// default transport is a real Supabase socket, and this class is built by
+    /// unit tests that must not open one — `CircleServiceTests` constructs a
+    /// service, applies a join and asserts on the mirror, and every one of
+    /// those transitions now tells the engine the identity moved. No caller,
+    /// no engine, no request. `CircleStack.start(host:)` calls `ensureSync()`
+    /// once at launch; a test injects a stubbed engine through `attachSync(_:)`.
+    ///
+    /// It lives HERE rather than beside `AppState` because this is where the
+    /// mirror lives: `snapshot` is `private(set)`, so an engine hosted on
+    /// `AppState` would write a merged snapshot that the next `pull()` — which
+    /// rebuilds from this copy — would silently drop.
+    ///
+    /// `@Published` so the Circle tab's "waiting to sync" row can observe the
+    /// engine from the moment the launch sequence builds it; a plain stored
+    /// property left that view with nothing to redraw on.
+    @Published private(set) var sync: CircleSync?
+
     // MARK: - Init
 
     init(snapshot: CircleSnapshot? = nil,
@@ -173,6 +229,92 @@ final class CircleService: ObservableObject {
     /// in `pull()` — see `identityGeneration`.
     func isCurrent(_ generation: Int, _ me: UUID) -> Bool {
         identityGeneration == generation && currentUserID() == me
+    }
+
+    // MARK: - The sync engine (v4 Phase C)
+
+    /// Adopt an engine and give it the one hook it needs from this side.
+    ///
+    /// The backfill closure is wired HERE rather than by the app for the same
+    /// reason the engine is owned here: the two halves are useless apart, and a
+    /// hook somebody has to remember to connect is a hook that ships
+    /// disconnected.
+    func attachSync(_ engine: CircleSync) {
+        engine.bind(host: self)
+        sync = engine
+        // SPEC-V4 §2: "joining mid-week shows your week-so-far posts to the
+        // circle". `joinWeekBackfill` documented exactly this seam; this fills
+        // it. The logs come back through `CircleServiceHost` as an ANSWER — one
+        // week, already filtered — rather than as access to local history, so
+        // the fence §2 relies on stays a fence (see `circleBackfillLogs`).
+        joinWeekBackfill = { [weak self] _, _ in
+            guard let self else { return }
+            let now: Date = AppClock.now
+            let week: [PrayerLog] = self.host?.circleBackfillLogs(forWeekOf: now) ?? []
+            let resting: [String] = self.host?.circleBackfillExcusedDayKeys(forWeekOf: now) ?? []
+            guard !week.isEmpty || !resting.isEmpty else { return }
+            self.sync?.backfillWeek(week, excusedDayKeys: resting, asOf: now)
+        }
+    }
+
+    /// The engine, built on first use. Idempotent — `CircleStack.start(host:)`
+    /// is the one caller, and it hands the result to `AppState` before the
+    /// session is restored and asks it to `start()` after.
+    @discardableResult
+    func ensureSync() -> CircleSync {
+        if let existing: CircleSync = sync { return existing }
+        let engine: CircleSync = CircleSync(persists: persists)
+        attachSync(engine)
+        return engine
+    }
+
+    /// Tell the engine the circle identity moved — re-anchor the queue against
+    /// the outbox this class just rewrote, re-point realtime, reconcile.
+    ///
+    /// Fire-and-forget because every caller is a LOCAL transition that has
+    /// already succeeded: the mirror is correct whether or not the network
+    /// answers, and making `applyLeftCircle()` wait on a pull would make
+    /// leaving a circle feel like a network operation, which it is not.
+    private func kickSync() {
+        guard let engine: CircleSync = sync else { return }
+        Task { await engine.circleChanged() }
+    }
+
+    /// Drop every buddy photo this device has cached.
+    ///
+    /// SPEC-V4 §4: a buddy's picture is readable only by the circle, and the
+    /// three callers are the moments this device stops being in one — leaving,
+    /// signing out, and adopting a different account. Your OWN photos are not
+    /// touched: they live in `PhotoStore`, they are yours forever, and Memories
+    /// still finds every one of them (§2's promise that leaving keeps all local
+    /// history).
+    ///
+    /// Detached because it can be several hundred small files and none of the
+    /// callers has any reason to wait for it — the mirror is already gone, so
+    /// nothing on screen refers to a single one of them.
+    ///
+    /// An instance method with the same `persists` guard every other write in
+    /// this file has: `CircleServiceTests` builds with `persists: false`
+    /// precisely so it never touches Documents, and a `static` version fired a
+    /// detached delete at the test host's real `Documents/circlephotos`.
+    private func forgetBuddyPhotos() {
+        guard persists else { return }
+        Task.detached(priority: .utility) {
+            BuddyPhotoCache.deleteAll()
+        }
+    }
+
+    /// Adopt a mirror `CircleSync` merged. Same three steps every other write
+    /// in this file takes — store, persist, hand to the views — so the app
+    /// keeps exactly ONE mirror, written in one place.
+    ///
+    /// The guard is not decoration: an engine that read a circle this device
+    /// has since left must not put it back.
+    func adoptSyncedSnapshot(_ merged: CircleSnapshot) {
+        guard merged.circle?.id == snapshot.circle?.id else { return }
+        snapshot = merged
+        persistSnapshot()
+        host?.applyCircleSnapshot(merged)
     }
 
     // MARK: - Lifecycle
@@ -350,6 +492,8 @@ final class CircleService: ObservableObject {
         lastError = nil
         isWorking = false
         syncPhase()
+        kickSync()
+        forgetBuddyPhotos()
     }
 
     // MARK: - Local transitions (no network — which is also what makes them testable)
@@ -370,6 +514,10 @@ final class CircleService: ObservableObject {
         persistSnapshot()
         host?.applyCircleSnapshot(snapshot)
         syncPhase()
+        // The engine re-anchors, subscribes to the new circle's channel and
+        // runs the first reconciling read. Scheduled, so the backfill this
+        // method's caller runs next is already queued when the drain starts.
+        kickSync()
     }
 
     /// Applied once the server has confirmed the departure — or when there was
@@ -387,6 +535,10 @@ final class CircleService: ObservableObject {
         host?.applyCircleSnapshot(snapshot)
         host?.setCircleMode(.demo)
         syncPhase()
+        // Drops the in-memory queue this method just cleared on disk, and
+        // closes the realtime channel — there is no circle to listen to.
+        kickSync()
+        forgetBuddyPhotos()
     }
 
     // MARK: - Pure snapshot transitions
@@ -474,6 +626,12 @@ final class CircleService: ObservableObject {
         // Captured before the first suspension; re-checked after each one. See
         // `identityGeneration` for what goes wrong without it.
         let generation: Int = identityGeneration
+        // Phase C: a cold install with a restored session has no mirror, so
+        // "which circle am I in" is answered for the first time DOWN THERE,
+        // by the server, without any local transition to notice it. Without
+        // this the engine would never learn there was a circle to sync until
+        // the next foreground.
+        let previousCircleID: UUID? = snapshot.circle?.id
 
         let memberResponse: PostgrestResponse<Void> =
             try await Supa.client.from("circle_members").select().execute()
@@ -512,13 +670,21 @@ final class CircleService: ObservableObject {
         next.circle = circles.first(where: { $0.id == circleID }) ?? next.circle
         next.members = allMembers.filter { $0.circleID == circleID }
         next.profiles = profiles
-        next.lastSyncedAt = AppClock.now
+        // v4 Phase C FIX: `lastSyncedAt` is NOT stamped here. It is
+        // `CircleSync.commit`'s cursor — "how far the POSTS are synced" — and
+        // this method reads circle_members, circles and profiles and not a
+        // single post. `RootView.foregroundCircleSync` runs this first: a
+        // roster pull that succeeded followed by a post pull that failed used
+        // to leave the cursor advanced anyway, so the next delta asked for
+        // `updated_at > <after the outage>` and every post written while the
+        // app was backgrounded was skipped until some later full pull.
         snapshot = next
         persistSnapshot()
         host?.applyCircleSnapshot(next)
         // Repairs a mirror/mode disagreement (a restore onto a fresh install,
         // say): if the server says you are in a circle, you are in `.real`.
         host?.setCircleMode(.real)
+        if next.circle?.id != previousCircleID { kickSync() }
     }
 
     // MARK: - Decoding
@@ -654,6 +820,8 @@ final class CircleService: ObservableObject {
         persistOutbox()
         host?.applyCircleSnapshot(snapshot)
         host?.setCircleMode(.demo)
+        kickSync()
+        forgetBuddyPhotos()
     }
 
     /// Stamp the signed-in identity onto a mirror that doesn't have one yet.
@@ -678,6 +846,37 @@ final class CircleService: ObservableObject {
     private func persistOutbox() {
         guard persists else { return }
         outbox.save()
+    }
+}
+
+// MARK: - CircleSync's host
+
+/// v4 Phase C: what the sync engine synchronises.
+///
+/// Five members and no more — the same fence `CircleServiceHost` puts around
+/// this class, pointed the other way. The engine can read who we are, which
+/// circle we are in, the mirror it must merge into, and the generation counter
+/// that tells it the answer to the first two just changed. It cannot reach a
+/// log, a streak or an XP total, and `applySyncedSnapshot` is the only way it
+/// can write anything at all.
+extension CircleService: CircleSyncHost {
+
+    /// The MIRROR's identity first, the session's second, and the order is
+    /// load-bearing: `circle.json` is on disk before `AuthService.restore()`
+    /// has finished, so a prayer logged in the first second of a cold launch
+    /// is still queued against the right user instead of being silently
+    /// dropped for want of an id. The two can never disagree — `adoptSession()`
+    /// wipes a mirror belonging to somebody else rather than reusing it.
+    var syncUserID: UUID? { snapshot.me ?? currentUserID() }
+
+    var syncCircleID: UUID? { snapshot.circle?.id }
+
+    var syncSnapshot: CircleSnapshot { snapshot }
+
+    var syncIdentityGeneration: Int { identityGeneration }
+
+    func applySyncedSnapshot(_ snapshot: CircleSnapshot) {
+        adoptSyncedSnapshot(snapshot)
     }
 }
 

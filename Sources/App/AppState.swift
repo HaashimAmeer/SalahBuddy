@@ -24,6 +24,58 @@ final class AppState: ObservableObject {
     /// `.empty` covers demo mode, a solo account and a first launch alike.
     @Published private(set) var circleSnapshot: CircleSnapshot = .empty
 
+    /// v4 Phase C: the one door between this class and the network.
+    ///
+    /// `AppState` logs a prayer and calls `postLogged`; whether that reaches
+    /// the server now, in ten minutes or after the flight lands is the engine's
+    /// problem, not this file's. There is deliberately no other networking
+    /// symbol in `AppState`.
+    ///
+    /// Weak, and optional: the engine is owned by `CircleService` (which owns
+    /// the mirror it merges into), it is created on demand at launch, and every
+    /// mirror call below is a no-op until it exists — which is exactly what a
+    /// solo install, demo mode and every existing unit test want.
+    private weak var circleSync: CircleSync?
+
+    /// Wired once at launch by `CircleStack.start(host:)`, which is also what
+    /// creates the engine (see `CircleService.ensureSync`) — before the session
+    /// is restored, so a prayer logged in the first second is still mirrored.
+    func attachCircleSync(_ sync: CircleSync) {
+        circleSync = sync
+        replayUnmirroredExcusedDays(to: sync)
+    }
+
+    /// v4 Phase C FIX: rest days created before the engine existed.
+    ///
+    /// `init()` calls `refresh()`, and `refresh()`'s break walk marks every day
+    /// a multi-day break has touched — but `circleSync` is only attached here,
+    /// from the launch sequence, so on a cold launch after a break spanned days
+    /// `mirrorExcused` was a no-op and the flags went nowhere. The walk
+    /// only ever reports days it JUST inserted (`!contains(key)`), and the
+    /// insert is persisted, so no later `refresh()` retried them: the circle
+    /// showed those days as `.missed` forever, and scored them against an
+    /// excused set only the poster's own device had.
+    ///
+    /// Replaying is close to free. Only days the mirror does not already carry
+    /// are sent — normally none, because `circle.json` is loaded before this
+    /// runs — the outbox collapses on `excused:<dayKey>`, and the server insert
+    /// ignores duplicates.
+    private func replayUnmirroredExcusedDays(to sync: CircleSync) {
+        guard mirrorsToCircle else { return }
+        guard let me: UUID = circleSnapshot.me else { return }
+        let mirrored: Set<String> = circleSnapshot.excusedDayKeys(userID: me)
+        let horizon: Date = AppClock.now
+            .addingTimeInterval(-Double(CircleSyncTuning.pullWindowDays) * 86_400)
+        let owed: [String] = CircleSync.unmirroredExcusedDayKeys(
+            local: profile.excusedDayKeys,
+            mirrored: mirrored,
+            startDayKey: AppClock.dayKey(for: horizon),
+            todayKey: todayKey)
+        for key in owed {
+            sync.excusedChanged(dayKey: key, on: true)
+        }
+    }
+
     /// Yesterday's isha window — it may still be open past midnight
     /// (it ends at TODAY's fajr). Used so a 1 AM isha log counts for yesterday.
     private var previousIshaWindow: PrayerWindow?
@@ -161,7 +213,8 @@ final class AppState: ObservableObject {
                              placeTag: placeTag, placeName: placeName)
         logs.append(entry)
         finalizeLogging(added: [entry], snapshot: snapshot,
-                        celebrationPrayer: prayer, celebrationTier: tier, dayKey: target.dayKey)
+                        celebrationPrayer: prayer, celebrationTier: tier, dayKey: target.dayKey,
+                        travelCombined: false)
     }
 
     /// v3.3: travel (jam') — log the lead prayer AND its partner together from
@@ -189,8 +242,11 @@ final class AppState: ObservableObject {
         }
         guard !added.isEmpty else { return }
         logs.append(contentsOf: added)
+        // v4 §3: both prayers of the pair carry `travel_combined`, so the
+        // circle can tell a jam' from two separate posts a minute apart.
         finalizeLogging(added: added, snapshot: snapshot,
-                        celebrationPrayer: lead, celebrationTier: tier, dayKey: dayKey)
+                        celebrationPrayer: lead, celebrationTier: tier, dayKey: dayKey,
+                        travelCombined: true)
     }
 
     /// The merged window for a travel pair: [lead.start, follow.end].
@@ -240,7 +296,8 @@ final class AppState: ObservableObject {
     /// celebration. `added` may hold one log (single) or two (combined); XP is
     /// summed so a combined post celebrates the full amount.
     private func finalizeLogging(added: [PrayerLog], snapshot: PreLogSnapshot,
-                                 celebrationPrayer: Prayer, celebrationTier: LogTier, dayKey: String) {
+                                 celebrationPrayer: Prayer, celebrationTier: LogTier, dayKey: String,
+                                 travelCombined: Bool) {
         let excused = profile.excusedDayKeys.contains(dayKey)
         var newProfile = profile
         let addedXP = added.reduce(0) { $0 + $1.xp }
@@ -271,6 +328,10 @@ final class AppState: ObservableObject {
 
         profile = newProfile
         persist()
+        // v4 §3: share what the device has just committed — after the write to
+        // disk, never before it, so the queue can never be ahead of the truth
+        // it is describing.
+        mirrorLogged(added, travelCombined: travelCombined)
         awardNewlyCompletedChallenges()
         // The just-logged prayer's pending "Last call" must be dropped.
         NotificationManager.shared.reschedule()
@@ -283,8 +344,95 @@ final class AppState: ObservableObject {
 
     /// Make-up path: tap-only, no photo, qada XP (5). Only effective once the
     /// window has passed (same schedule day).
+    ///
+    /// Deliberately no mirror call of its own: it IS `log`, and adding one here
+    /// would post the same prayer twice.
     func logQada(_ prayer: Prayer) {
         log(prayer, photoFilename: nil, jamaat: false)
+    }
+
+    // MARK: - Mirroring to the circle (v4 Phase C)
+
+    /// Whether a local change is also a circle change.
+    ///
+    /// The engine refuses without a live circle anyway, so this is belt to its
+    /// braces — but it is the half that reads at the call site, and it is the
+    /// half that keeps demo mode from ever forming a wire type at all.
+    private var mirrorsToCircle: Bool { settings.circleMode == .real }
+
+    /// Share logs that were just written locally. `travelCombined` is passed
+    /// in because a `PrayerLog` cannot know it was half of a jam' pair — §3
+    /// wants the flag on BOTH prayers of the pair.
+    ///
+    /// A combined pair enqueues two photo uploads of the same JPEG, one object
+    /// each, and that is the intended trade: the alternative is two rows
+    /// pointing at one object, where undoing either prayer tombstones the
+    /// picture out from under the other.
+    private func mirrorLogged(_ added: [PrayerLog], travelCombined: Bool) {
+        guard mirrorsToCircle, let sync = circleSync else { return }
+        for entry in added {
+            sync.postLogged(entry, photoFilename: entry.photoFilename,
+                            travelCombined: travelCombined)
+        }
+    }
+
+    /// §3: undo RETRACTS the post. The row goes, and with it the photo.
+    private func mirrorRetracted(_ removed: PrayerLog) {
+        guard mirrorsToCircle, let sync = circleSync else { return }
+        sync.postRetracted(removed)
+    }
+
+    /// §3: a rest day travels as a BARE FLAG. Note what this signature cannot
+    /// express — `breakReason` has nowhere to go, here or in `CircleOp`, and
+    /// that is the enforcement.
+    private func mirrorExcused(dayKey: String, on: Bool) {
+        guard mirrorsToCircle, let sync = circleSync else { return }
+        sync.excusedChanged(dayKey: dayKey, on: on)
+    }
+
+    /// §3: dhikr + good deeds leave as one opaque weekly integer — never the
+    /// tap count, never which deed.
+    ///
+    /// Sent on every grant rather than on a timer: the outbox collapses repeats
+    /// on `recovery:<weekKey>`, so a hundred tasbih taps are one pending write
+    /// that keeps being rewritten, and the drain's own re-entrancy guard means
+    /// they cost at most one request per round trip.
+    private func mirrorRecoveryWeek() {
+        guard mirrorsToCircle, let sync = circleSync else { return }
+        let now: Date = AppClock.now
+        sync.recoveryWeekChanged(weekKey: BuddySimulator.weekKey(for: now),
+                                 xp: recoveryXPThisWeek(now: now))
+    }
+
+    /// §5: a custom challenge belongs to the CIRCLE, which is why
+    /// `activeCustomChallenges` already reads the mirror for one.
+    private func mirrorChallengeCreated(_ challenge: CustomChallenge) {
+        guard mirrorsToCircle, let sync = circleSync else { return }
+        sync.challengeCreated(challenge)
+    }
+
+    private func mirrorChallengeDeleted(id: String) {
+        guard mirrorsToCircle, let sync = circleSync else { return }
+        sync.challengeDeleted(id: id)
+    }
+
+    /// SPEC-V4 §2, via `CircleServiceHost`: the current Mon-start week's logs,
+    /// so joining mid-week shows the circle your week so far.
+    ///
+    /// The one read the circle stack is allowed of local history, and it is an
+    /// answer rather than access: one week, filtered here, read-only. The
+    /// engine filters again by week key — this is not a place to be clever.
+    func circleBackfillLogs(forWeekOf now: Date) -> [PrayerLog] {
+        let keys: Set<String> = Set(BuddySimulator.weekDayKeys(for: now))
+        return logs.filter { keys.contains($0.dayKey) }
+    }
+
+    /// The same week's rest days, as bare keys (§3 — the reason has no way out
+    /// of this file, and no way into `CircleOp`). Joining mid-period should
+    /// show the circle "resting", not five missed cells a day.
+    func circleBackfillExcusedDayKeys(forWeekOf now: Date) -> [String] {
+        let keys: Set<String> = Set(BuddySimulator.weekDayKeys(for: now))
+        return profile.excusedDayKeys.filter { keys.contains($0) }.sorted()
     }
 
     // MARK: - Editing past days (v3.6 — design session)
@@ -299,10 +447,15 @@ final class AppState: ObservableObject {
               !hasLog(prayer: prayer, dayKey: dayKey),
               !isExcused(prayer: prayer, dayKey: dayKey) else { return }
         let xp = GameEngine.lateEditXP(dayKey: dayKey, todayKey: todayKey)
-        logs.append(PrayerLog(id: UUID(), prayer: prayer, dayKey: dayKey,
-                              loggedAt: AppClock.now, tier: .qada, xp: xp))
+        let entry = PrayerLog(id: UUID(), prayer: prayer, dayKey: dayKey,
+                              loggedAt: AppClock.now, tier: .qada, xp: xp)
+        logs.append(entry)
         profile.totalXP += xp
         persist()
+        // v4 §3: a retroactive make-up is still a post — it carries the PAST
+        // `dayKey` it belongs to, and the server never re-derives one from
+        // `logged_at` (which is now).
+        mirrorLogged([entry], travelCombined: false)
         objectWillChange.send()
     }
 
@@ -351,6 +504,10 @@ final class AppState: ObservableObject {
 
         profile = newProfile
         persist()
+        // v4 §3: undo DELETES the post. The outbox collapses this against a
+        // create that never left the device, so undoing straight after logging
+        // costs the network nothing at all.
+        mirrorRetracted(removed)
         // The prayer is unlogged again — restore its "Last call" if applicable.
         NotificationManager.shared.reschedule()
     }
@@ -432,6 +589,13 @@ final class AppState: ObservableObject {
                 for: AppClock.now.addingTimeInterval(24 * 3600))
         }
         persistProfile()
+        // v4 §3: the circle sees "resting", never why. This asks the DAY
+        // whether it ended up excused rather than asking the break — a break
+        // that starts after the last window closes excuses nothing today, and
+        // sending a flag for it would show a rest day that isn't one.
+        if profile.excusedDayKeys.contains(todayKey) {
+            mirrorExcused(dayKey: todayKey, on: true)
+        }
         NotificationManager.shared.scheduleBreakReminder(daysFromNow: reason == "period" ? 7 : 5,
                                                          reason: reason)
         objectWillChange.send()
@@ -458,6 +622,11 @@ final class AppState: ObservableObject {
         guard isOnBreak else { return }
         profile.excusedModeSince = nil
         profile.breakReason = nil
+        // v4 §3: the wire flag is whole-day, so only the branch that stops the
+        // day being excused at all has anything to tell the circle. Resuming
+        // mid-day leaves the day excused (the later prayers just count again),
+        // which is the same fact the circle already has.
+        var unexcusedToday: Bool = false
         if let prayer,
            let idx = Prayer.allCases.firstIndex(of: prayer), idx > 0,
            profile.excusedDayKeys.contains(todayKey) {
@@ -466,8 +635,12 @@ final class AppState: ObservableObject {
             profile.excusedDayKeys.remove(todayKey)
             profile.partialExcuseStart[todayKey] = nil
             profile.partialExcuseEnd[todayKey] = nil
+            unexcusedToday = true
         }
         persistProfile()
+        if unexcusedToday {
+            mirrorExcused(dayKey: todayKey, on: false)
+        }
         NotificationManager.shared.cancelBreakReminder()
         NotificationManager.shared.reschedule()
         objectWillChange.send()
@@ -496,6 +669,7 @@ final class AppState: ObservableObject {
             profile.excusedDayKeys.remove(key)
         }
         persistProfile()
+        mirrorExcused(dayKey: key, on: on)
     }
 
     // MARK: - Recharge: dhikr + good deeds (v3.8 — permanent, for everyone)
@@ -534,6 +708,7 @@ final class AppState: ObservableObject {
         profile.dhikrByDay[todayKey, default: 0] += 1
         awardRecoveryXP(GameEngine.dhikrXP)
         persistProfile()
+        mirrorRecoveryWeek()
     }
 
     /// Complete a good-deed prompt for today: once per deed per day, +deedXP
@@ -543,6 +718,7 @@ final class AppState: ObservableObject {
         profile.deedsByDay[todayKey, default: []].append(id)
         awardRecoveryXP(GameEngine.deedXP)
         persistProfile()
+        mirrorRecoveryWeek()
     }
 
     /// Grant up to `amount` XP, never exceeding today's state-aware cap.
@@ -731,6 +907,27 @@ final class AppState: ObservableObject {
                      emoji: "😄", isYou: true, avatarFilename: profile.avatarFilename)
     }
 
+    /// The id every square in a photo grid carries.
+    ///
+    /// v4: built and read through this pair rather than spelled inline, because
+    /// a tile now has to recover the coordinates it was drawn for —
+    /// `PhotoSquare` resolves a buddy's Storage photo from (member, day,
+    /// prayer), and the alternative was threading a path through two view
+    /// layers that have no other reason to know about one.
+    static func gridEntryID(memberID: String, dayKey: String, prayer: Prayer) -> String {
+        "\(memberID)|\(dayKey)|\(prayer.rawValue)"
+    }
+
+    /// The inverse. nil for anything that isn't one of ours (a SwiftUI preview
+    /// passing "1", say) — never a crash, never a guess.
+    static func gridEntryCoordinates(_ id: String)
+        -> (memberID: String, dayKey: String, prayer: Prayer)? {
+        let parts: [Substring] = id.split(separator: "|", omittingEmptySubsequences: false)
+        guard parts.count == 3 else { return nil }
+        guard let prayer = Prayer(rawValue: String(parts[2])) else { return nil }
+        return (String(parts[0]), String(parts[1]), prayer)
+    }
+
     /// The circle's squares for one prayer on one schedule day, filling in
     /// live: a buddy's post appears only once AppClock.now >= its loggedAt.
     func gridEntries(for prayer: Prayer, dayKey: String) -> [GridEntry] {
@@ -742,7 +939,9 @@ final class AppState: ObservableObject {
         for member in source.members {
             let result = source.entry(forMember: member.id, prayer: prayer,
                                       dayKey: dayKey, window: window, now: now)
-            entries.append(GridEntry(id: "\(member.id)|\(dayKey)|\(prayer.rawValue)",
+            let entryID: String = AppState.gridEntryID(memberID: member.id, dayKey: dayKey,
+                                                      prayer: prayer)
+            entries.append(GridEntry(id: entryID,
                                      member: member, state: result.state,
                                      placeLabel: result.placeLabel))
         }
@@ -765,7 +964,8 @@ final class AppState: ObservableObject {
         } else {
             myState = .waiting
         }
-        entries.append(GridEntry(id: "you|\(dayKey)|\(prayer.rawValue)",
+        let myEntryID: String = AppState.gridEntryID(memberID: "you", dayKey: dayKey, prayer: prayer)
+        entries.append(GridEntry(id: myEntryID,
                                  member: youMember, state: myState, placeLabel: myPlaceLabel))
         return entries
     }
@@ -947,10 +1147,20 @@ final class AppState: ObservableObject {
     /// the id decides: the mirror's copy wins once it round-trips.
     private var activeCustomChallenges: [CustomChallenge] {
         guard settings.circleMode == .real else { return profile.customChallenges }
-        let synced: [CustomChallenge] = circleSnapshot.customChallenges
+        // v4 Phase C FIX: a challenge the user has REMOVED is subtracted from
+        // the mirror while its delete is still queued. `deleteCustomChallenge`
+        // drops it from `profile.customChallenges`, but the synced copy is what
+        // renders, so removing one offline used to leave the card on screen and
+        // `ChallengeEngine` scoring it until the queue drained and a full pull
+        // came back. (`CircleSync.applyAcknowledged` closes the other half of
+        // the window — after the delete lands and before the next pull.)
+        let removed: Set<String> = circleSync?.pendingChallengeDeletions ?? []
+        let synced: [CustomChallenge] = circleSnapshot.customChallenges.filter {
+            !removed.contains($0.id)
+        }
         let syncedIDs: Set<String> = Set(synced.map { $0.id })
         let pending: [CustomChallenge] = profile.customChallenges.filter {
-            !syncedIDs.contains($0.id)
+            !syncedIDs.contains($0.id) && !removed.contains($0.id)
         }
         return synced + pending
     }
@@ -962,12 +1172,14 @@ final class AppState: ObservableObject {
                                         createdAt: AppClock.now)
         profile.customChallenges.append(challenge)
         persistProfile()
+        mirrorChallengeCreated(challenge)
         objectWillChange.send()
     }
 
     func deleteCustomChallenge(id: String) {
         profile.customChallenges.removeAll { $0.id == id }
         persistProfile()
+        mirrorChallengeDeleted(id: id)
         objectWillChange.send()
     }
 
@@ -1108,18 +1320,26 @@ final class AppState: ObservableObject {
         // auto-excused (incl. days that elapsed since the last open).
         if let since = profile.excusedModeSince {
             var changed = false
+            // v4 §3: a break spans days, and each of them is a separate row on
+            // the wire. Collected rather than mirrored inline, so the flags go
+            // out only once the whole walk is on disk.
+            var newlyExcused: [String] = []
             var day = AppClock.date(fromDayKey: since) ?? now
             let todayStart = calendar.startOfDay(for: now)
             while day <= todayStart {
                 let key = AppClock.dayKey(for: day)
                 if !profile.excusedDayKeys.contains(key) {
                     profile.excusedDayKeys.insert(key)
+                    newlyExcused.append(key)
                     changed = true
                 }
                 guard let next = calendar.date(byAdding: .day, value: 1, to: day) else { break }
                 day = next
             }
             if changed { persistProfile() }
+            for key in newlyExcused {
+                mirrorExcused(dayKey: key, on: true)
+            }
         }
 
         reconcileStreakIfNeeded(now: now, calendar: calendar)

@@ -27,7 +27,21 @@ enum CircleOp: Codable, Equatable, Sendable {
     case deleteChallenge(challengeID: String)
     /// `filename` is the local `PhotoStore` file; `path` is its
     /// `<circle>/<user>/<uuid>.jpg` destination in Storage.
-    case uploadPhoto(postID: UUID, filename: String, path: String)
+    ///
+    /// v4 Phase C FIX: the op also carries the post's SLOT — `(day_key,
+    /// prayer)`. Patching `photo_path` by row id looked obvious and was wrong:
+    /// `posts` is unique on `(user_id, circle_id, day_key, prayer)` as well as
+    /// on `id`, so a post that lost the slot race (the same account logging the
+    /// same prayer from a second device) is repaired in place on the row that
+    /// WON, which has a different id. The patch then matched zero rows,
+    /// PostgREST answered 204, and the op was acked as a success — leaving the
+    /// JPEG in Storage with no `posts` row pointing at it. `photo_tombstones`
+    /// only ever learns a path from a row that stops pointing at it, so the
+    /// sweep could never collect it and a private photo stayed readable by the
+    /// whole circle forever (§4). Patching by the slot lands on whichever row
+    /// won it, and the trigger tombstones whatever path it displaced.
+    case uploadPhoto(postID: UUID, dayKey: String, prayer: Prayer,
+                     filename: String, path: String)
     /// Retract an object that already reached Storage. Deleting the post ROW
     /// is not enough: the retention sweep enumerates paths from `posts`, so an
     /// object whose row is gone is never collected and stays readable by every
@@ -87,7 +101,7 @@ enum CircleOp: Codable, Equatable, Sendable {
             return CircleOp.upsertChallengeSignature(challenge.id)
         case .deleteChallenge(let challengeID):
             return "challenge.delete:\(challengeID)"
-        case .uploadPhoto(let postID, _, _):
+        case .uploadPhoto(let postID, _, _, _, _):
             return CircleOp.uploadPhotoSignature(postID)
         case .deletePhoto(let path):
             return "photo.delete:\(path)"
@@ -97,7 +111,7 @@ enum CircleOp: Codable, Equatable, Sendable {
     // MARK: Codable
 
     private enum CodingKeys: String, CodingKey {
-        case kind, post, postID, dayKey, excused, weekKey, xp
+        case kind, post, postID, dayKey, prayer, excused, weekKey, xp
         case challenge, challengeID, filename, path
     }
 
@@ -132,7 +146,16 @@ enum CircleOp: Codable, Equatable, Sendable {
             let postID = try c.decode(UUID.self, forKey: .postID)
             let filename = try c.decode(String.self, forKey: .filename)
             let path = try c.decode(String.self, forKey: .path)
-            self = .uploadPhoto(postID: postID, filename: filename, path: path)
+            // Phase C added the slot. Decoded strictly rather than defaulted:
+            // no shipped build has ever ENQUEUED a photo op (B2/B3 only ever
+            // cleared the queue), so a persisted item without these keys cannot
+            // exist — and if one somehow did, `LossyItem` drops that single
+            // entry rather than the queue, which beats uploading a JPEG that
+            // would then be patched onto the wrong row.
+            let dayKey = try c.decode(String.self, forKey: .dayKey)
+            let prayer = try c.decode(Prayer.self, forKey: .prayer)
+            self = .uploadPhoto(postID: postID, dayKey: dayKey, prayer: prayer,
+                                filename: filename, path: path)
         case .deletePhoto:
             let path = try c.decode(String.self, forKey: .path)
             self = .deletePhoto(path: path)
@@ -157,8 +180,10 @@ enum CircleOp: Codable, Equatable, Sendable {
             try c.encode(challenge, forKey: .challenge)
         case .deleteChallenge(let challengeID):
             try c.encode(challengeID, forKey: .challengeID)
-        case .uploadPhoto(let postID, let filename, let path):
+        case .uploadPhoto(let postID, let dayKey, let prayer, let filename, let path):
             try c.encode(postID, forKey: .postID)
+            try c.encode(dayKey, forKey: .dayKey)
+            try c.encode(prayer, forKey: .prayer)
             try c.encode(filename, forKey: .filename)
             try c.encode(path, forKey: .path)
         case .deletePhoto(let path):
@@ -295,6 +320,22 @@ struct CircleOutbox: Codable, Equatable, Sendable {
         items.removeAll { $0.id == id }
     }
 
+    /// Give up the exclusivity marker WITHOUT charging the item a failure.
+    ///
+    /// v4 Phase C FIX: `CircleSync` deliberately does not spend an attempt on a
+    /// transport failure (a fortnight in airplane mode must not delete a prayer
+    /// post), and that early return skipped `recordFailure(id:)` — the only
+    /// call that cleared `inFlightID`. The head then stayed flagged in flight
+    /// from the first offline attempt until the app relaunched, and collapsing
+    /// never touches an in-flight item: undoing a post whose create had failed
+    /// offline appended a delete BEHIND the create instead of cancelling it, so
+    /// on reconnect the circle was shown a prayer the user had retracted.
+    /// Releasing the marker is the whole fix — the attempt counter stays
+    /// unspent, which is the part that was right.
+    mutating func releaseInFlight() {
+        inFlightID = nil
+    }
+
     mutating func recordFailure(id: UUID) {
         if inFlightID == id { inFlightID = nil }
         guard let index = items.firstIndex(where: { $0.id == id }) else { return }
@@ -327,7 +368,7 @@ struct CircleOutbox: Codable, Equatable, Sendable {
     }
 
     private static func photoPath(of op: CircleOp) -> String? {
-        guard case .uploadPhoto(_, _, let path) = op else { return nil }
+        guard case .uploadPhoto(_, _, _, _, let path) = op else { return nil }
         return path
     }
 

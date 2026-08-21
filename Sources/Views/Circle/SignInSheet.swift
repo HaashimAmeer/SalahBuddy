@@ -224,6 +224,12 @@ struct SignInSheet: View {
         if circleService.phase == .noCircle {
             await circleService.refresh()
         }
+        // v4 Phase C FIX: "drains on successful sign-in" is one of the brief's
+        // four drain triggers and it had no caller. `bootstrap()`'s pull only
+        // kicks the engine when the CIRCLE id changed, so signing back into the
+        // same circle — the common case on a device that already has the
+        // mirror — left anything queued while signed out sitting there.
+        await circleService.sync?.signedIn()
         dismiss()
     }
 }

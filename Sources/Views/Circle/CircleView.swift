@@ -79,6 +79,14 @@ struct CircleView: View {
                     header
                         .id("tour-circle-top")
 
+                    // v4 Phase C: the brief's "waiting to sync" affordance,
+                    // and it sits above everything because it is about the
+                    // page below it being incomplete. Silent outside a real
+                    // circle, and silent while the queue is moving.
+                    if let sync: CircleSync = circleService.sync {
+                        CircleSyncStatusRow(sync: sync)
+                    }
+
                     if state.isSoloMode {
                         // v3.9: no circle yet — the whole tab is the pitch.
                         // Still a tour target, so step 4 spotlights something
@@ -540,6 +548,68 @@ private struct SoloCircleCard: View {
 }
 
 // MARK: - Empty state
+
+// MARK: - "Waiting to sync" (v4 Phase C)
+
+/// The honest row the offline queue owes the person.
+///
+/// v4 Phase C FIX: `CircleSync` published `status`, `pendingCount`,
+/// `discardedCount`, `stalledItem` and `retryNow()` from the day it was
+/// written, and not one view read any of them — so a write the server refused
+/// seven times was dropped with no trace anywhere, and the gap only ever showed
+/// up as a hole in next week's grid. The brief asks for the affordance
+/// "somewhere honest"; the Circle tab is the page whose contents are wrong
+/// while a write is stuck.
+///
+/// Deliberately quiet: `.idle`, `.syncing` and `.pending` say nothing at all —
+/// a queue that is merely moving is not news, and a badge that is always up is
+/// a badge nobody reads.
+private struct CircleSyncStatusRow: View {
+    @ObservedObject var sync: CircleSync
+
+    var body: some View {
+        Group {
+            if let message: String = statusMessage {
+                card(message)
+            }
+        }
+    }
+
+    /// Nil means "nothing worth saying".
+    private var statusMessage: String? {
+        if sync.discardedCount > 0 {
+            let count: Int = sync.discardedCount
+            let noun: String = count == 1 ? "post" : "posts"
+            return "\(count) \(noun) didn't reach your circle. Your own record is safe."
+        }
+        guard case .waiting(let count, let reason) = sync.status else { return nil }
+        let noun: String = count == 1 ? "update" : "updates"
+        return "\(count) \(noun) waiting to sync — \(reason.title.lowercased())."
+    }
+
+    private func card(_ message: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "arrow.triangle.2.circlepath")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(Theme.amber)
+            Text(message)
+                .font(Theme.sans(13, .medium))
+                .foregroundStyle(Theme.inkMuted)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 8)
+            Button("Try now") {
+                Task { await sync.retryNow() }
+            }
+            .font(Theme.sans(13, .bold))
+            .foregroundStyle(Theme.green)
+            .buttonStyle(.plain)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 12)
+        .padding(.horizontal, 14)
+        .cardStyle()
+    }
+}
 
 private struct CircleEmptyStateCard: View {
     var body: some View {

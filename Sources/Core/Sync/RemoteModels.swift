@@ -199,10 +199,23 @@ struct RemotePost: Codable, Equatable, Sendable, Identifiable {
     var photoPath: String?      // Storage path; nil once retention ages the photo out
     var travelCombined: Bool
 
+    /// The SERVER's `updated_at`, decoded and never encoded (rule 2).
+    ///
+    /// v4 Phase C DECISION: this is the delta cursor's source of truth. A delta
+    /// asks PostgREST for `updated_at > <cursor>`, and `updated_at` is stamped
+    /// by `now()` inside Postgres — so a cursor taken from THIS device's clock
+    /// is being compared against a clock that is not this device's. A phone
+    /// running a minute fast (a hand-set clock, or an RTC restored before NTP
+    /// catches up) would ask for rows from the server's future and get an empty
+    /// page every single time, silently, forever. Carrying the server's own
+    /// stamp back as the next cursor removes the comparison between clocks
+    /// entirely. Nil for a row this device built rather than read.
+    var updatedAt: Date?
+
     init(id: UUID, userID: UUID, circleID: UUID, dayKey: String, prayer: Prayer,
          tier: LogTier, loggedAt: Date, jamaat: Bool = false,
          placeLabel: String? = nil, photoPath: String? = nil,
-         travelCombined: Bool = false) {
+         travelCombined: Bool = false, updatedAt: Date? = nil) {
         self.id = id
         self.userID = userID
         self.circleID = circleID
@@ -214,6 +227,7 @@ struct RemotePost: Codable, Equatable, Sendable, Identifiable {
         self.placeLabel = placeLabel
         self.photoPath = photoPath
         self.travelCombined = travelCombined
+        self.updatedAt = updatedAt
     }
 
     enum CodingKeys: String, CodingKey {
@@ -228,6 +242,7 @@ struct RemotePost: Codable, Equatable, Sendable, Identifiable {
         case placeLabel = "place_label"
         case photoPath = "photo_path"
         case travelCombined = "travel_combined"
+        case updatedAt = "updated_at"
     }
 
     init(from decoder: Decoder) throws {
@@ -243,10 +258,13 @@ struct RemotePost: Codable, Equatable, Sendable, Identifiable {
         placeLabel = try c.decodeIfPresent(String.self, forKey: .placeLabel)
         photoPath = try c.decodeIfPresent(String.self, forKey: .photoPath)
         travelCombined = (try? c.decodeIfPresent(Bool.self, forKey: .travelCombined)) ?? false
+        updatedAt = (try? c.decodeIfPresent(Date.self, forKey: .updatedAt)) ?? nil
     }
 
     /// `created_at` / `updated_at` are intentionally absent: they are server
-    /// defaults, and sending them would let a wrong device clock win.
+    /// defaults, and sending them would let a wrong device clock win. That is
+    /// also why `updatedAt` is decode-only above — it is read as the delta
+    /// cursor and never written back.
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(id, forKey: .id)
@@ -272,10 +290,29 @@ struct RemotePost: Codable, Equatable, Sendable, Identifiable {
     /// - `placeTag`/`placeName` stay nil: the wire carries only the rendered
     ///   label, and the tag matters solely for your own Journey "Places" stats.
     func asPrayerLog() -> PrayerLog {
-        let xp: Int = GameEngine.prayerXP(tier: tier, jamaat: jamaat)
         return PrayerLog(id: id, prayer: prayer, dayKey: dayKey, loggedAt: loggedAt,
-                         tier: tier, xp: xp, photoFilename: nil, jamaat: jamaat,
+                         tier: tier, xp: postedXP, photoFilename: nil, jamaat: jamaat,
                          placeTag: nil, placeName: nil)
+    }
+
+    /// What `GameEngine` says this post is worth — run here so a buddy's row is
+    /// scored by the same pure functions as your own.
+    ///
+    /// v4 Phase C FIX: a `.qada` post is NOT flatly worth `LogTier.qada.xp`.
+    /// `AppState.logPastMakeUp` scores a retroactive make-up with
+    /// `GameEngine.lateEditXP`, which pays 5 inside the 2-day grace and **0**
+    /// after it — same-day logging stays the incentive. Re-deriving a flat 5
+    /// here made every OTHER device score a stale make-up five points higher
+    /// than the device that made it, so the two leaderboards disagreed about
+    /// the same person for the rest of the week.
+    ///
+    /// It stays clock-free: the "today" the rule needs is the day the EDIT was
+    /// made, which is `logged_at` — already on the wire, and the same value the
+    /// poster's own device used. A same-day qada and an isha-after-midnight
+    /// qada both still come out at 5, which is what the local paths produce.
+    private var postedXP: Int {
+        guard tier == .qada else { return GameEngine.prayerXP(tier: tier, jamaat: jamaat) }
+        return GameEngine.lateEditXP(dayKey: dayKey, todayKey: AppClock.dayKey(for: loggedAt))
     }
 
     /// The other direction, kept here so there is exactly one mapping in the
@@ -407,10 +444,22 @@ struct RemoteCustomChallenge: Codable, Equatable, Sendable, Identifiable {
         self.createdAt = createdAt
     }
 
-    // `created_at` is the ONE timestamp this file writes: it carries
-    // `CustomChallenge.createdAt`, which orders the challenge list on every
-    // device, so it is client-authored data rather than a server default and
-    // rule 2 does not apply to it.
+    // v4 Phase C FIX: `created_at` is decoded and NEVER encoded, exactly like
+    // every other timestamp in this file — an earlier draft made it rule 2's
+    // second exception and the grant says otherwise.
+    // `20260821000200_rls.sql` gives `authenticated`
+    // `insert (id, circle_id, created_by, prayer, days, week_key)` and nothing
+    // more, and `backend/tests/sql/12_rls_enabled_everywhere.sql` fails the
+    // backend build if `created_at` is ever added to that list. Sending the
+    // column made EVERY challenge insert fail with `42501 permission denied for
+    // column created_at` — a refusal, not an outage, so the op spent its whole
+    // refusal budget and was then discarded, and a custom challenge silently
+    // never reached the circle at all.
+    //
+    // Nothing is lost: the column's `default now()` fills it, and the value is
+    // read back on the next pull. It is not load-bearing on the client either —
+    // `CustomChallenge.createdAt` is used only by `CircleSync.challengeCreated`
+    // to derive a week key from the LOCAL challenge, never to order anything.
     enum CodingKeys: String, CodingKey {
         case id
         case circleID = "circle_id"
@@ -440,7 +489,7 @@ struct RemoteCustomChallenge: Codable, Equatable, Sendable, Identifiable {
         try c.encode(prayer, forKey: .prayer)
         try c.encode(days, forKey: .days)
         try c.encodeIfPresent(weekKey, forKey: .weekKey)
-        try c.encodeIfPresent(createdAt, forKey: .createdAt)
+        // created_at deliberately absent — see the note on CodingKeys.
     }
 
     /// The local shape `ChallengeEngine` already understands. `createdAt` falls
