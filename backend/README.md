@@ -74,6 +74,15 @@ downgrade: the shim gives the migrations a real `auth.users`, real
 `service_role` roles and a minimal `storage` schema, so the policies under test
 are the ones that ship.
 
+The shim also reproduces the one piece of Supabase that is a *trap* rather than
+a convenience: the default privileges on `public` that grant every newly created
+table and function to `anon`, `authenticated` and `service_role`. A vanilla
+Postgres has no such thing, so without them the sandbox would be **more locked
+down than production** and test 12's "anon holds nothing" assertion would pass
+while describing a database it had never seen. With them in place the migrations
+have to revoke for real — which is why `20260821000200_rls.sql` resets both
+roles before granting back, verb by verb.
+
 ### SQL suite
 
 ```bash
@@ -89,15 +98,21 @@ PGHOST=/tmp PGPORT=5433 PGUSER=postgres backend/tests/run_sql_tests.sh
 ```
 
 It creates a throwaway database (`salahbuddy_test_$$`, dropped on exit), applies
-the shim, then every migration, then every `tests/sql/*.sql`, printing
-`PASS`/`FAIL` per file and exiting non-zero if any failed. Passwords stay in
-`PGPASSWORD` rather than the URI so nothing secret can end up in an echoed
-conninfo string. Set `SCRATCH_DB` to keep a fixed name if you want to poke at
-the database afterwards (it is still dropped at exit — comment out the trap).
+the shim, then every migration, then every `tests/sql/*.sql`, and finally
+`seed.sql` **twice** — the seed is staging-only and `supabase db push` never
+runs it, so nothing else would notice it rotting against a schema change, and
+applying it twice is what proves the idempotence it claims. Printing `PASS`/
+`FAIL` per file, exiting non-zero if any failed. Passwords stay in `PGPASSWORD`
+rather than the URI so nothing secret can end up in an echoed conninfo string.
+Set `SCRATCH_DB` to keep a fixed name if you want to poke at the database
+afterwards (it is still dropped at exit — comment out the trap).
 
 Tests impersonate users with `set local role authenticated` +
 `set local request.jwt.claims`, each file in its own transaction, so they leave
-no residue and can run in any order.
+no residue and can run in any order. Each is handed `:migrations_dir` as a psql
+variable, so a test can `\i` a real migration file (test 17 re-runs the realtime
+one against a half-published publication) instead of pasting a copy of its SQL —
+a test that reimplements the migration proves nothing about the migration.
 
 ### Edge functions
 
@@ -247,10 +262,15 @@ preferences.
   `(user_id, week_key, xp)` and nothing about *what* was done. Dhikr counts and
   good-deed choices stay local. The scoreboard stays fair for anyone on a break
   without narrating their life to the group.
-- **Nothing is world-readable.** No table grants anything to `anon`. Every
-  read predicate is "the row's circle is *my* circle", every write predicate
-  adds "and the row is mine". `service_role` bypasses RLS and therefore never
-  touches a client; only the edge functions hold it, injected by the platform.
+- **Nothing is world-readable.** `anon` is explicitly *revoked* from every table
+  and RPC — not merely left ungranted, because Supabase's default privileges on
+  `public` hand new objects to `anon` before a migration says a word. Every read
+  predicate is "the row's circle is *my* circle", every write predicate adds
+  "and the row is mine". `service_role` bypasses RLS and therefore never touches
+  a client; only the edge functions hold it, injected by the platform.
+  `authenticated` is reset the same way and granted back verb by verb, so the
+  privilege matrix in `20260821000200_rls.sql` is the one that deploys — test 12
+  pins it in both directions (an extra verb fails; a missing one fails too).
 - **Photos are private objects in a private bucket**, keyed
   `<circle_id>/<user_id>/<uuid>.jpg`. Folder 1 is the read scope, folder 2 is
   the owner — which is what makes the storage policies one-liners. 5 MiB cap,
