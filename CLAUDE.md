@@ -45,7 +45,7 @@ The only SPM dependency is **Adhan** (`batoulapps/adhan-swift`, pinned 1.4.0) fo
 
 ### CI — local pre-push hook (no GitHub-hosted runners)
 
-The repo is **private**, so GitHub-hosted macOS runners are intentionally avoided (cost). Local CI is a **git pre-push hook** that runs `make test` on your Mac and blocks the push if tests fail. The hook is tracked at **`.githooks/pre-push`** and activated with `make hooks` (`git config core.hooksPath .githooks`) — run that once after cloning. Bypass deliberately for a doc-only/WIP push with `git push --no-verify`.
+The repo is **PUBLIC** — never commit credentials, and GitHub Actions workflows must be push-triggered only (no `pull_request_target`, nothing that exposes repo secrets to fork PRs). Local CI is a **git pre-push hook** that runs `make test` on your Mac and blocks the push if tests fail. The hook is tracked at **`.githooks/pre-push`** and activated with `make hooks` (`git config core.hooksPath .githooks`) — run that once after cloning. Bypass deliberately for a doc-only/WIP push with `git push --no-verify`.
 
 **Xcode Cloud** (see `XCODE-CLOUD.md`) additionally builds every push to `staging` on Apple's free tier and uploads green builds to TestFlight internal testing — this is the path for cloud/web sessions that can't compile Swift locally. `ci_scripts/ci_post_clone.sh` regenerates the git-ignored project and stamps the CI build number. Manual archive/upload from Xcode still works alongside it.
 

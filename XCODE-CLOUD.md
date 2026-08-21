@@ -46,6 +46,21 @@ the iPhone a few minutes later.
    uploaded build (e.g. `10`) so CI numbers never collide with the manual
    `1.0 (1)` / `1.0 (2)` uploads.
 
+## Current state (2026-08-21)
+
+- Workflow **"Staging"** is active: Branch Changes on `staging`, auto-cancel,
+  Archive → TestFlight Internal, and the **backend path filter is configured**
+  ("do not start if only files in /backend change").
+- **Known gap: no Test action yet** — the workflow only archives. Add a Test
+  action (scheme SalahBuddy, iOS Simulator) in the workflow editor; it is the
+  safety net for cloud-session pushes that skip the local pre-push hook.
+- **Supabase: staging only.** The production project is deferred — the free
+  tier caps the *account* at 2 active projects and both slots are taken.
+  Repo secrets exist for staging (`SUPABASE_ACCESS_TOKEN`,
+  `SUPABASE_STAGING_PROJECT_REF`, `SUPABASE_STAGING_DB_PASSWORD`); the
+  production pair does NOT exist yet, so backend CI must skip the
+  `production` deploy path gracefully rather than reference missing secrets.
+
 ## Day-to-day from the cloud
 
 Push to `staging` → Xcode Cloud tests + archives → green build hits
