@@ -51,9 +51,11 @@ struct EmptyCircleDataSource: CircleDataSource {
 
     var members: [CircleMember] { [] }
 
-    /// Never consulted while `members` is empty; mirrors the demo cap so the
-    /// invite copy doesn't change shape when B3 replaces this.
-    var maxMembers: Int { BuddySimulator.maxFriends }
+    /// Never consulted while `members` is empty, but it must still be the REAL
+    /// cap: this stands in for a circle that has no members yet, and quoting
+    /// the demo simulator's 8 would advertise a friend slot the server refuses
+    /// (a real circle seats 8 including you, so 7 friends).
+    var maxMembers: Int { RemoteCircle.maxFriends }
 
     func entry(forMember id: String, prayer: Prayer, dayKey: String,
                window: PrayerWindow?, now: Date) -> (state: GridEntryState, placeLabel: String?) {

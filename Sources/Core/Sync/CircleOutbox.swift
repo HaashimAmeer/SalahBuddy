@@ -28,10 +28,16 @@ enum CircleOp: Codable, Equatable, Sendable {
     /// `filename` is the local `PhotoStore` file; `path` is its
     /// `<circle>/<user>/<uuid>.jpg` destination in Storage.
     case uploadPhoto(postID: UUID, filename: String, path: String)
+    /// Retract an object that already reached Storage. Deleting the post ROW
+    /// is not enough: the retention sweep enumerates paths from `posts`, so an
+    /// object whose row is gone is never collected and stays readable by every
+    /// circle member (§4). Undoing a post whose photo has already uploaded
+    /// queues this behind the row delete.
+    case deletePhoto(path: String)
 
     enum Kind: String, Codable, Sendable {
         case upsertPost, deletePost, setExcused, setRecoveryWeek
-        case upsertChallenge, deleteChallenge, uploadPhoto
+        case upsertChallenge, deleteChallenge, uploadPhoto, deletePhoto
     }
 
     var kind: Kind {
@@ -43,6 +49,7 @@ enum CircleOp: Codable, Equatable, Sendable {
         case .upsertChallenge: return .upsertChallenge
         case .deleteChallenge: return .deleteChallenge
         case .uploadPhoto: return .uploadPhoto
+        case .deletePhoto: return .deletePhoto
         }
     }
 
@@ -81,6 +88,8 @@ enum CircleOp: Codable, Equatable, Sendable {
             return "challenge.delete:\(challengeID)"
         case .uploadPhoto(let postID, _, _):
             return CircleOp.uploadPhotoSignature(postID)
+        case .deletePhoto(let path):
+            return "photo.delete:\(path)"
         }
     }
 
@@ -123,6 +132,9 @@ enum CircleOp: Codable, Equatable, Sendable {
             let filename = try c.decode(String.self, forKey: .filename)
             let path = try c.decode(String.self, forKey: .path)
             self = .uploadPhoto(postID: postID, filename: filename, path: path)
+        case .deletePhoto:
+            let path = try c.decode(String.self, forKey: .path)
+            self = .deletePhoto(path: path)
         }
     }
 
@@ -147,6 +159,8 @@ enum CircleOp: Codable, Equatable, Sendable {
         case .uploadPhoto(let postID, let filename, let path):
             try c.encode(postID, forKey: .postID)
             try c.encode(filename, forKey: .filename)
+            try c.encode(path, forKey: .path)
+        case .deletePhoto(let path):
             try c.encode(path, forKey: .path)
         }
     }
@@ -199,6 +213,17 @@ struct OutboxItem: Codable, Equatable, Sendable, Identifiable {
 struct CircleOutbox: Codable, Equatable, Sendable {
     private(set) var items: [OutboxItem]
 
+    /// The item the drain currently has on the wire, if any.
+    ///
+    /// v4 DECISION: **collapsing never touches the in-flight item.** An op that
+    /// has been sent may already have been accepted, so cancelling it locally
+    /// would leave the two sides disagreeing forever — undo tapped while the
+    /// create was mid-flight used to swallow the delete and leave a permanent
+    /// row in the circle's feed. Anything that would have collapsed onto the
+    /// item being sent is appended fresh instead: one redundant write, and the
+    /// final state is still correct.
+    private(set) var inFlightID: UUID? = nil
+
     /// A write that keeps failing must not wedge the queue forever. After this
     /// many tries the op is dropped so everything behind it can drain — losing
     /// one write beats never syncing again.
@@ -216,14 +241,27 @@ struct CircleOutbox: Codable, Equatable, Sendable {
     /// The next op to send, left in place until it is acknowledged.
     var peek: OutboxItem? { items.first }
 
+    var inFlightItem: OutboxItem? {
+        guard let inFlightID else { return nil }
+        return items.first { $0.id == inFlightID }
+    }
+
+    private func isInFlight(_ item: OutboxItem) -> Bool { item.id == inFlightID }
+
     // MARK: Mutation
+
+    /// Take the head to send it. It STAYS queued — only `remove(id:)`
+    /// acknowledges it — and is marked in flight so a concurrent `enqueue`
+    /// can't cancel a write the server may already have taken.
+    mutating func checkout() -> OutboxItem? {
+        inFlightID = items.first?.id
+        return items.first
+    }
 
     mutating func enqueue(_ op: CircleOp, id: UUID = UUID(), at now: Date = AppClock.now) {
         switch op {
         case .deletePost(let postID):
-            // A photo for a post that is going away is moot either way.
-            let photoSignature = CircleOp.uploadPhotoSignature(postID)
-            items.removeAll { $0.op.collapseSignature == photoSignature }
+            cancelPhotoUpload(forPost: postID, at: now)
             // A post that never reached the server has nothing to delete —
             // replaying create-then-delete is pure waste, and the delete would
             // find no row. Undo right after logging is the common case.
@@ -235,27 +273,25 @@ struct CircleOutbox: Codable, Equatable, Sendable {
         }
 
         let item = OutboxItem(id: id, op: op, createdAt: now, attempts: 0)
-        if let index = items.firstIndex(where: { $0.op.collapseSignature == op.collapseSignature }) {
+        let signature: String = op.collapseSignature
+        if let index = items.firstIndex(where: {
+            $0.op.collapseSignature == signature && !isInFlight($0)
+        }) {
             items[index] = item   // in place, so the queue's relative order holds
             return
         }
         items.append(item)
     }
 
-    /// FIFO. Ops are strictly ordered — a photo upload follows its post, a
-    /// delete follows the row it deletes — so the drain never reorders.
-    mutating func dequeue() -> OutboxItem? {
-        guard !items.isEmpty else { return nil }
-        return items.removeFirst()
-    }
-
     /// Acknowledge one item (it succeeded, or the server said it was already
     /// there). Safe to call for an id that is no longer queued.
     mutating func remove(id: UUID) {
+        if inFlightID == id { inFlightID = nil }
         items.removeAll { $0.id == id }
     }
 
     mutating func recordFailure(id: UUID) {
+        if inFlightID == id { inFlightID = nil }
         guard let index = items.firstIndex(where: { $0.id == id }) else { return }
         items[index].attempts += 1
         if items[index].attempts >= CircleOutbox.maxAttempts {
@@ -265,13 +301,38 @@ struct CircleOutbox: Codable, Equatable, Sendable {
 
     mutating func removeAll() {
         items.removeAll()
+        inFlightID = nil
+    }
+
+    /// A photo for a post that is going away is moot — UNLESS its upload is
+    /// already on the wire, in which case the object can still land in Storage
+    /// after the row is deleted, where the retention sweep (which enumerates
+    /// paths from `posts`) will never find it. That one case queues an explicit
+    /// `.deletePhoto` behind the upload, because a retracted photo must not
+    /// stay readable by the circle (§4).
+    private mutating func cancelPhotoUpload(forPost postID: UUID, at now: Date) {
+        let signature: String = CircleOp.uploadPhotoSignature(postID)
+        if let sending: OutboxItem = inFlightItem,
+           sending.op.collapseSignature == signature,
+           let path: String = CircleOutbox.photoPath(of: sending.op) {
+            items.append(OutboxItem(op: .deletePhoto(path: path), createdAt: now))
+        }
+        items.removeAll { $0.op.collapseSignature == signature && !isInFlight($0) }
+    }
+
+    private static func photoPath(of op: CircleOp) -> String? {
+        guard case .uploadPhoto(_, _, let path) = op else { return nil }
+        return path
     }
 
     /// Drops the queued op with `signature`, reporting whether there was one.
     /// The caller uses the answer to decide whether the cancelling op still has
-    /// work left to do on the server.
+    /// work left to do on the server. An in-flight op is never dropped, so the
+    /// cancelling op falls through and is queued behind it.
     private mutating func cancelPending(signature: String) -> Bool {
-        guard let index = items.firstIndex(where: { $0.op.collapseSignature == signature }) else {
+        guard let index = items.firstIndex(where: {
+            $0.op.collapseSignature == signature && !isInFlight($0)
+        }) else {
             return false
         }
         items.remove(at: index)
@@ -294,10 +355,13 @@ struct CircleOutbox: Codable, Equatable, Sendable {
         }
     }
 
+    /// `inFlightID` is deliberately not persisted: a queue reloaded from disk
+    /// has nothing on the wire, so every item is collapsible again.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let raw: [LossyItem] = (try? c.decodeIfPresent([LossyItem].self, forKey: .items)) ?? []
         items = raw.compactMap { $0.item }
+        inFlightID = nil
     }
 
     // MARK: Persistence

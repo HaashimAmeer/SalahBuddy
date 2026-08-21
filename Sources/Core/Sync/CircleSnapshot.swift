@@ -118,8 +118,17 @@ struct CircleSnapshot: Codable, Equatable, Sendable {
     }
 
     /// Buddies only — "you" is appended by `AppState`, same as in demo mode.
+    ///
+    /// v4 DECISION: no identity, no circle. `me` is what makes `isYou`
+    /// decidable, and a mirror that has synced membership but not yet resolved
+    /// the signed-in user (a cold launch before auth returns) would otherwise
+    /// hand back a roster that still contains YOU — which `AppState` then
+    /// appends you on top of, double-counting you on the scoreboard, the week
+    /// grid and the crown. An empty circle is the honest answer until the
+    /// identity lands, and it costs one render.
     var buddyMembers: [CircleMember] {
-        orderedMembers
+        guard let me else { return [] }
+        return orderedMembers
             .filter { $0.userID != me }
             .map { makeMember(userID: $0.userID) }
     }

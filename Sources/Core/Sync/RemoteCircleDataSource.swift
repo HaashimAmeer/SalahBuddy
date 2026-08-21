@@ -48,9 +48,14 @@ struct RemoteCircleDataSource: CircleDataSource {
     /// Resolves only ids this source actually speaks for: an unknown id, a
     /// stale one from someone who left, or "you" all answer nil, exactly as
     /// the simulator's unknown-buddy path does.
+    ///
+    /// v4: a mirror with no `me` speaks for NOBODY — without an identity your
+    /// own id is indistinguishable from a buddy's, and answering for it would
+    /// render your posts inside a phantom buddy row. Same call `buddyMembers`
+    /// makes, so the roster and the squares always agree.
     private func userID(forMember id: String) -> UUID? {
-        guard let parsed = UUID(uuidString: id) else { return nil }
-        if let me = snapshot.me, parsed == me { return nil }
+        guard let me = snapshot.me else { return nil }
+        guard let parsed = UUID(uuidString: id), parsed != me else { return nil }
         guard snapshot.isMember(userID: parsed) else { return nil }
         return parsed
     }
@@ -71,6 +76,14 @@ struct RemoteCircleDataSource: CircleDataSource {
         case waiting
     }
 
+    /// v4 DECISION: a post and an excused day are checked BEFORE the window
+    /// opens, which is where this deliberately parts company with
+    /// `SimulatedCircleDataSource.cell` (that one hides everything until
+    /// `now >= window.start`). A real post can legitimately predate its window
+    /// — a travel-combined Asr is logged during Dhuhr (§3) — and hiding it
+    /// would show a friend's square as empty while they can see it themselves.
+    /// It matches `AppState.myCell`, which has always short-circuited on the
+    /// log and on excused first, so YOUR row and a buddy's row answer alike.
     private func visibility(userID: UUID, prayer: Prayer, dayKey: String,
                             window: PrayerWindow?, now: Date) -> Visibility {
         if let post = snapshot.post(userID: userID, dayKey: dayKey, prayer: prayer) {

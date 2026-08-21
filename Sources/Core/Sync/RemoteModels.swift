@@ -9,11 +9,15 @@ import Foundation
 // 1. **Explicit CodingKeys, always.** PostgREST's coder does NOT convert key
 //    casing, so a camelCase property silently misses its snake_case column.
 //    Every key below is spelled out rather than synthesised.
-// 2. **Server-managed columns are Optional and OMITTED when nil.** `created_at`
-//    / `updated_at` have DB defaults; encoding an explicit `null` would try to
-//    write null into a NOT NULL column. That is why the write-side DTOs
-//    hand-write `encode(to:)` with `encodeIfPresent` instead of relying on
-//    synthesis.
+// 2. **Server-managed columns are decoded but NEVER encoded.** `created_at` /
+//    `updated_at` / `joined_at` have DB defaults, and the natural round trip
+//    (fetch a row, edit a field, upsert it back) would otherwise write the
+//    value the server sent us — or a stale one from a wrong device clock —
+//    straight back over the server's own. They are read-only mirrors of the
+//    row, so the write side simply leaves them out and the DB default wins.
+//    Nil optionals the client DOES own are omitted rather than sent as null,
+//    which would try to write null into a NOT NULL column. Both rules are why
+//    every DTO hand-writes `encode(to:)` instead of relying on synthesis.
 //
 // `Prayer` and `LogTier` are reused as-is: their rawValues ARE the Postgres
 // enum labels (`prayer_kind`, `log_tier`), which the migration documents. If
@@ -69,8 +73,9 @@ struct RemoteProfile: Codable, Equatable, Sendable {
         try c.encodeIfPresent(avatarEmoji, forKey: .avatarEmoji)
         try c.encodeIfPresent(avatarPath, forKey: .avatarPath)
         try c.encodeIfPresent(memberKind, forKey: .memberKind)
-        try c.encodeIfPresent(createdAt, forKey: .createdAt)
-        try c.encodeIfPresent(updatedAt, forKey: .updatedAt)
+        // created_at / updated_at deliberately absent — see rule 2. `profiles`
+        // is the one table the client upserts directly, so re-sending the
+        // fetched `updated_at` is exactly how a stale value would win.
     }
 }
 
@@ -129,7 +134,8 @@ struct RemoteCircle: Codable, Equatable, Sendable {
         try c.encode(name, forKey: .name)
         try c.encode(emoji, forKey: .emoji)
         try c.encodeIfPresent(createdBy, forKey: .createdBy)
-        try c.encodeIfPresent(createdAt, forKey: .createdAt)
+        // created_at is the server's (rule 2): renaming a circle must not
+        // rewrite the day it was founded.
     }
 }
 
@@ -163,7 +169,8 @@ struct RemoteMember: Codable, Equatable, Sendable {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(circleID, forKey: .circleID)
         try c.encode(userID, forKey: .userID)
-        try c.encodeIfPresent(joinedAt, forKey: .joinedAt)
+        // joined_at is the server's (rule 2) — it decides the roster order for
+        // everybody, so no client gets to claim its own seniority.
     }
 }
 
