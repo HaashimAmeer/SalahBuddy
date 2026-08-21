@@ -18,8 +18,21 @@
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
 	<string>1.0</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>com.googleusercontent.apps.923951498597-445nb4q5o5k66imnbbul70h88s7bct72</string>
+			</array>
+		</dict>
+	</array>
 	<key>CFBundleVersion</key>
 	<string>1</string>
+	<key>GIDClientID</key>
+	<string>923951498597-445nb4q5o5k66imnbbul70h88s7bct72.apps.googleusercontent.com</string>
 	<key>NSCameraUsageDescription</key>
 	<string>SalahBuddy uses the camera so you can snap a quick photo when you pray and share it with your circle.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
