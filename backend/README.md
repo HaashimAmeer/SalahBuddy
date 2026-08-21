@@ -228,6 +228,28 @@ the job says exactly which dashboard toggle to flip and **fails**, rather than
 reporting proof 1's passes as success. A green tick that proved nothing is the
 one outcome this job must never produce.
 
+#### Where "Confirm email" actually lives (2026-08-21)
+
+Enabled on staging so the proofs can run: the **Email** provider is on (it is
+by default) and **Confirm email** is **off**. Staging holds no real data, and
+the setting can go back on once the proofs have passed once.
+
+**The setting is not where you would look for it.** "Confirm email" is NOT
+inside the Email provider's dialog — it is a project-level setting in the
+**User Signups** block at the top of *Authentication → Sign In / Providers*,
+and it has its **own separate "Save changes" button**. Toggling it inside the
+provider dialog and saving there does nothing, which looks exactly like the
+setting not taking effect.
+
+Recorded because the failure it causes is indistinguishable from the provider
+being off, and the next person to hit it will otherwise spend the same twenty
+minutes in the wrong dialog.
+
+The **Google** provider's *Client IDs* field already contains the iOS client
+id (`923951498597-…apps.googleusercontent.com`), so nothing is needed there.
+CI cannot check that one — a wrong value there surfaces only when somebody
+taps "Sign in with Google" on a real phone.
+
 ### Manual deploy, when you need it
 
 ```bash
