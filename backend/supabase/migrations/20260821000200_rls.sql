@@ -161,6 +161,33 @@ with check (
 
 -- Grants --------------------------------------------------------------------
 -- anon gets NOTHING: every table here is behind a signed-in user.
+--
+-- REVOKE, not merely "don't grant". A real Supabase project ships default
+-- privileges on `public` that hand every newly created table to anon,
+-- authenticated AND service_role — so a migration that only refrains from
+-- granting still leaves anon holding select/insert/update/delete on all ten
+-- tables. RLS saves us either way (every policy below is `to authenticated`,
+-- so anon matches none and reads zero rows), but "the key is not the security
+-- boundary" is only a comfortable claim if the privileges agree with it.
+-- Explicitly stripping anon makes the deployed project match what test 12
+-- asserts, on a plain Postgres and on Supabase alike.
+--
+-- Scoped to the tables that exist right now rather than to the schema's DEFAULT
+-- privileges: changing those would silently reshape every table a future
+-- migration (or a human in the dashboard) creates. A new table that forgets its
+-- own revoke is caught by test 12 before it can ever reach a project.
+--
+-- `authenticated` is wiped for the same reason and then granted back, verb by
+-- verb, in the block below. Without the wipe the per-table grants are decoration:
+-- the default privileges have already handed authenticated all four verbs on all
+-- ten tables, including retention_runs — the sweep's own lease, which is supposed
+-- to be service_role-only and has no policy at all. Reset first, then grant, and
+-- the deployed privilege matrix is exactly the one written here.
+revoke all on all tables    in schema public from anon;
+revoke all on all sequences in schema public from anon;
+revoke all on all tables    in schema public from authenticated;
+revoke all on all sequences in schema public from authenticated;
+
 grant usage on schema public to authenticated, service_role;
 
 grant select, insert, update         on public.profiles          to authenticated;
@@ -175,7 +202,10 @@ grant select, insert                 on public.nudges            to authenticate
 
 grant select, insert, update, delete on all tables in schema public to service_role;
 
-revoke execute on function public.current_circle_id()  from public;
-revoke execute on function public.circle_max_members() from public;
+-- `from public` drops the implicit grant every function is born with; `from anon`
+-- is separate and necessary, because an EXPLICIT grant (which Supabase's default
+-- privileges on `public` hand out) survives a revoke aimed at PUBLIC.
+revoke execute on function public.current_circle_id()  from public, anon;
+revoke execute on function public.circle_max_members() from public, anon;
 grant  execute on function public.current_circle_id()  to authenticated, service_role;
 grant  execute on function public.circle_max_members() to authenticated, service_role;

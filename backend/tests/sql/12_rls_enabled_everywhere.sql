@@ -24,6 +24,36 @@ begin
     raise exception 'anon was granted access to: %', v_bad;
   end if;
 
+  -- ...and `authenticated` must hold EXACTLY the verbs the RLS migration lists,
+  -- no more. Worth pinning rather than trusting the grant statements, because a
+  -- real project's default privileges hand every new table all four verbs to
+  -- authenticated before a migration says a word: a table that quietly kept
+  -- INSERT it was never meant to have is then one missing policy away from being
+  -- writable. Only RLS stands between those two facts, so state the intent here.
+  select string_agg(format('%s(%s)', table_name, verbs), ', ' order by table_name)
+    into v_bad
+  from (
+    select g.table_name,
+           string_agg(distinct g.privilege_type, ',' order by g.privilege_type) as verbs
+    from information_schema.role_table_grants g
+    where g.grantee = 'authenticated' and g.table_schema = 'public'
+    group by g.table_name
+  ) actual
+  where (table_name, verbs) not in (
+    values ('profiles',          'INSERT,SELECT,UPDATE'),
+           ('circles',           'SELECT,UPDATE'),
+           ('circle_members',    'DELETE,SELECT'),
+           ('posts',             'DELETE,INSERT,SELECT,UPDATE'),
+           ('excused_days',      'DELETE,INSERT,SELECT,UPDATE'),
+           ('recovery_weeks',    'DELETE,INSERT,SELECT,UPDATE'),
+           ('custom_challenges', 'DELETE,INSERT,SELECT,UPDATE'),
+           ('devices',           'DELETE,INSERT,SELECT,UPDATE'),
+           ('nudges',            'INSERT,SELECT')
+  );
+  if v_bad is not null then
+    raise exception 'authenticated holds unexpected table privileges: %', v_bad;
+  end if;
+
   -- every table we expect must actually exist
   select string_agg(t, ', ') into v_bad
   from unnest(array['profiles','circles','circle_members','posts','excused_days',

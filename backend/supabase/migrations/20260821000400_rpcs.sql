@@ -252,15 +252,21 @@ begin
 end $$;
 
 -- Grants --------------------------------------------------------------------
-revoke execute on function public.generate_invite_code()                        from public;
-revoke execute on function public.create_circle(text, text)                     from public;
-revoke execute on function public.join_circle(text)                             from public;
-revoke execute on function public.leave_circle()                                from public;
-revoke execute on function public.rename_circle(text, text)                     from public;
-revoke execute on function public.delete_account()                              from public;
-revoke execute on function public.record_nudge(uuid, text, public.prayer_kind)  from public;
-revoke execute on function public.purge_expired_photo_rows(int)                 from public;
-revoke execute on function public.claim_retention_run(interval)                 from public;
+-- `from public, anon`: revoking from PUBLIC removes the implicit grant a new
+-- function carries, but NOT an explicit one — and a real Supabase project's
+-- default privileges on `public` grant execute to anon outright. Both have to go
+-- or an unauthenticated caller could reach create_circle with the shipped
+-- publishable key (the RPC would refuse it — every one asserts auth.uid() is not
+-- null — but a locked door is better than a polite one).
+revoke execute on function public.generate_invite_code()                        from public, anon;
+revoke execute on function public.create_circle(text, text)                     from public, anon;
+revoke execute on function public.join_circle(text)                             from public, anon;
+revoke execute on function public.leave_circle()                                from public, anon;
+revoke execute on function public.rename_circle(text, text)                     from public, anon;
+revoke execute on function public.delete_account()                              from public, anon;
+revoke execute on function public.record_nudge(uuid, text, public.prayer_kind)  from public, anon;
+revoke execute on function public.purge_expired_photo_rows(int)                 from public, anon, authenticated;
+revoke execute on function public.claim_retention_run(interval)                 from public, anon, authenticated;
 
 grant execute on function public.create_circle(text, text)                    to authenticated;
 grant execute on function public.join_circle(text)                            to authenticated;

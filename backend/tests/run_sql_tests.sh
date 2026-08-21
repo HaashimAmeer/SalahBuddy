@@ -101,7 +101,10 @@ IFS=$'\n' tests=($(printf '%s\n' "${tests[@]}" | sort)); unset IFS
 
 for f in "${tests[@]}"; do
   name="$(basename "$f")"
-  if output="$("${PSQL_BASE[@]}" "$SCRATCH_URI" -f "$f" 2>&1)"; then
+  # -v migrations_dir lets a test `\i` a real migration file (17 re-runs the
+  # realtime one against a partially-published publication) instead of pasting
+  # a copy of its SQL, which would only ever test the copy.
+  if output="$("${PSQL_BASE[@]}" "$SCRATCH_URI" -v migrations_dir="$MIGRATIONS_DIR" -f "$f" 2>&1)"; then
     pass=$((pass + 1))
     printf '    PASS  %s\n' "$name"
   else
@@ -111,6 +114,29 @@ for f in "${tests[@]}"; do
     printf '%s\n' "$output" | sed 's/^/          /'
   fi
 done
+
+# --- seed ------------------------------------------------------------------
+# seed.sql is staging-only and `supabase db push` never runs it, so nothing else
+# would notice it rotting against a schema change. Applying it twice checks both
+# that it still parses against the current migrations and that it is genuinely
+# idempotent (it claims to be — day-scoped rows key off current_date). Runs LAST,
+# after every assertion, because unlike the tests it commits.
+SEED_FILE="$BACKEND_DIR/supabase/seed.sql"
+if [[ -f "$SEED_FILE" ]]; then
+  echo
+  echo "==> seed (applied twice — must be idempotent)"
+  seed_ok=true
+  for attempt in 1 2; do
+    if output="$("${PSQL_BASE[@]}" "$SCRATCH_URI" -f "$SEED_FILE" 2>&1)"; then
+      printf '    PASS  seed.sql (pass %s)\n' "$attempt"
+    else
+      seed_ok=false
+      printf '    FAIL  seed.sql (pass %s)\n' "$attempt"
+      printf '%s\n' "$output" | sed 's/^/          /'
+    fi
+  done
+  if $seed_ok; then pass=$((pass + 1)); else fail=$((fail + 1)); failed_files+=("seed.sql"); fi
+fi
 
 echo
 if (( fail > 0 )); then

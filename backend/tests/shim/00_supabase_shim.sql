@@ -39,6 +39,25 @@ grant usage on schema auth       to anon, authenticated, service_role;
 grant usage on schema storage    to anon, authenticated, service_role;
 grant usage on schema extensions to anon, authenticated, service_role;
 
+-- The `public` schema on a real project, faithfully — and this is the ONE piece
+-- of the shim that is a trap rather than a convenience. Supabase's bootstrap
+-- sets default privileges that hand every table and function subsequently
+-- created in `public` to anon, authenticated AND service_role. A migration that
+-- merely declines to grant anything to anon therefore still ships an anon role
+-- holding select/insert/update/delete on all of it.
+--
+-- Without these three lines the shim is *more locked down* than production and
+-- test 12's "anon holds nothing" assertion is vacuous — it would pass here and
+-- describe a project it never looked at. With them, the migrations have to
+-- revoke for real.
+grant usage on schema public to anon, authenticated, service_role;
+alter default privileges in schema public
+  grant all on tables to anon, authenticated, service_role;
+alter default privileges in schema public
+  grant all on functions to anon, authenticated, service_role;
+alter default privileges in schema public
+  grant all on sequences to anon, authenticated, service_role;
+
 -- auth ----------------------------------------------------------------------
 create table if not exists auth.users (
   id                 uuid primary key default gen_random_uuid(),
