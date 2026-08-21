@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- v4: sign-in is required only at the social boundary (SPEC-V4 §1). -->
+	<key>com.apple.developer.applesignin</key>
+	<array>
+		<string>Default</string>
+	</array>
+	<!-- v4 §6: friend-activity / nudge pushes. "development" is the correct
+	     SOURCE value — Xcode Cloud's TestFlight export rewrites it to
+	     "production" automatically, so one file serves both. -->
+	<key>aps-environment</key>
+	<string>development</string>
+</dict>
+</plist>

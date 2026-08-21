@@ -5,6 +5,11 @@ options:
   createIntermediateGroups: true
 packages:
   Adhan: { url: https://github.com/batoulapps/adhan-swift, from: "1.4.0" }
+  # v4: the real circle. Postgres + Auth + Storage + Realtime behind one client.
+  Supabase: { url: https://github.com/supabase/supabase-swift, from: "2.55.1" }
+  # v4: Google sign-in. 8.0+ accepts a CUSTOM NONCE, which is what Supabase's
+  # OIDC verification needs (it compares sha256(nonce) to the id_token claim).
+  GoogleSignIn: { url: https://github.com/google/GoogleSignIn-iOS, from: "9.2.0" }
 settings:
   base:
     DEVELOPMENT_TEAM: 852AXZ2B57
@@ -15,7 +20,10 @@ targets:
     type: application
     platform: iOS
     sources: [Sources]
-    dependencies: [{ package: Adhan }]
+    dependencies:
+      - { package: Adhan }
+      - { package: Supabase, product: Supabase }
+      - { package: GoogleSignIn, product: GoogleSignIn }
     info:
       path: Sources/Info.plist
       properties:
@@ -25,11 +33,21 @@ targets:
         NSCameraUsageDescription: "SalahBuddy uses the camera so you can snap a quick photo when you pray and share it with your circle."
         NSPhotoLibraryUsageDescription: "SalahBuddy lets you pick a photo from your library for your prayer post."
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        # v4: Google sign-in needs its OAuth client id and the matching
+        # reversed-client-id callback scheme. Both are public config.
+        GIDClientID: 923951498597-445nb4q5o5k66imnbbul70h88s7bct72.apps.googleusercontent.com
+        CFBundleURLTypes:
+          - CFBundleTypeRole: Editor
+            CFBundleURLSchemes:
+              - com.googleusercontent.apps.923951498597-445nb4q5o5k66imnbbul70h88s7bct72
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: org.amacvoters.salahbuddymock
         TARGETED_DEVICE_FAMILY: "1"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # v4: Sign in with Apple + push. Kept OUT of Sources/ so XcodeGen
+        # never mistakes it for a bundle resource.
+        CODE_SIGN_ENTITLEMENTS: SalahBuddy.entitlements
   SalahBuddyTests:
     type: bundle.unit-test
     platform: iOS
