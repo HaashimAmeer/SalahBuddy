@@ -396,9 +396,23 @@ jobs:
           # be wrong: a broken probe reported as a breach. Bare `?limit=1` asks
           # for whatever the row is, which is also closer to what an attacker
           # holding the publishable key would actually try.
+          # EVERY table `authenticated` holds a grant on, not a hand-picked five.
+          # The original list predated Phase D and never grew with the schema, so
+          # the three tables where a leak would hurt most were the three nobody
+          # was checking: devices (push tokens), nudges (who nudged whom) and
+          # reports (who reported whom). recovery_weeks and custom_challenges
+          # were missing too.
+          #
+          # Keep this in step with the grants in 20260821000200_rls.sql. SQL test
+          # 12 already fails the build for a table that forgets RLS; this is the
+          # over-HTTP half of the same assertion, and the two should name the
+          # same set.
+          PROBE_TABLES="posts profiles circles circle_members excused_days
+                        recovery_weeks custom_challenges devices nudges reports"
+
           anon_reads_nothing() {
             local phase="$1" table mode rows
-            for table in posts profiles circles circle_members excused_days; do
+            for table in $PROBE_TABLES; do
               for mode in "apikey-only" "apikey+anon-bearer"; do
                 if [ "$mode" = "apikey-only" ]; then
                   api GET "/rest/v1/$table?limit=1" "-"
