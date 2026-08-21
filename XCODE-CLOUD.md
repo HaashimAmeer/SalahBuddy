@@ -11,6 +11,11 @@ the iPhone a few minutes later.
   XcodeGen, stamps Xcode Cloud's `CI_BUILD_NUMBER` into
   `CURRENT_PROJECT_VERSION`, and runs `xcodegen generate` before every CI
   build. Local builds are untouched (they keep the number in `project.yml`).
+- Xcode Cloud disables automatic SPM resolution and pins dependencies from
+  the committed **`Package.resolved`** at the repo root (the CI script copies
+  it into the generated project). After changing a dependency in
+  `project.yml`, run **`make lock`** and commit the refreshed file, or the
+  next CI build fails with "a resolved file is required".
 - The local **pre-push hook** (`make test`) only runs on clones that ran
   `make hooks` — pushes from Claude web cloud sessions skip it naturally
   (the sandbox is Linux and couldn't run it anyway). Xcode Cloud's **Test

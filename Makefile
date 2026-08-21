@@ -23,7 +23,7 @@ define resolve_sim
 	echo "▸ Using simulator $$SIM_ID"
 endef
 
-.PHONY: generate test build hooks
+.PHONY: generate test build hooks lock
 
 ## generate: regenerate the Xcode project from project.yml
 generate:
@@ -45,6 +45,13 @@ build: generate
 		-project "$(PROJECT)" \
 		-scheme "$(SCHEME)" \
 		-destination "platform=iOS Simulator,id=$$SIM_ID"
+
+## lock: refresh the committed Package.resolved from the generated project
+## (run after changing SPM dependencies in project.yml, then commit it —
+## Xcode Cloud builds pin dependencies from this file)
+lock:
+	@cp SalahBuddy.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved Package.resolved
+	@echo "✓ Package.resolved refreshed — commit it so Xcode Cloud picks it up"
 
 ## hooks: activate the tracked git hooks (run once per clone)
 hooks:

@@ -17,3 +17,10 @@ if [ -n "$CI_BUILD_NUMBER" ]; then
 fi
 
 xcodegen generate
+
+# Xcode Cloud disables automatic SPM resolution and requires a committed
+# Package.resolved — but the generated project's copy is git-ignored with the
+# rest of the .xcodeproj. The canonical pin lives at the repo root (refresh it
+# with `make lock` after changing dependencies); copy it into place.
+mkdir -p SalahBuddy.xcodeproj/project.xcworkspace/xcshareddata/swiftpm
+cp Package.resolved SalahBuddy.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
