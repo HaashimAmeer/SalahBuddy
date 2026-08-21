@@ -489,7 +489,13 @@ struct RemoteCustomChallenge: Codable, Equatable, Sendable, Identifiable {
         try c.encode(prayer, forKey: .prayer)
         try c.encode(days, forKey: .days)
         try c.encodeIfPresent(weekKey, forKey: .weekKey)
-        // created_at deliberately absent — see the note on CodingKeys.
+        // created_at is NOT in the INSERT grant (see the note on CodingKeys),
+        // so it must never reach the wire — but the on-disk mirror has to keep
+        // it, or a cold launch drops it. `persistingMirror` is how the encoder
+        // says which of the two jobs it is doing.
+        if encoder.userInfo[.persistingMirror] as? Bool == true {
+            try c.encodeIfPresent(createdAt, forKey: .createdAt)
+        }
     }
 
     /// The local shape `ChallengeEngine` already understands. `createdAt` falls

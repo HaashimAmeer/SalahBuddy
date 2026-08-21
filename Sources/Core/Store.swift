@@ -1,5 +1,17 @@
 import Foundation
 
+/// Marks a coder as writing to DISK rather than to the wire.
+///
+/// v4: the remote DTOs are used for both, and the two want different columns.
+/// A server-owned column like `custom_challenges.created_at` is deliberately
+/// absent from the INSERT grant, so sending it is a refusal — but the local
+/// mirror still has to keep it, or every cold launch quietly drops it. One
+/// encoder serving both jobs is what made that a silent data loss; this makes
+/// the question explicit instead.
+extension CodingUserInfoKey {
+    static let persistingMirror = CodingUserInfoKey(rawValue: "org.amacvoters.salahbuddy.persistingMirror")!
+}
+
 /// Dead-simple JSON persistence in the app's Documents directory.
 /// Corrupt or missing files NEVER crash — they fall back to the default.
 enum Store {
@@ -28,6 +40,7 @@ enum Store {
         guard let data = try? Data(contentsOf: fileURL) else { return defaultValue }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
+        decoder.userInfo[.persistingMirror] = true
         guard let value = try? decoder.decode(T.self, from: data) else { return defaultValue }
         return value
     }
@@ -36,6 +49,7 @@ enum Store {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.userInfo[.persistingMirror] = true
         guard let data = try? encoder.encode(value) else { return }
         try? data.write(to: url(for: filename), options: .atomic)
     }

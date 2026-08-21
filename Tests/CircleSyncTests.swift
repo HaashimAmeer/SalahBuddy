@@ -34,22 +34,51 @@ final class CircleSyncTests: XCTestCase {
         Date(timeIntervalSince1970: 1_780_000_000 + offset)
     }
 
+    /// Stands in for `Store`, so it must encode like Store does — including
+    /// `persistingMirror`. Without it this helper silently tests the WIRE shape
+    /// while claiming to test the on-disk round trip.
     private func encoder() -> JSONEncoder {
         let e = JSONEncoder()
         e.dateEncodingStrategy = .iso8601
+        e.userInfo[.persistingMirror] = true
         return e
     }
 
     private func decoder() -> JSONDecoder {
         let d = JSONDecoder()
         d.dateDecodingStrategy = .iso8601
+        d.userInfo[.persistingMirror] = true
         return d
     }
 
+    /// A WIRE encoder — deliberately without `persistingMirror`, because every
+    /// caller of `jsonObject` is asserting what PostgREST receives. Sharing the
+    /// persistence encoder here would let a server-owned column look sendable.
+    private func wireEncoder() -> JSONEncoder {
+        let e = JSONEncoder()
+        e.dateEncodingStrategy = .iso8601
+        return e
+    }
+
     private func jsonObject<T: Encodable>(_ value: T) throws -> [String: Any] {
-        let data = try encoder().encode(value)
+        let data = try wireEncoder().encode(value)
         let object = try JSONSerialization.jsonObject(with: data)
         return (object as? [String: Any]) ?? [:]
+    }
+
+    /// The rule the two encoders exist to enforce, asserted directly: a column
+    /// the INSERT grant omits must be kept on disk and withheld from the wire.
+    func testServerOwnedColumnsArePersistedButNeverSent() throws {
+        let challenge = RemoteCustomChallenge(id: "custom-1", circleID: circleID,
+                                              createdBy: userA, prayer: .fajr, days: 3,
+                                              weekKey: "2026-W24", createdAt: stamp(0))
+        XCTAssertNil(try jsonObject(challenge)["created_at"],
+                     "created_at is not in the INSERT grant — sending it is a refusal")
+
+        let restored = try decoder().decode(RemoteCustomChallenge.self,
+                                            from: try encoder().encode(challenge))
+        XCTAssertEqual(restored.createdAt, challenge.createdAt,
+                       "the on-disk mirror must keep it, or a cold launch drops it")
     }
 
     private func post(id: UUID? = nil, user: UUID? = nil, prayer: Prayer = .dhuhr,
