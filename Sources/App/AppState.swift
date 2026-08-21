@@ -18,6 +18,12 @@ final class AppState: ObservableObject {
     @Published private(set) var todaySchedule: DaySchedule?
     @Published var celebration: LogResult?                 // set by log(); UI presents then nils it
 
+    /// v4: the offline mirror of a real circle (SPEC-V4 §8). Held in memory
+    /// rather than re-read per access, because `circleSource` is consulted
+    /// several times per render and must never touch the disk to draw a grid.
+    /// `.empty` covers demo mode, a solo account and a first launch alike.
+    @Published private(set) var circleSnapshot: CircleSnapshot = .empty
+
     /// Yesterday's isha window — it may still be open past midnight
     /// (it ends at TODAY's fajr). Used so a 1 AM isha log counts for yesterday.
     private var previousIshaWindow: PrayerWindow?
@@ -37,6 +43,9 @@ final class AppState: ObservableObject {
         profile = Store.load(Store.profileFile, default: UserProfile.fresh(now: now))
         logs = Store.load(Store.logsFile, default: [PrayerLog]())
         settings = Store.load(Store.settingsFile, default: AppSettings())
+        // Offline-first: whatever the last sync left on disk is the circle we
+        // render, before any network work has been attempted.
+        circleSnapshot = CircleSnapshot.load()
         location.onUpdate = { [weak self] in self?.refresh() }
         refresh()
     }
@@ -555,10 +564,17 @@ final class AppState: ObservableObject {
         case .demo:
             return SimulatedCircleDataSource(buddies: activeBuddies)
         case .real:
-            // Real membership arrives in Phase B3; until then a real circle
-            // renders as an empty one rather than borrowing demo buddies.
-            return EmptyCircleDataSource()
+            // Answered entirely from the local mirror, so a real circle draws
+            // the same offline as it did on the last sync. A mirror that is
+            // empty (or absent) is simply a circle with nobody in it yet.
+            return RemoteCircleDataSource(snapshot: circleSnapshot)
         }
+    }
+
+    /// Phase B3+: `CircleService` hands the freshly synced mirror over here.
+    /// Persisting it is the service's job — `AppState` only renders it.
+    func applyCircleSnapshot(_ snapshot: CircleSnapshot) {
+        circleSnapshot = snapshot
     }
 
     /// v3.6: the circle as the user shaped it (removals + accepted invites).
