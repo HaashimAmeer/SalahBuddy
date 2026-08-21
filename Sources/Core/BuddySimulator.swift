@@ -207,8 +207,12 @@ enum BuddySimulator {
     private static func stableUUID(name: String, dayKey: String, prayer: Prayer) -> UUID {
         var rng = SplitMix64(seed: seed(name: name, dayKey: dayKey, prayer: prayer) ^ 0xA5A5A5A5A5A5A5A5)
         let a = rng.next(), b = rng.next()
-        let bytes: [UInt8] = (0..<8).map { UInt8((a >> ($0 * 8)) & 0xFF) }
-            + (0..<8).map { UInt8((b >> ($0 * 8)) & 0xFF) }
+        // Built with a plain loop — the closure-map + `+` version exceeds the
+        // type-checker budget on slower CI toolchains (Xcode 26.3 runners).
+        var bytes = [UInt8]()
+        bytes.reserveCapacity(16)
+        for i in 0..<8 { bytes.append(UInt8((a >> (i * 8)) & 0xFF)) }
+        for i in 0..<8 { bytes.append(UInt8((b >> (i * 8)) & 0xFF)) }
         return UUID(uuid: (bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
                            bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]))
     }
