@@ -198,16 +198,26 @@ a fork or a fresh clone gets a green, self-explaining run instead of red Xs.
 ### What the smoke test proves
 
 It is the Phase A exit criterion ("staging accepts a signed-in user via a
-curl-level test", SPEC-V4 §10), re-run on every deploy:
+curl-level test", SPEC-V4 §10), re-run on every deploy. **First scored 53
+passed, 0 failed on `9669ad0` (2026-08-21)** — the criterion is met.
 
-1. The publishable key **on its own reads nothing** — `posts`, `profiles`,
-   `circles`, `circle_members`, `excused_days` each denied or empty, both with
-   `apikey` alone and with an anon bearer. RLS, not key custody, is the
-   security boundary; this is the assertion that says so out loud. A `404` is
-   scored as a FAILURE, not a denial: PostgREST answers `404/PGRST205` for a
-   table missing from the schema cache, so treating it as "denied" reports a
-   broken deploy as a row of green ticks.
-2. Three throwaway `@example.com` users sign up and sign in for real tokens.
+1. The publishable key **on its own reads nothing** — every table carrying a
+   grant to `authenticated` (`posts`, `profiles`, `circles`, `circle_members`,
+   `excused_days`, `recovery_weeks`, `custom_challenges`, `devices`, `nudges`,
+   `reports`) denied or empty, both with `apikey` alone and with an anon
+   bearer. RLS, not key custody, is the security boundary; this is the
+   assertion that says so out loud. A `404` is scored as a FAILURE, not a
+   denial: PostgREST answers `404/PGRST205` for a table missing from the schema
+   cache, so treating it as "denied" reports a broken deploy as a row of green
+   ticks.
+
+   `PROBE_TABLES` is the list, and it is deliberately the same set SQL test
+   12's RLS sweep walks — the earlier hand-picked five left `devices` (APNs
+   tokens), `nudges` (who nudged whom) and `reports` (who reported whom)
+   unprobed, which are the three whose contents would be worst to leak.
+2. Three throwaway users sign up and sign in for real tokens. The address
+   domain is `SUPABASE_STAGING_CI_EMAIL_DOMAIN`, defaulting to
+   `salahbuddy.app`: Supabase's validator refuses `@example.com` outright.
 3. User A's `create_circle` returns a circle and a 6-char invite code from the
    unambiguous alphabet (the code's *value* is masked — a public log should not
    hand out live invites).
@@ -217,7 +227,7 @@ curl-level test", SPEC-V4 §10), re-run on every deploy:
    circle — their own.
 6. The proof-1 reads are repeated **while those rows exist**. Proof 1 runs
    before anything has been created and the cleanup trap deletes it all again,
-   so on its own it reads five empty tables — which passes identically with RLS
+   so on its own it reads empty tables — which passes identically with RLS
    switched off. Proof 6 is the assertion; proof 1 is the smoke check.
 
 Every assertion prints `PASS`/`FAIL`/`SKIP` and lands in the job summary.
@@ -231,8 +241,9 @@ one outcome this job must never produce.
 #### Where "Confirm email" actually lives (2026-08-21)
 
 Enabled on staging so the proofs can run: the **Email** provider is on (it is
-by default) and **Confirm email** is **off**. Staging holds no real data, and
-the setting can go back on once the proofs have passed once.
+by default) and **Confirm email** is **off**. Staging holds no real data. The
+proofs have now passed (53/53), but leave it off: they re-run on every deploy
+and turning it back on breaks them again.
 
 **The setting is not where you would look for it.** "Confirm email" is NOT
 inside the Email provider's dialog — it is a project-level setting in the

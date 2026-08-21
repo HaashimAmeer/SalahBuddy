@@ -10,8 +10,11 @@ What *was* verified, so you know where the line is:
   (negative-tested by mutating the schema 21 ways and confirming each mutation
   was caught), 55/55 Deno tests, `deno check` clean.
 - **Backend, against the live staging project**: migrations applied and edge
-  functions deployed successfully; anonymous reads of `posts`, `profiles` and
-  `circles` denied **401 by the deployed database**. RLS holds where it counts.
+  functions deployed successfully, and the smoke proofs scored **53 passed, 0
+  failed** over HTTP — sign-up/sign-in, `create_circle`, `join_circle`,
+  cross-circle isolation, and anonymous reads denied **401 by the deployed
+  database** on all ten granted tables, probed both empty and populated. RLS
+  holds where it counts.
 - **iOS**: builds and passes its unit tests on every push (GitHub macOS runners).
 
 Nothing below is a known defect. It is the set of claims that only a device, a
@@ -19,33 +22,42 @@ dashboard, or you can settle.
 
 ---
 
-## 1. Blocking Phase A's stated exit criterion
+## 1. Phase A's stated exit criterion — MET
 
-SPEC-V4 §10 wants "staging accepts a signed-in user via a curl-level test". The
-proofs run on every push to `staging` but currently stop at sign-up.
+SPEC-V4 §10 wants "staging accepts a signed-in user via a curl-level test".
+As of `9669ad0` the smoke job scores **53 passed, 0 failed** against the live
+project on every push to `staging`, so this is settled and stays settled.
 
-- [ ] **Staging Supabase → Authentication → Sign In / Providers → Email**:
-      turn **"Confirm email" OFF**. That is the whole task — the provider is
-      already enabled, and `salahbuddy.app` already passes Supabase's address
-      validator. Confirmed against the real project: sign-up SUCCEEDS and then
-      the run reports "the project requires email confirmation, which a CI user
-      can never complete".
-      CI signs up throwaway users; Apple and Google both need a device, so email
-      is the only path a machine can drive, and a CI user can never click a
-      confirmation link.
-
-      Everything else on the staging project is already proven: as of the last
-      `staging` push the smoke job scored **10 passed, 1 failed**, the single
-      failure being this toggle. The 10 include the whole anon-reads-nothing
-      set against the live database.
+- [x] ~~Staging → Authentication → Email → "Confirm email" OFF~~ — done, and
+      the run proves it took: three throwaway users signed up and received
+      sessions with no confirmation step. (The toggle lives in the project-level
+      **User Signups** block at the top of Sign In / Providers, not inside the
+      Email provider dialog, and has its own Save button.)
 - [x] ~~Domain rejected by Supabase's validator~~ — settled. `@example.com` is
       refused outright; the default is now `salahbuddy.app`, which the live
       project accepts. `SUPABASE_STAGING_CI_EMAIL_DOMAIN` overrides it if that
       ever changes.
 
-Until these are done the smoke job fails loudly with dashboard instructions,
-which is deliberate: a green tick that proved nothing is the one outcome that
-job must never produce.
+What the 53 assertions actually establish, so the number means something:
+
+- The publishable key alone reads **nothing** from `posts`, `profiles`,
+  `circles`, `circle_members`, `excused_days`, `recovery_weeks`,
+  `custom_challenges`, `devices`, `nudges` and `reports` — every table carrying
+  a grant to `authenticated`, each tried both with the apikey alone and with an
+  anon bearer, and run **twice**: once against empty tables and once with a real
+  circle, profile, membership and post live. The second pass is the one that
+  proves anything; a 401 from an empty table proves only that the endpoint
+  answers. That table list is pinned to SQL test 12's RLS sweep so the two
+  assertions can't drift apart.
+- A signed-in user creates a circle, gets a 6-char code from the unambiguous
+  alphabet, and a second user joins with it and sees exactly 2 members.
+- A third user's unrelated circle is **invisible**: user B cannot read C's post,
+  B's feed is empty, and B sees exactly one circle. That is RLS refusing, not a
+  `where` clause filtering.
+
+The job still fails loudly with dashboard instructions if any of this regresses,
+which is deliberate: a green tick that proved nothing is the one outcome it must
+never produce.
 
 ## 2. Dashboard settings to confirm
 
