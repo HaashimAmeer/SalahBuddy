@@ -403,9 +403,28 @@ final class PushRegistrar {
     /// iOS delivers this on every launch (and again whenever the token rotates,
     /// which it does after a restore or an app reinstall), so this is the other
     /// half of `refresh` and not a one-off.
+    ///
+    /// v4 Phase D FIX: this is the THIRD door into `writeDeviceRow`, and it was
+    /// the only one that walked straight past the two gates the other two
+    /// apply. `refresh` sets `owner`/`hasCircle` BEFORE its guards — it has to,
+    /// so the owed delete at the top is attempted for the right device — so a
+    /// DENIED user's refresh, which correctly asks for nothing and writes no
+    /// row, still left this method holding a real owner: a token arriving
+    /// afterwards wrote the row anyway. The master switch has the same hole
+    /// with worse consequences: iOS answers with the token asynchronously, so
+    /// one landing after `preferencesChanged` took the row down would put it
+    /// straight back — and clear the delete this device still owed for it,
+    /// which is the "buzzing a phone the app was told to keep quiet" bug that
+    /// `removeDeviceRow` exists to prevent. Both gates are re-checked here.
+    ///
+    /// It never PROMPTS — `isAlreadyAuthorized`, not `ensureAuthorized`. A
+    /// token callback is not somewhere to put a permission sheet, and by the
+    /// time one arrives the asking has already happened in `refresh`.
     func adoptDeviceToken(_ token: String) async {
         deviceToken = token
         guard let userID: UUID = owner, hasCircle else { return }
+        guard system.preferences().notificationsEnabled else { return }
+        guard await isAlreadyAuthorized() else { return }
         await writeDeviceRow(userID: userID)
     }
 

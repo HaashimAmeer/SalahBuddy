@@ -327,6 +327,21 @@ final class PushRegistrarTests: XCTestCase {
         XCTAssertTrue(rig.transport.upserts.isEmpty)
     }
 
+    /// The other half of the same door. iOS answers with the token
+    /// ASYNCHRONOUSLY, so it can land after the master switch went off and the
+    /// row came down — and writing it again there would put back the row
+    /// `refresh`/`preferencesChanged` had just deleted.
+    func testATokenArrivingAfterTheMasterSwitchWentOffWritesNoRow() async {
+        let rig: Rig = makeRig()
+        rig.system.status = .authorized
+        rig.system.preferencesValue = PushPreferences(notificationsEnabled: false,
+                                                      friendActivity: false)
+        await rig.push.refresh(userID: me, hasCircle: true)
+        await rig.push.adoptDeviceToken(token)
+        XCTAssertTrue(rig.transport.upserts.isEmpty)
+        XCTAssertFalse(rig.push.isRegistered)
+    }
+
     /// Declining the prompt stops us RECEIVING. It does not stop us sending —
     /// a nudge is a message to somebody else's phone.
     func testDecliningThePromptStillLetsYouNudge() async {
