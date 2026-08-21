@@ -32,15 +32,15 @@ generate:
 
 ## test: build + run the unit tests on the simulator (what the pre-push hook runs)
 ##
-## The explicit `simctl bootstatus -b` is not ceremony. Handing xcodebuild a
-## shut-down simulator lets it boot the device itself — and on GitHub's macOS
-## runners that step has twice hung FOREVER after a clean build, burning the
-## whole 40-minute job timeout without ever starting a test. bootstatus boots
-## the device and blocks until it is genuinely ready, so a boot that is going
-## to fail fails here, in seconds, with a real error.
+## Booting is delegated to ci_scripts/boot_sim.sh, which bounds the wait and
+## recovers a wedged device. Letting xcodebuild boot the simulator itself hung
+## three runs; `simctl bootstatus` alone NAMES the stall ("Waiting on
+## BackBoard") but waits forever, so it turned a silent 40-minute hang into a
+## legible 20-minute one without fixing it. The script adds the two things
+## actually needed: a timeout, and an erase-and-retry.
 test: generate
 	@$(resolve_sim); \
-	xcrun simctl bootstatus "$$SIM_ID" -b; \
+	sh ci_scripts/boot_sim.sh "$$SIM_ID"; \
 	xcodebuild test \
 		-project "$(PROJECT)" \
 		-scheme "$(SCHEME)" \
