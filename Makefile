@@ -7,18 +7,20 @@
 
 PROJECT := SalahBuddy.xcodeproj
 SCHEME  := SalahBuddy
-SIM     ?= iPhone 16 Pro
+SIM     ?= iPhone 17
 
 # Resolve a concrete simulator UDID for $(SIM) at runtime — preferring one
-# that's already Booted, else the first available. A bare `name=iPhone 16 Pro`
+# that's already Booted, else the first available, else ANY installed iPhone
+# (this machine deliberately keeps a single iOS runtime to save disk, so the
+# named default can vanish on runtime upgrades). A bare `name=iPhone 17`
 # destination is AMBIGUOUS when the device exists under several OS runtimes
-# (xcodebuild errors out), so we pin the unambiguous id instead. Adapts to
-# whatever sims a given machine has installed.
+# (xcodebuild errors out), so we pin the unambiguous id instead.
 define resolve_sim
 	SIM_ID=$$(xcrun simctl list devices available | grep "$(SIM) (" | grep "(Booted)" | head -1 | grep -oE "[0-9A-Fa-f-]{36}"); \
 	[ -z "$$SIM_ID" ] && SIM_ID=$$(xcrun simctl list devices available | grep "$(SIM) (" | head -1 | grep -oE "[0-9A-Fa-f-]{36}"); \
-	if [ -z "$$SIM_ID" ]; then echo "✗ No available simulator named '$(SIM)'. Override: make $@ SIM=\"iPhone 17\""; exit 1; fi; \
-	echo "▸ Using simulator $(SIM) ($$SIM_ID)"
+	[ -z "$$SIM_ID" ] && { SIM_ID=$$(xcrun simctl list devices available | grep "iPhone" | head -1 | grep -oE "[0-9A-Fa-f-]{36}"); [ -n "$$SIM_ID" ] && echo "▸ '$(SIM)' not installed — using first available iPhone sim"; }; \
+	if [ -z "$$SIM_ID" ]; then echo "✗ No available iPhone simulator at all. Install one in Xcode ▸ Settings ▸ Platforms."; exit 1; fi; \
+	echo "▸ Using simulator $$SIM_ID"
 endef
 
 .PHONY: generate test build hooks
