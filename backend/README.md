@@ -176,7 +176,10 @@ Nothing here is stored in the repo. Names only:
 | `SUPABASE_ACCESS_TOKEN` | secret | `deploy-staging` (Supabase account token) |
 | `SUPABASE_STAGING_PROJECT_REF` | secret | `deploy-staging` |
 | `SUPABASE_STAGING_DB_PASSWORD` | secret | `deploy-staging` |
-| `SUPABASE_STAGING_URL` | **variable** (secret also accepted) | `smoke-staging` |
+The smoke proofs need no configuration: they read the staging URL and publishable key from
+`Sources/Core/Sync/SupabaseConfig.swift`, so they exercise the exact values the app ships. Set the
+repo variables `SUPABASE_STAGING_URL` / `SUPABASE_STAGING_PUBLISHABLE_KEY` only to point them at a
+different project (a fork, a throwaway).
 | `SUPABASE_STAGING_PUBLISHABLE_KEY` | **variable** (secret also accepted) | `smoke-staging` |
 | `SUPABASE_STAGING_AUTH_OPTIONAL` | variable, optional | set to `true` only if staging deliberately has email signups off |
 

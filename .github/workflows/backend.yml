@@ -240,6 +240,9 @@ jobs:
       # and in the Actions UI, which makes debugging a smoke failure possible.
       # Falls back to secrets of the same names so a repo that already stored
       # them as secrets keeps working. Both are masked below regardless.
+      # Overrides only. Left unset, the proofs read the URL and publishable key
+      # straight out of Sources/Core/Sync/SupabaseConfig.swift — see the guard
+      # step for why that is the RIGHT default rather than a shortcut.
       STAGING_URL: ${{ vars.SUPABASE_STAGING_URL || secrets.SUPABASE_STAGING_URL }}
       STAGING_PUBLISHABLE_KEY: ${{ vars.SUPABASE_STAGING_PUBLISHABLE_KEY || secrets.SUPABASE_STAGING_PUBLISHABLE_KEY }}
       # Set to "true" only if the staging project deliberately has email
@@ -250,29 +253,65 @@ jobs:
       RUN_TAG: ${{ github.run_id }}-${{ github.run_attempt }}
 
     steps:
-      - name: Check smoke configuration
+      - uses: actions/checkout@v5
+
+      # The client's own config IS the default source of these two values, and
+      # deliberately so. They are publishable config that ships inside every
+      # copy of the app — RLS, not key custody, is the security boundary, and
+      # proof 1 is precisely the assertion that holding this key grants nothing.
+      #
+      # Reading them from Sources/ rather than from a repo variable makes the
+      # proofs exercise THE VALUES THE APP ACTUALLY SHIPS. A second copy in
+      # Settings could drift from the binary and the smoke run would still go
+      # green while every phone on TestFlight talked to the wrong project.
+      # A repo variable/secret still wins when set, for a fork or a throwaway
+      # project that should not be pointed at this one.
+      - name: Resolve staging URL + publishable key
         id: guard
         run: |
-          if [ -n "${STAGING_URL:-}" ] && [ -n "${STAGING_PUBLISHABLE_KEY:-}" ]; then
+          set -uo pipefail
+          CONFIG="Sources/Core/Sync/SupabaseConfig.swift"
+          url="${STAGING_URL:-}"
+          key="${STAGING_PUBLISHABLE_KEY:-}"
+          source="repo variable/secret"
+
+          if [ -z "$url" ] || [ -z "$key" ]; then
+            if [ -f "$CONFIG" ]; then
+              [ -n "$url" ] || url="$(grep -oE 'https://[a-z0-9]+\.supabase\.co' "$CONFIG" | head -1)"
+              [ -n "$key" ] || key="$(grep -oE 'sb_publishable_[A-Za-z0-9_-]+' "$CONFIG" | head -1)"
+              source="$CONFIG (the config the app ships)"
+            fi
+          fi
+
+          if [ -n "$url" ] && [ -n "$key" ]; then
             echo "configured=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "url<<EOF";  echo "$url"; echo "EOF"
+              echo "key<<EOF";  echo "$key"; echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+            echo "Resolved staging endpoint from: $source"
             exit 0
           fi
+
           echo "configured=false" >> "$GITHUB_OUTPUT"
           {
             echo "### Staging smoke test skipped"
             echo
-            echo "Set repo **variables** \`SUPABASE_STAGING_URL\` and"
-            echo "\`SUPABASE_STAGING_PUBLISHABLE_KEY\` (Settings → Secrets and"
-            echo "variables → Actions → Variables) to enable the curl-level"
-            echo "RLS proofs. Secrets of the same names also work."
+            echo "Could not resolve the staging URL and publishable key."
+            echo "They normally come from \`$CONFIG\`; set repo variables"
+            echo "\`SUPABASE_STAGING_URL\` / \`SUPABASE_STAGING_PUBLISHABLE_KEY\`"
+            echo "to point the proofs somewhere else."
             echo
             echo "The deploy itself succeeded — only the proofs were skipped."
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "::notice title=Smoke test skipped::SUPABASE_STAGING_URL / SUPABASE_STAGING_PUBLISHABLE_KEY are not set."
+          echo "::notice title=Smoke test skipped::could not resolve the staging endpoint."
 
       - name: Prove RLS, auth and the circle RPCs
         if: steps.guard.outputs.configured == 'true'
         shell: bash
+        env:
+          RESOLVED_URL: ${{ steps.guard.outputs.url }}
+          RESOLVED_KEY: ${{ steps.guard.outputs.key }}
         run: |
           set -uo pipefail
 
@@ -281,8 +320,8 @@ jobs:
           # ref inside it and the key before a single request is made, so no
           # amount of curl verbosity or error text can print them in a log that
           # anyone on the internet can read.
-          URL="${STAGING_URL%/}"
-          KEY="$STAGING_PUBLISHABLE_KEY"
+          URL="${RESOLVED_URL%/}"
+          KEY="$RESOLVED_KEY"
           echo "::add-mask::$URL"
           echo "::add-mask::$KEY"
           ref="$(printf '%s' "$URL" | sed -E 's#^https?://([^./]+)\..*#\1#')"
