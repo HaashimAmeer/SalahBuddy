@@ -1,0 +1,565 @@
+# Supabase backend: test on Linux, deploy staging, then prove it with curl.
+#
+# The backend is the one part of SalahBuddy a cloud/web session can fully
+# verify — but only here. The sandbox has no Docker (`supabase start` is out)
+# and `*.supabase.co` is blocked by egress policy, so a session can get as far
+# as "migrations apply to a scratch Postgres and the Deno helpers pass". The
+# real project is only ever touched from this workflow, which is why the smoke
+# job exists: it is the Phase A exit criterion from SPEC-V4 §10 ("staging
+# accepts a signed-in user via a curl-level test") executed on every push.
+#
+# Public-repo safety, non-negotiable:
+#   * push-triggered only — no `pull_request_target`, so a fork PR can never
+#     run with repo secrets in scope,
+#   * secrets reach the shell through `env:` only, never interpolated into a
+#     `run:` script (a `${{ }}` inside `run:` is textual substitution, i.e. a
+#     script-injection hole),
+#   * no project ref, URL or key is written in this file; every one of them
+#     comes from repo secrets/variables and is masked before anything is
+#     printed,
+#   * the smoke job authenticates with the PUBLISHABLE (anon) key only. That
+#     key is safe to hold precisely because RLS — not key custody — is the
+#     security boundary, which is the first thing the job proves.
+name: backend
+
+# Path-filtered so Swift-only pushes don't spend a run here (and vice versa:
+# ios.yml ignores backend/**). dev/** matches ios.yml so a long-running v4
+# session gets a verdict on every push without merging to staging first —
+# but note that only `staging` deploys; dev branches stop after `test`.
+on:
+  push:
+    branches: [staging, production, "dev/**"]
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend.yml"
+  workflow_dispatch:
+
+# Deliberately NOT cancel-in-progress: `test` would be safe to cancel, but
+# killing this workflow mid `supabase db push` can leave the remote migration
+# history half-applied. A superseded run wasting two minutes is the cheaper
+# failure.
+concurrency:
+  group: backend-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Everything that can be proven without a Supabase project: the migrations
+  # applied to a real Postgres 16 and asserted against, plus the edge functions
+  # type-checked and unit-tested. Runs on every branch in the filter above.
+  # ---------------------------------------------------------------------------
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      # postgres:16 matches what Supabase runs. The shim in tests/shim/ fakes
+      # the pieces of a Supabase database the migrations lean on (auth.users,
+      # auth.uid(), storage.*, the anon/authenticated/service_role roles) so
+      # vanilla Postgres is enough — no Docker-in-Docker, no `supabase start`.
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # Same contract run_sql_tests.sh honours locally; the password stays in
+      # PGPASSWORD rather than the URI so it can never be echoed as part of a
+      # printed conninfo string.
+      PGURI: postgresql://postgres@localhost:5432/postgres
+      PGPASSWORD: postgres
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: denoland/setup-deno@v2
+        with:
+          # Pinned to the 2.x line, not a patch: the functions use only stable
+          # Deno APIs, and Supabase's edge runtime tracks 2.x too.
+          deno-version: v2.x
+
+      - name: Ensure a psql client
+        run: |
+          # The ubuntu-latest image ships postgresql-client, but that is an
+          # image detail, not a promise — install only if it vanishes.
+          if ! command -v psql >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq postgresql-client
+          fi
+          psql --version
+
+      - name: SQL suite (shim + migrations + assertions)
+        run: backend/tests/run_sql_tests.sh
+
+      # Type-check what actually gets deployed. `deno check` resolves the npm:
+      # specifiers, so a bad import fails here rather than at deploy time.
+      - name: Type-check edge functions
+        working-directory: backend
+        run: |
+          deno check supabase/functions/_shared/*.ts \
+                     supabase/functions/*/index.ts \
+                     tests/deno/*.ts
+
+      # No permission flags on purpose: the helpers are pure and every test
+      # injects its own `fetch`, so a test that suddenly needs the network is a
+      # test that stopped being a unit test.
+      - name: Unit-test edge function helpers
+        working-directory: backend
+        run: deno test tests/deno/
+
+  # ---------------------------------------------------------------------------
+  # Deploy to the staging project. `staging` only — dev/** and production both
+  # stop at `test` (see the production note at the bottom of this file).
+  # ---------------------------------------------------------------------------
+  deploy-staging:
+    needs: test
+    if: github.ref == 'refs/heads/staging'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      # Lets smoke-staging tell "deploy skipped for want of secrets" apart from
+      # "deploy ran". Secrets cannot be read in a job-level `if:`, so the guard
+      # has to be a step that publishes an output.
+      configured: ${{ steps.guard.outputs.configured }}
+
+    env:
+      # The CLI reads all three from the environment; passing the password as
+      # an argument would put it in the process list and in `--debug` output.
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_STAGING_DB_PASSWORD }}
+      SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_STAGING_PROJECT_REF }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # A fork, a clone, or a repo whose secrets have not been filled in yet
+      # should get a green, explanatory run — not a wall of red from a CLI
+      # failing on an empty --project-ref.
+      - name: Check staging credentials
+        id: guard
+        run: |
+          missing=()
+          [ -n "${SUPABASE_ACCESS_TOKEN:-}" ]  || missing+=("SUPABASE_ACCESS_TOKEN")
+          [ -n "${SUPABASE_PROJECT_REF:-}" ]   || missing+=("SUPABASE_STAGING_PROJECT_REF")
+          [ -n "${SUPABASE_DB_PASSWORD:-}" ]   || missing+=("SUPABASE_STAGING_DB_PASSWORD")
+          if [ ${#missing[@]} -eq 0 ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            echo "Staging credentials present — deploying."
+            exit 0
+          fi
+          echo "configured=false" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Staging deploy skipped"
+            echo
+            echo "Missing repo secret(s): \`${missing[*]}\`"
+            echo
+            echo "Add them under **Settings → Secrets and variables → Actions**"
+            echo "(\`SUPABASE_ACCESS_TOKEN\` from the Supabase account tokens page,"
+            echo "the ref and DB password from the staging project's settings)."
+            echo "The tests above still ran — only the deploy was skipped."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=Staging deploy skipped::Missing ${missing[*]} — tests passed, deploy not attempted."
+
+      - uses: supabase/setup-cli@v1
+        if: steps.guard.outputs.configured == 'true'
+        with:
+          version: latest
+
+      # working-directory: backend — the CLI looks for ./supabase/config.toml
+      # relative to the working directory, and ours lives at backend/supabase.
+      - name: Link staging project
+        if: steps.guard.outputs.configured == 'true'
+        working-directory: backend
+        run: supabase link --project-ref "$SUPABASE_PROJECT_REF"
+
+      - name: Apply migrations (db push)
+        if: steps.guard.outputs.configured == 'true'
+        working-directory: backend
+        # </dev/null makes the "apply these migrations?" prompt take its
+        # non-interactive default instead of hanging if a future CLI version
+        # decides stdin looks like a terminal.
+        run: supabase db push --linked </dev/null
+
+      # --use-api bundles server-side, so no Docker image pull on the runner.
+      # No slugs listed: every function under supabase/functions/ ships, with
+      # verify_jwt taken from config.toml (both are `true` — the functions
+      # carry no repo secret of their own).
+      - name: Deploy edge functions
+        if: steps.guard.outputs.configured == 'true'
+        working-directory: backend
+        run: supabase functions deploy --project-ref "$SUPABASE_PROJECT_REF" --use-api
+
+      - name: Summarise
+        if: steps.guard.outputs.configured == 'true'
+        run: |
+          {
+            echo "### Staging deploy"
+            echo
+            echo "- migrations pushed"
+            echo "- edge functions deployed (\`notify\`, \`retention\`)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # Curl-level proof that the thing we just deployed behaves. This is the job
+  # that would catch a migration that applies cleanly and still leaves the data
+  # readable by the world — the SQL suite can only prove policies exist, this
+  # proves the deployed stack enforces them over HTTP.
+  #
+  # Runs with the PUBLISHABLE key and throwaway users, nothing else. It never
+  # needs the service-role key, and it must never be given one: a proof that
+  # bypasses RLS proves nothing.
+  # ---------------------------------------------------------------------------
+  smoke-staging:
+    needs: deploy-staging
+    if: needs.deploy-staging.outputs.configured == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      # Repo *variables* are the intended home for these two: neither is a
+      # secret (the URL is public in the app binary, the publishable key is
+      # designed to ship to clients), and variables are readable in job logs
+      # and in the Actions UI, which makes debugging a smoke failure possible.
+      # Falls back to secrets of the same names so a repo that already stored
+      # them as secrets keeps working. Both are masked below regardless.
+      STAGING_URL: ${{ vars.SUPABASE_STAGING_URL || secrets.SUPABASE_STAGING_URL }}
+      STAGING_PUBLISHABLE_KEY: ${{ vars.SUPABASE_STAGING_PUBLISHABLE_KEY || secrets.SUPABASE_STAGING_PUBLISHABLE_KEY }}
+      # Set to "true" only if the staging project deliberately has email
+      # signups off; the auth-dependent proofs then report as skipped instead
+      # of failing the run. Default (unset) = a project that cannot sign a user
+      # in is a broken project and the build says so.
+      AUTH_OPTIONAL: ${{ vars.SUPABASE_STAGING_AUTH_OPTIONAL }}
+      RUN_TAG: ${{ github.run_id }}-${{ github.run_attempt }}
+
+    steps:
+      - name: Check smoke configuration
+        id: guard
+        run: |
+          if [ -n "${STAGING_URL:-}" ] && [ -n "${STAGING_PUBLISHABLE_KEY:-}" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "configured=false" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Staging smoke test skipped"
+            echo
+            echo "Set repo **variables** \`SUPABASE_STAGING_URL\` and"
+            echo "\`SUPABASE_STAGING_PUBLISHABLE_KEY\` (Settings → Secrets and"
+            echo "variables → Actions → Variables) to enable the curl-level"
+            echo "RLS proofs. Secrets of the same names also work."
+            echo
+            echo "The deploy itself succeeded — only the proofs were skipped."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=Smoke test skipped::SUPABASE_STAGING_URL / SUPABASE_STAGING_PUBLISHABLE_KEY are not set."
+
+      - name: Prove RLS, auth and the circle RPCs
+        if: steps.guard.outputs.configured == 'true'
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          # ---- masking ------------------------------------------------------
+          # Repo variables are NOT masked by GitHub. Mask the URL, the project
+          # ref inside it and the key before a single request is made, so no
+          # amount of curl verbosity or error text can print them in a log that
+          # anyone on the internet can read.
+          URL="${STAGING_URL%/}"
+          KEY="$STAGING_PUBLISHABLE_KEY"
+          echo "::add-mask::$URL"
+          echo "::add-mask::$KEY"
+          ref="$(printf '%s' "$URL" | sed -E 's#^https?://([^./]+)\..*#\1#')"
+          if [ -n "$ref" ] && [ "$ref" != "$URL" ]; then echo "::add-mask::$ref"; fi
+
+          PASSED=0
+          FAILED=0
+          SKIPPED=0
+          RESULTS=()
+          pass() { PASSED=$((PASSED + 1)); echo "  PASS  $1"; RESULTS+=("PASS|$1"); }
+          fail() {
+            FAILED=$((FAILED + 1)); echo "  FAIL  $1"; RESULTS+=("FAIL|$1")
+            if [ -n "${2:-}" ]; then echo "        why: ${2}"; fi
+          }
+          skip() { SKIPPED=$((SKIPPED + 1)); echo "  SKIP  $1"; RESULTS+=("SKIP|$1"); }
+
+          # ---- HTTP ---------------------------------------------------------
+          # Sets CODE and RESP. Pass "-" for the JWT to call as pure anon (the
+          # apikey alone), which is exactly the "attacker with the shipped key"
+          # case proof 1 is about.
+          CODE=""; RESP=""
+          api() {
+            local method="$1" path="$2" jwt="$3" body="${4:-}" raw
+            local -a args=(--silent --show-error --max-time 30 -X "$method"
+                           -H "apikey: $KEY" -H "Content-Type: application/json"
+                           -H "Accept: application/json" -w $'\n%{http_code}')
+            if [ "$jwt" != "-" ]; then args+=(-H "Authorization: Bearer $jwt"); fi
+            if [ -n "$body" ]; then args+=(--data "$body"); fi
+            raw="$(curl "${args[@]}" "$URL$path" 2>&1)" || raw="$raw"$'\n000'
+            CODE="${raw##*$'\n'}"
+            RESP="${raw%$'\n'*}"
+          }
+          jqr() { printf '%s' "$RESP" | jq -r "$1" 2>/dev/null || printf ''; }
+          # Bodies are echoed on failure only, truncated, and never contain a
+          # key — but they can contain an error mentioning one, so keep it short.
+          why() { printf 'HTTP %s %s' "$CODE" "$(printf '%s' "$RESP" | head -c 200 | tr -d '\n')"; }
+
+          # ---- cleanup ------------------------------------------------------
+          # delete_account() purges every row the throwaway user created. The
+          # auth.users row itself needs service_role and is left for the admin
+          # sweep on the punch list (see backend/README.md).
+          CLEANUP_JWTS=()
+          cleanup() {
+            local j
+            for j in ${CLEANUP_JWTS[@]+"${CLEANUP_JWTS[@]}"}; do
+              [ -n "$j" ] || continue
+              api POST "/rest/v1/rpc/delete_account" "$j" '{}'
+            done
+            echo "cleanup: purged ${#CLEANUP_JWTS[@]} throwaway account(s)"
+          }
+          trap cleanup EXIT
+
+          # =====================================================================
+          echo "== Proof 1: the publishable key alone reads nothing"
+          # RLS is the boundary. Anonymous is either denied outright (no grants
+          # to `anon`) or returns an empty set — anything else is a data leak.
+          for table in posts profiles circles circle_members excused_days; do
+            for mode in "apikey-only" "apikey+anon-bearer"; do
+              if [ "$mode" = "apikey-only" ]; then
+                api GET "/rest/v1/$table?select=id&limit=5" "-"
+              else
+                api GET "/rest/v1/$table?select=id&limit=5" "$KEY"
+              fi
+              rows="$(printf '%s' "$RESP" | jq 'if type=="array" then length else -1 end' 2>/dev/null || echo -1)"
+              if [ "$CODE" = "401" ] || [ "$CODE" = "403" ] || [ "$CODE" = "404" ]; then
+                pass "anon GET /$table ($mode) denied with $CODE"
+              elif [ "$CODE" = "200" ] && [ "$rows" = "0" ]; then
+                pass "anon GET /$table ($mode) returned 0 rows"
+              else
+                fail "anon GET /$table ($mode) LEAKED DATA" "$(why)"
+              fi
+            done
+          done
+
+          # =====================================================================
+          echo "== Proof 2: a throwaway user can sign up and sign in"
+          AUTH_FAIL_REASON=""
+          # Sets JWT and USER_ID for the caller — never $UID, which bash owns.
+          # example.com is reserved and cannot receive mail, which is exactly
+          # the point: these accounts are disposable.
+          signup_and_signin() {
+            local label="$1" email pw token
+            email="salahbuddy-ci-${RUN_TAG}-${label}@example.com"
+            pw="$(openssl rand -base64 21)"
+            echo "::add-mask::$pw"
+
+            api POST "/auth/v1/signup" "-" "$(jq -nc --arg e "$email" --arg p "$pw" '{email:$e,password:$p}')"
+            if [ "$CODE" != "200" ] && [ "$CODE" != "201" ]; then
+              AUTH_FAIL_REASON="signup returned HTTP $CODE: $(jqr '.error_code // .msg // .error_description // .error // "unknown"')"
+              return 1
+            fi
+            if [ -z "$(jqr '.access_token // empty')" ] && [ -n "$(jqr '.confirmation_sent_at // empty')" ]; then
+              AUTH_FAIL_REASON="signup succeeded but the project requires email confirmation, which a CI user can never complete"
+              return 1
+            fi
+
+            api POST "/auth/v1/token?grant_type=password" "-" "$(jq -nc --arg e "$email" --arg p "$pw" '{email:$e,password:$p}')"
+            token="$(jqr '.access_token // empty')"
+            if [ "$CODE" != "200" ] || [ -z "$token" ]; then
+              AUTH_FAIL_REASON="sign-in returned HTTP $CODE: $(jqr '.error_code // .msg // .error_description // .error // "no access_token"')"
+              return 1
+            fi
+            echo "::add-mask::$token"
+            JWT="$token"
+            USER_ID="$(jqr '.user.id // empty')"
+            CLEANUP_JWTS+=("$token")
+            [ -n "$USER_ID" ]
+          }
+
+          # Loud either way: the whole point of this job is that a green tick
+          # means the proofs ran. A project that cannot mint a user gets an
+          # actionable failure, downgraded to a warning only when the repo has
+          # explicitly said signups are off on purpose.
+          auth_unavailable() {
+            echo "::group::Email auth is not usable on the staging project"
+            echo "Reason: ${AUTH_FAIL_REASON:-unknown}"
+            echo
+            echo "Proofs 3-5 (create_circle / join_circle / cross-circle isolation)"
+            echo "need a real user JWT and could not run."
+            echo
+            echo "Fix in the Supabase dashboard, STAGING PROJECT ONLY:"
+            echo "  Authentication -> Sign In / Providers -> Email"
+            echo "    * enable the Email provider"
+            echo "    * turn OFF 'Confirm email' (CI users cannot read mail)"
+            echo "If signups are off deliberately, set repo variable"
+            echo "SUPABASE_STAGING_AUTH_OPTIONAL=true to downgrade this to a warning."
+            echo "::endgroup::"
+            if [ "${AUTH_OPTIONAL:-}" = "true" ]; then
+              skip "sign up + sign in (auth disabled on purpose)"
+              skip "create_circle returns a 6-char invite code"
+              skip "second user joins with that code"
+              skip "second user cannot see an unrelated circle's posts"
+              echo "::warning title=Auth proofs skipped::${AUTH_FAIL_REASON}"
+              return 0
+            fi
+            fail "sign up + sign in a throwaway user" "$AUTH_FAIL_REASON"
+            echo "::error title=Staging auth is broken::${AUTH_FAIL_REASON}"
+            return 1
+          }
+
+          JWT=""; USER_ID=""
+          AUTH_OK=false
+          if signup_and_signin a; then
+            JWT_A="$JWT"; USER_A="$USER_ID"
+            pass "user A signed up and signed in (access token received)"
+            if signup_and_signin b; then
+              JWT_B="$JWT"; USER_B="$USER_ID"
+              pass "user B signed up and signed in"
+              if signup_and_signin c; then
+                JWT_C="$JWT"; USER_C="$USER_ID"
+                pass "user C (the outsider) signed up and signed in"
+                AUTH_OK=true
+              else
+                fail "user C sign-up" "$AUTH_FAIL_REASON"
+              fi
+            else
+              fail "user B sign-up" "$AUTH_FAIL_REASON"
+            fi
+          else
+            auth_unavailable || true
+          fi
+
+          if [ "$AUTH_OK" = "true" ]; then
+            # ===================================================================
+            echo "== Proof 3: create_circle mints a circle with a 6-char code"
+            api POST "/rest/v1/rpc/create_circle" "$JWT_A" '{"p_name":"CI smoke"}'
+            CIRCLE_A="$(jqr 'if type=="array" then .[0] else . end | .id // empty')"
+            CODE_A="$(jqr 'if type=="array" then .[0] else . end | .code // empty')"
+            # The code is a live invite for as long as the circle exists, and
+            # this log is public — assert its shape, never print its value.
+            if [ -n "$CODE_A" ]; then echo "::add-mask::$CODE_A"; fi
+            if [ "$CODE" = "200" ] && [ -n "$CIRCLE_A" ]; then
+              pass "create_circle returned a circle row"
+            else
+              fail "create_circle" "$(why)"
+            fi
+            if printf '%s' "$CODE_A" | grep -Eq '^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{6}$'; then
+              pass "invite code is 6 chars from the unambiguous alphabet (value masked)"
+            else
+              fail "invite code shape" "got ${#CODE_A} chars, not the 6-char no-I/O/0/1 alphabet"
+            fi
+
+            # ===================================================================
+            echo "== Proof 4: a second user joins with that code"
+            api POST "/rest/v1/rpc/join_circle" "$JWT_B" "$(jq -nc --arg c "$CODE_A" '{p_code:$c}')"
+            joined="$(jqr 'if type=="array" then .[0] else . end | .id // empty')"
+            if [ "$CODE" = "200" ] && [ "$joined" = "$CIRCLE_A" ]; then
+              pass "join_circle put user B in user A's circle"
+            else
+              fail "join_circle" "$(why)"
+            fi
+
+            api GET "/rest/v1/circle_members?select=user_id" "$JWT_B"
+            members="$(printf '%s' "$RESP" | jq 'if type=="array" then length else -1 end' 2>/dev/null || echo -1)"
+            if [ "$members" = "2" ]; then
+              pass "user B sees exactly 2 members (the roster is visible to circle-mates)"
+            else
+              fail "roster visibility" "expected 2 members, saw $members ($(why))"
+            fi
+
+            # ===================================================================
+            echo "== Proof 5: an unrelated circle is invisible"
+            api POST "/rest/v1/rpc/create_circle" "$JWT_C" '{"p_name":"CI outsider"}'
+            CIRCLE_C="$(jqr 'if type=="array" then .[0] else . end | .id // empty')"
+            CODE_C="$(jqr 'if type=="array" then .[0] else . end | .code // empty')"
+            if [ -n "$CODE_C" ]; then echo "::add-mask::$CODE_C"; fi
+            if [ "$CODE" = "200" ] && [ -n "$CIRCLE_C" ]; then
+              pass "user C created a third, unrelated circle"
+            else
+              fail "outsider circle creation" "$(why)"
+            fi
+
+            POST_ID="$(cat /proc/sys/kernel/random/uuid)"
+            api POST "/rest/v1/posts" "$JWT_C" "$(jq -nc \
+              --arg id "$POST_ID" --arg u "$USER_C" --arg c "$CIRCLE_C" \
+              --arg d "$(date -u +%F)" --arg t "$(date -u +%FT%TZ)" \
+              '{id:$id,user_id:$u,circle_id:$c,day_key:$d,prayer:"fajr",tier:"onTime",logged_at:$t,jamaat:false}')"
+            if [ "$CODE" = "201" ] || [ "$CODE" = "200" ]; then
+              pass "user C posted into their own circle"
+            else
+              fail "user C post insert" "$(why)"
+            fi
+
+            api GET "/rest/v1/posts?select=id,circle_id" "$JWT_B"
+            body_b="$RESP"
+            n_b="$(printf '%s' "$body_b" | jq 'if type=="array" then length else -1 end' 2>/dev/null || echo -1)"
+            if [ "$CODE" = "200" ] && ! printf '%s' "$body_b" | grep -qF -- "$POST_ID"; then
+              pass "user B CANNOT see user C's post (cross-circle RLS holds)"
+            else
+              fail "CROSS-CIRCLE LEAK: user B can see user C's post" "$(why)"
+            fi
+            if [ "$n_b" = "0" ]; then
+              pass "user B's post feed is empty (only their own circle is in scope)"
+            else
+              fail "user B's feed" "expected 0 rows, saw $n_b"
+            fi
+
+            api GET "/rest/v1/circles?select=id" "$JWT_B"
+            visible="$(printf '%s' "$RESP" | jq -r 'if type=="array" then (map(.id) | join(",")) else "" end' 2>/dev/null || printf '')"
+            if [ "$visible" = "$CIRCLE_A" ]; then
+              pass "user B sees exactly one circle: their own"
+            else
+              fail "circle visibility for user B" "expected only their circle, saw $(printf '%s' "$RESP" | jq 'length' 2>/dev/null || echo '?') row(s)"
+            fi
+          fi
+
+          # ---- did we actually prove anything? -------------------------------
+          # A green tick that proved nothing is the one outcome this job must
+          # never produce. If the user-scoped proofs neither ran, nor failed,
+          # nor were deliberately skipped, something aborted mid-script — say
+          # so loudly instead of reporting proof 1's ten passes as success.
+          if [ "$AUTH_OK" != "true" ] && [ "$SKIPPED" -eq 0 ] && [ "$FAILED" -eq 0 ]; then
+            fail "the user-scoped proofs never ran" "the script stopped before proofs 3-5 without reporting why — check the log above"
+          fi
+
+          # ---- report --------------------------------------------------------
+          echo
+          echo "== Summary: $PASSED passed, $FAILED failed, $SKIPPED skipped"
+          {
+            echo "### Staging smoke proofs"
+            echo
+            echo "| result | assertion |"
+            echo "| --- | --- |"
+            for r in ${RESULTS[@]+"${RESULTS[@]}"}; do
+              echo "| ${r%%|*} | ${r#*|} |"
+            done
+            echo
+            echo "**$PASSED passed, $FAILED failed, $SKIPPED skipped.**"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          [ "$FAILED" -eq 0 ]
+
+  # ---------------------------------------------------------------------------
+  # Production deploy: deliberately NOT wired.
+  #
+  # There is no production Supabase project yet. The free tier caps the account
+  # at two active projects and both slots are taken, so the production secrets
+  # (SUPABASE_PRODUCTION_PROJECT_REF / SUPABASE_PRODUCTION_DB_PASSWORD) simply
+  # do not exist — see XCODE-CLOUD.md, "Current state (2026-08-21)". Referring
+  # to missing secrets here would give every push to `production` a red X for a
+  # decision that was made on purpose, so pushes to `production` run `test` and
+  # stop there.
+  #
+  # Wiring it up when the project exists is the only remaining step: copy
+  # deploy-staging, swap `refs/heads/staging` for `refs/heads/production` and
+  # the STAGING_* names for PRODUCTION_*, and leave the smoke job pointed at
+  # staging (it signs up throwaway users and posts rows — never do that to a
+  # project with real people's prayers in it).

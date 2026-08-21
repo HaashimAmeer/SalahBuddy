@@ -88,6 +88,11 @@ struct RemoteCircle: Codable, Equatable, Sendable {
     /// the server trigger is the real enforcement, this is only for the invite UI.
     static let maxMembers = 8
 
+    /// The same cap counted the way `CircleDataSource.maxMembers` counts it —
+    /// FRIENDS, with you excluded. Spelled out because the off-by-one between
+    /// "seats in the circle" and "friends you can add" is the easy bug here.
+    static var maxFriends: Int { maxMembers - 1 }
+
     init(id: UUID, code: String, name: String = "Your Circle", emoji: String = "🤝",
          createdBy: UUID? = nil, createdAt: Date? = nil) {
         self.id = id

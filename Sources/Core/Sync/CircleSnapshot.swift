@@ -59,7 +59,7 @@ struct CircleSnapshot: Codable, Equatable, Sendable {
         me = (try? c.decodeIfPresent(UUID.self, forKey: .me)) ?? nil
         profiles = (try? c.decodeIfPresent([RemoteProfile].self, forKey: .profiles)) ?? []
         members = (try? c.decodeIfPresent([RemoteMember].self, forKey: .members)) ?? []
-        posts = (try? c.decodeIfPresent([RemotePost].self, forKey: .posts)) ?? []
+        self.posts = (try? c.decodeIfPresent([RemotePost].self, forKey: .posts)) ?? []
         excusedDays = (try? c.decodeIfPresent([RemoteExcusedDay].self, forKey: .excusedDays)) ?? []
         recoveryWeeks = (try? c.decodeIfPresent([RemoteRecoveryWeek].self, forKey: .recoveryWeeks)) ?? []
         challenges = (try? c.decodeIfPresent([RemoteCustomChallenge].self, forKey: .challenges)) ?? []
@@ -84,8 +84,10 @@ struct CircleSnapshot: Codable, Equatable, Sendable {
 
     var hasCircle: Bool { circle != nil }
 
-    /// Friend slots still free, for the invite UI. The server trigger is the
-    /// real cap; this only decides what the sheet says.
+    /// Seats still free in the circle — i.e. how many more people can join,
+    /// which is what the invite sheet reports. Counts TOTAL members, you
+    /// included (`RemoteCircle.maxFriends` is the you-excluded view). The
+    /// server trigger is the real cap; this only decides what the sheet says.
     var remainingSlots: Int {
         max(0, RemoteCircle.maxMembers - members.count)
     }
@@ -102,7 +104,7 @@ struct CircleSnapshot: Codable, Equatable, Sendable {
     /// devices never render the roster in different orders.
     private var orderedMembers: [RemoteMember] {
         let epoch = Date(timeIntervalSince1970: 0)
-        return members.sorted { lhs, rhs in
+        return members.sorted { (lhs: RemoteMember, rhs: RemoteMember) -> Bool in
             let left: Date = lhs.joinedAt ?? epoch
             let right: Date = rhs.joinedAt ?? epoch
             if left != right { return left < right }

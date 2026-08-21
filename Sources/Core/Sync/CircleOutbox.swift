@@ -267,6 +267,17 @@ struct CircleOutbox: Codable, Equatable, Sendable {
         items.removeAll()
     }
 
+    /// Drops the queued op with `signature`, reporting whether there was one.
+    /// The caller uses the answer to decide whether the cancelling op still has
+    /// work left to do on the server.
+    private mutating func cancelPending(signature: String) -> Bool {
+        guard let index = items.firstIndex(where: { $0.op.collapseSignature == signature }) else {
+            return false
+        }
+        items.remove(at: index)
+        return true
+    }
+
     // MARK: Codable
 
     private enum CodingKeys: String, CodingKey {
