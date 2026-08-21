@@ -250,6 +250,10 @@ jobs:
       # of failing the run. Default (unset) = a project that cannot sign a user
       # in is a broken project and the build says so.
       AUTH_OPTIONAL: ${{ vars.SUPABASE_STAGING_AUTH_OPTIONAL }}
+      # Supabase rejects @example.com outright (400 email_address_invalid), so
+      # the throwaway users need a domain its validator accepts. Override with
+      # the repo variable if this one ever stops working.
+      CI_EMAIL_DOMAIN: ${{ vars.SUPABASE_STAGING_CI_EMAIL_DOMAIN || 'salahbuddy.app' }}
       RUN_TAG: ${{ github.run_id }}-${{ github.run_attempt }}
 
     steps:
@@ -385,14 +389,21 @@ jobs:
           # missing from the schema cache — a renamed table, or a cache that has
           # not reloaded in the seconds since `db push`. Scoring that as a pass
           # reports a broken deploy as ten green ticks.
+          # NO `select=` here, deliberately. Only posts/profiles/circles have an
+          # `id`; circle_members and excused_days are keyed by composite primary
+          # keys, so `select=id` answered 400 "column does not exist" — and the
+          # old classifier scored that as LEAKED DATA, which is the worst way to
+          # be wrong: a broken probe reported as a breach. Bare `?limit=1` asks
+          # for whatever the row is, which is also closer to what an attacker
+          # holding the publishable key would actually try.
           anon_reads_nothing() {
             local phase="$1" table mode rows
             for table in posts profiles circles circle_members excused_days; do
               for mode in "apikey-only" "apikey+anon-bearer"; do
                 if [ "$mode" = "apikey-only" ]; then
-                  api GET "/rest/v1/$table?select=id&limit=5" "-"
+                  api GET "/rest/v1/$table?limit=1" "-"
                 else
-                  api GET "/rest/v1/$table?select=id&limit=5" "$KEY"
+                  api GET "/rest/v1/$table?limit=1" "$KEY"
                 fi
                 rows="$(printf '%s' "$RESP" | jq 'if type=="array" then length else -1 end' 2>/dev/null || echo -1)"
                 if [ "$CODE" = "401" ] || [ "$CODE" = "403" ]; then
@@ -401,6 +412,12 @@ jobs:
                   pass "anon GET /$table ($mode, $phase) returned 0 rows"
                 elif [ "$CODE" = "404" ]; then
                   fail "anon GET /$table ($mode, $phase): table missing from the schema cache" "$(why)"
+                elif [ "$CODE" = "400" ]; then
+                  # A malformed query is a broken TEST. Saying "leak" here cries
+                  # wolf, and a smoke job nobody believes is worse than none.
+                  fail "anon GET /$table ($mode, $phase): the probe itself is malformed" "$(why)"
+                elif [ "$rows" = "-1" ]; then
+                  fail "anon GET /$table ($mode, $phase): unreadable response" "$(why)"
                 else
                   fail "anon GET /$table ($mode, $phase) LEAKED DATA" "$(why)"
                 fi
@@ -422,7 +439,7 @@ jobs:
           # the point: these accounts are disposable.
           signup_and_signin() {
             local label="$1" email pw token
-            email="salahbuddy-ci-${RUN_TAG}-${label}@example.com"
+            email="salahbuddy-ci-${RUN_TAG}-${label}@${CI_EMAIL_DOMAIN}"
             pw="$(openssl rand -base64 21)"
             echo "::add-mask::$pw"
 
@@ -460,11 +477,34 @@ jobs:
             echo "Proofs 3-5 (create_circle / join_circle / cross-circle isolation)"
             echo "need a real user JWT and could not run."
             echo
-            echo "Fix in the Supabase dashboard, STAGING PROJECT ONLY:"
-            echo "  Authentication -> Sign In / Providers -> Email"
-            echo "    * enable the Email provider"
-            echo "    * turn OFF 'Confirm email' (CI users cannot read mail)"
-            echo "If signups are off deliberately, set repo variable"
+            # Three different problems wear the same failure here, and naming
+            # the wrong one sends someone to the wrong dashboard page.
+            case "${AUTH_FAIL_REASON:-}" in
+              *email_address_invalid*)
+                echo "The provider is FINE — Supabase rejected the ADDRESS, not the signup."
+                echo "Its validator refuses example.com and other reserved domains."
+                echo "Current domain: ${CI_EMAIL_DOMAIN}"
+                echo "Set repo variable SUPABASE_STAGING_CI_EMAIL_DOMAIN to a domain"
+                echo "Supabase accepts. Nothing is ever sent to it while 'Confirm"
+                echo "email' is off, so it need not receive mail — only validate."
+                ;;
+              *requires\ email\ confirmation*|*confirmation_sent*)
+                echo "Fix in the Supabase dashboard, STAGING PROJECT ONLY:"
+                echo "  Authentication -> Sign In / Providers -> Email"
+                echo "    * turn OFF 'Confirm email' — a CI user cannot read mail"
+                ;;
+              *signup*disabled*|*422*)
+                echo "Fix in the Supabase dashboard, STAGING PROJECT ONLY:"
+                echo "  Authentication -> Sign In / Providers -> Email"
+                echo "    * enable the Email provider / allow new signups"
+                ;;
+              *)
+                echo "Check Authentication -> Sign In / Providers -> Email on the"
+                echo "STAGING project: the provider must be on, 'Confirm email' off."
+                ;;
+            esac
+            echo
+            echo "If email signups are off deliberately, set repo variable"
             echo "SUPABASE_STAGING_AUTH_OPTIONAL=true to downgrade this to a warning."
             echo "::endgroup::"
             if [ "${AUTH_OPTIONAL:-}" = "true" ]; then
