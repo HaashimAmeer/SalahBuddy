@@ -243,13 +243,23 @@ grant insert (id, user_id, circle_id, day_key, prayer, tier, logged_at,
               jamaat, place_label, photo_path, travel_combined)
       on public.posts to authenticated;
 
-grant select, delete on public.excused_days to authenticated;
-grant insert (user_id, circle_id, day_key),
+-- SELECT is column-scoped here too, which is unusual and deliberate. §3 sells
+-- the excused row as a BARE FLAG and the recovery row as an OPAQUE TOTAL, and
+-- the timestamps undo both: excused_days.created_at pins the minute somebody's
+-- break started, and recovery_weeks.updated_at advances on every dhikr tap and
+-- every good deed — a per-action activity trace hanging off the one row that
+-- exists to avoid exactly that. The client already declines to mirror either
+-- (RemoteModels.swift), but "the honest client does not ask" is not a privacy
+-- boundary; the grant is.
+grant delete on public.excused_days to authenticated;
+grant select (user_id, circle_id, day_key),
+      insert (user_id, circle_id, day_key),
       update (user_id, circle_id, day_key)
       on public.excused_days to authenticated;
 
-grant select, delete on public.recovery_weeks to authenticated;
-grant insert (user_id, circle_id, week_key, xp),
+grant delete on public.recovery_weeks to authenticated;
+grant select (user_id, circle_id, week_key, xp),
+      insert (user_id, circle_id, week_key, xp),
       update (user_id, circle_id, week_key, xp)
       on public.recovery_weeks to authenticated;
 

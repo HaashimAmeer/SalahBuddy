@@ -95,6 +95,45 @@ begin
   end;
 end $$;
 
+-- Some columns are not merely unwritable, they are UNREADABLE by the circle.
+-- §3 sells the excused row as a bare flag and the recovery row as an opaque
+-- total; excused_days.created_at pins the minute somebody's break started, and
+-- recovery_weeks.updated_at advances on every dhikr tap, which is a per-action
+-- activity trace hanging off the one row that exists to avoid exactly that.
+do $$
+declare
+  v_me   uuid := '00000000-0000-0000-0000-000000001901';
+  v_mate uuid := '00000000-0000-0000-0000-000000001902';
+  v_n    int;
+begin
+  perform set_config('request.jwt.claims', format('{"sub":"%s","role":"authenticated"}', v_me), true);
+  insert into public.excused_days (user_id, circle_id, day_key)
+  values (v_me, public.current_circle_id(), '2026-08-20');
+
+  perform set_config('request.jwt.claims', format('{"sub":"%s","role":"authenticated"}', v_mate), true);
+
+  -- the flag itself is readable, which is the whole feature
+  select count(*) into v_n from (select user_id, day_key from public.excused_days) q;
+  if v_n <> 1 then raise exception 'a circle-mate cannot see the resting flag'; end if;
+
+  begin
+    perform (select created_at from public.excused_days limit 1);
+    raise exception 'a circle-mate can read excused_days.created_at';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    perform (select updated_at from public.recovery_weeks limit 1);
+    raise exception 'a circle-mate can read recovery_weeks.updated_at';
+  exception when insufficient_privilege then null;
+  end;
+  -- and the lazy `select *` cannot smuggle it out either
+  begin
+    perform (select e from public.excused_days e limit 1);
+    raise exception 'select * leaked excused_days.created_at';
+  exception when insufficient_privilege then null;
+  end;
+end $$;
+
 reset role;
 
 -- The service-role client in the edge functions bypasses RLS *and* the grants,

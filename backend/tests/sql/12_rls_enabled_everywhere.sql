@@ -49,8 +49,8 @@ begin
            ('circles',           'SELECT'),
            ('circle_members',    'DELETE,SELECT'),
            ('posts',             'DELETE,SELECT'),
-           ('excused_days',      'DELETE,SELECT'),
-           ('recovery_weeks',    'DELETE,SELECT'),
+           ('excused_days',      'DELETE'),
+           ('recovery_weeks',    'DELETE'),
            ('custom_challenges', 'DELETE,SELECT'),
            ('devices',           'DELETE,SELECT'),
            ('nudges',            'SELECT')
@@ -78,8 +78,12 @@ begin
       ('circle_members','announced_at','UPDATE'),
       ('excused_days','created_at','INSERT'),
       ('excused_days','created_at','UPDATE'),
+      -- ...and not even READABLE: §3's bare flag stops being bare the moment
+      -- the circle can see what time of day the break started.
+      ('excused_days','created_at','SELECT'),
       ('recovery_weeks','updated_at','INSERT'),
       ('recovery_weeks','updated_at','UPDATE'),
+      ('recovery_weeks','updated_at','SELECT'),
       ('custom_challenges','created_at','INSERT'),
       ('custom_challenges','created_at','UPDATE'),
       ('custom_challenges','created_by','UPDATE'),
@@ -102,7 +106,9 @@ begin
       ('posts','circle_id','INSERT'),    ('posts','photo_path','UPDATE'),
       ('posts','tier','UPDATE'),         ('posts','logged_at','UPDATE'),
       ('excused_days','day_key','INSERT'),
+      ('excused_days','day_key','SELECT'),
       ('recovery_weeks','xp','INSERT'),  ('recovery_weeks','xp','UPDATE'),
+      ('recovery_weeks','xp','SELECT'),
       ('circles','name','UPDATE'),       ('circles','emoji','UPDATE'),
       ('devices','apns_token','INSERT'),
       ('devices','notify_friend_activity','INSERT'),

@@ -23,12 +23,13 @@ backend/
     config.toml                     # CLI project config. No refs, URLs or keys — ever.
     seed.sql                        # STAGING-ONLY demo circle, idempotent, hand-written uuids
     migrations/
-      20260821000100_init.sql       # enums, tables, constraints, indexes, circle_max_members()
-      20260821000200_rls.sql        # enable RLS + every policy + grants (never to `anon`)
-      20260821000300_triggers.sql   # updated_at, the cap-8 trigger, profile auto-create
+      20260821000100_init.sql       # enums, tables, constraints, indexes, the cap/limit constants
+      20260821000200_rls.sql        # enable RLS + every policy + COLUMN-SCOPED grants (never `anon`)
+      20260821000300_triggers.sql   # updated_at, cap-8, profile auto-create, photo tombstones,
+                                    #   departures, the device cap, frozen created_at
       20260821000400_rpcs.sql       # create/join/leave/rename circle, nudges, retention, delete_account
       20260821000500_storage.sql    # private `prayer-photos` bucket + path-scoped object policies
-      20260821000600_realtime.sql   # publication membership + replica identity for live updates
+      20260821000600_realtime.sql   # what is published (and what deliberately is not)
     functions/
       _shared/                      # apns.ts, auth.ts, db.ts, http.ts, messages.ts, util.ts, validate.ts
       notify/index.ts               # post / join / nudge push fan-out (APNs, signed in-function)
@@ -285,9 +286,18 @@ preferences.
   column ever appears there, and pins the whole column list besides — a guard
   against the well-meaning migration that "just adds a note field".
 - **Recovery XP is an opaque weekly total.** `recovery_weeks` stores
-  `(user_id, week_key, xp)` and nothing about *what* was done. Dhikr counts and
+  `(user_id, circle_id, week_key, xp)` and nothing about *what* was done. Dhikr counts and
   good-deed choices stay local. The scoreboard stays fair for anyone on a break
   without narrating their life to the group.
+- **The timestamps on those two rows are not readable by the circle either.**
+  SELECT on `excused_days` and `recovery_weeks` is column-scoped, because a bare
+  flag stops being bare when a circle-mate can see `created_at` — the minute
+  somebody's break started — and an opaque total stops being opaque when
+  `updated_at` advances on every dhikr tap and every good deed. The client
+  already declines to mirror both (`RemoteModels.swift` says so in as many
+  words), but "the honest client does not ask" is not a boundary; the grant is.
+  Test 19 reads them as a circle-mate and expects `insufficient_privilege`,
+  including through a lazy `select *`.
 - **Nothing is world-readable.** `anon` is explicitly *revoked* from every table
   and RPC — not merely left ungranted, because Supabase's default privileges on
   `public` hand new objects to `anon` before a migration says a word. Every read
@@ -431,10 +441,16 @@ own immediately, photos included.
 - [ ] **Add `backend/supabase/.temp/` to `.gitignore`.** The Supabase CLI
       writes the linked project ref there; on a public repo that should never
       be committed by accident.
-- [ ] **Schedule `retention`.** Nothing calls it yet. Options: `pg_cron` +
-      `pg_net` on the project (neither is available in the sandbox, so it must
-      be configured against the real database), or an external scheduler
-      POSTing with the service-role key. The lease makes over-calling safe.
+- [ ] **Schedule `retention`.** Nothing calls it yet, which is the one thing
+      standing between the sweep described above and the ~30-day promise in §4.
+      Options: `pg_cron` + `pg_net` on the project (neither is available in the
+      sandbox, so it must be configured against the real database), or an
+      external scheduler POSTing with the service-role key. The lease makes
+      over-calling safe. **Whichever you pick, it must present the raw
+      `SUPABASE_SERVICE_ROLE_KEY` as the bearer** — `isServiceRoleToken()`
+      compares it verbatim and no longer trusts a decoded `role` claim, because
+      that claim is what unlocks the destructive `days` knob. Do not reach for
+      `--no-verify-jwt` while wiring this up.
 - [ ] **Sweep orphaned `auth.users` rows.** `delete_account()` purges every
       row a user owns but cannot delete their `auth.users` row (that needs
       `service_role`); the app signs out immediately after. An admin sweep

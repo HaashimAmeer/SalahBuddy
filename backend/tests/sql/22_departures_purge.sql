@@ -157,4 +157,40 @@ begin
   end if;
 end $$;
 
+-- The departure trigger must not break the two CASCADE paths. Both delete the
+-- membership row as a side effect, and by the time an AFTER trigger runs the
+-- parent (circle, or auth user) is already gone — so recording a departure that
+-- references it would fail the FK and abort the whole delete. There is nothing
+-- left to purge in that case, and the photo still has to be tombstoned.
+reset role;
+
+insert into auth.users (id, email) values
+  ('00000000-0000-0000-0000-0000000022f1', 'cascade1@example.test'),
+  ('00000000-0000-0000-0000-0000000022f2', 'cascade2@example.test');
+insert into public.circles (id, code, name)
+values ('00000000-0000-0000-0000-0000000022dd', 'CASCAD', 'Cascade');
+insert into public.circle_members (circle_id, user_id) values
+  ('00000000-0000-0000-0000-0000000022dd', '00000000-0000-0000-0000-0000000022f1'),
+  ('00000000-0000-0000-0000-0000000022dd', '00000000-0000-0000-0000-0000000022f2');
+insert into public.posts (id, user_id, circle_id, day_key, prayer, tier, logged_at, photo_path)
+values ('00000000-0000-0000-0000-0000000022b1', '00000000-0000-0000-0000-0000000022f1',
+        '00000000-0000-0000-0000-0000000022dd', '2026-08-21', 'fajr', 'onTime', now(),
+        'cascade/one.jpg');
+
+do $$
+begin
+  -- the admin sweep removing an orphaned auth.users shell
+  delete from auth.users where id = '00000000-0000-0000-0000-0000000022f1';
+  if not exists (select 1 from public.photo_tombstones where path = 'cascade/one.jpg') then
+    raise exception 'a cascade-deleted post did not tombstone its photo';
+  end if;
+
+  -- the sweep collecting an abandoned circle, which still has a member row
+  delete from public.circles where id = '00000000-0000-0000-0000-0000000022dd';
+  if exists (select 1 from public.circle_members
+              where circle_id = '00000000-0000-0000-0000-0000000022dd') then
+    raise exception 'the circle cascade did not remove its memberships';
+  end if;
+end $$;
+
 rollback;
