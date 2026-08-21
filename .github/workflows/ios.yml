@@ -9,9 +9,12 @@
 # Public-repo safety: push-triggered only, no secrets used or echoed.
 name: ios
 
+# dev/** lets long-running sessions iterate with free macOS CI verdicts
+# without triggering Xcode Cloud (which only watches staging) — merge to
+# staging at milestone boundaries to produce TestFlight builds.
 on:
   push:
-    branches: [staging, production]
+    branches: [staging, production, "dev/**"]
     paths:
       - "Sources/**"
       - "Tests/**"
