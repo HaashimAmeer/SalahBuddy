@@ -25,15 +25,23 @@ SPEC-V4 §10 wants "staging accepts a signed-in user via a curl-level test". The
 proofs run on every push to `staging` but currently stop at sign-up.
 
 - [ ] **Staging Supabase → Authentication → Sign In / Providers → Email**:
-      enable the provider and turn **"Confirm email" OFF**.
+      turn **"Confirm email" OFF**. That is the whole task — the provider is
+      already enabled, and `salahbuddy.app` already passes Supabase's address
+      validator. Confirmed against the real project: sign-up SUCCEEDS and then
+      the run reports "the project requires email confirmation, which a CI user
+      can never complete".
       CI signs up throwaway users; Apple and Google both need a device, so email
-      is the only path a machine can drive. A CI user can never read a
-      confirmation mail.
-- [ ] If sign-up still returns `email_address_invalid`, Supabase's validator is
-      rejecting the domain. Set the repo **variable**
-      `SUPABASE_STAGING_CI_EMAIL_DOMAIN` to one it accepts. Nothing is ever sent
-      to that domain while "Confirm email" is off — it only has to validate.
-      (The default is `salahbuddy.app`; `@example.com` is rejected outright.)
+      is the only path a machine can drive, and a CI user can never click a
+      confirmation link.
+
+      Everything else on the staging project is already proven: as of the last
+      `staging` push the smoke job scored **10 passed, 1 failed**, the single
+      failure being this toggle. The 10 include the whole anon-reads-nothing
+      set against the live database.
+- [x] ~~Domain rejected by Supabase's validator~~ — settled. `@example.com` is
+      refused outright; the default is now `salahbuddy.app`, which the live
+      project accepts. `SUPABASE_STAGING_CI_EMAIL_DOMAIN` overrides it if that
+      ever changes.
 
 Until these are done the smoke job fails loudly with dashboard instructions,
 which is deliberate: a green tick that proved nothing is the one outcome that
