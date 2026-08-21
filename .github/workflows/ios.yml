@@ -1,0 +1,69 @@
+# iOS build + test on GitHub's macOS runners (free for public repos).
+#
+# Complements Xcode Cloud, which owns signing + TestFlight archives: this
+# gives cloud/web sessions — which cannot compile Swift — a compile-and-test
+# verdict on every push, without spending Xcode Cloud compute hours. It also
+# auto-pins Package.resolved when project.yml changes dependencies, so adding
+# an SPM package no longer needs a Mac (see XCODE-CLOUD.md).
+#
+# Public-repo safety: push-triggered only, no secrets used or echoed.
+name: ios
+
+on:
+  push:
+    branches: [staging, production]
+    paths:
+      - "Sources/**"
+      - "Tests/**"
+      - "project.yml"
+      - "Makefile"
+      - "ci_scripts/**"
+      - "Package.resolved"
+      - ".github/workflows/ios.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write # push refreshed Package.resolved pins back to the branch
+
+jobs:
+  test:
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select newest Xcode on the runner
+        run: |
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+          xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      # Makefile resolves a concrete simulator itself (falls back to any
+      # installed iPhone, so runner-image sim lineups don't matter).
+      - name: Build & test
+        run: make test
+
+      # If project.yml changed the dependency set, the build above resolved
+      # fresh pins into the generated project — persist them so Xcode Cloud
+      # (which disables automatic resolution) keeps working. [ci skip] stops
+      # this bot commit from re-triggering either CI.
+      - name: Auto-pin Package.resolved
+        run: |
+          GENERATED="SalahBuddy.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
+          if [ -f "$GENERATED" ] && ! diff -q "$GENERATED" Package.resolved >/dev/null 2>&1; then
+            cp "$GENERATED" Package.resolved
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add Package.resolved
+            git commit -m "ci: pin Package.resolved after dependency change [ci skip]"
+            git pull --rebase origin "$GITHUB_REF_NAME"
+            git push origin "HEAD:$GITHUB_REF_NAME"
+          else
+            echo "Package.resolved already in sync."
+          fi

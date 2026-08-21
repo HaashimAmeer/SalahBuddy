@@ -49,11 +49,20 @@ the iPhone a few minutes later.
 ## Current state (2026-08-21)
 
 - Workflow **"Staging"** is active: Branch Changes on `staging`, auto-cancel,
-  Archive → TestFlight Internal, and the **backend path filter is configured**
-  ("do not start if only files in /backend change").
-- **Known gap: no Test action yet** — the workflow only archives. Add a Test
-  action (scheme SalahBuddy, iOS Simulator) in the workflow editor; it is the
-  safety net for cloud-session pushes that skip the local pre-push hook.
+  **Test (required to pass) → Archive → TestFlight Internal**, and the
+  **backend path filter is configured** ("do not start if only files in
+  /backend change"). Minor optimization pending: the Test destination is the
+  multi-device "Recommended iPhones" alias — switching it to a single
+  simulator (only possible from Xcode's Cloud tab, the ASC web dropdown
+  refuses) would cut compute-hour usage; the tests are pure-logic units on an
+  iPhone-only target.
+- **`.github/workflows/ios.yml`** additionally runs `make test` on GitHub's
+  free public-repo **macOS runners** for every Swift-touching push — the fast
+  compile-and-test verdict for cloud/web sessions, costing zero Xcode Cloud
+  hours. It also **auto-pins `Package.resolved`**: when `project.yml` changes
+  the dependency set, the workflow commits the refreshed pin back with
+  `[ci skip]`, and `ci_post_clone.sh` self-heals by running
+  `-resolvePackageDependencies`, so adding an SPM package needs no Mac.
 - **Supabase: staging only.** The production project is deferred — the free
   tier caps the *account* at 2 active projects and both slots are taken.
   Repo secrets exist for staging (`SUPABASE_ACCESS_TOKEN`,

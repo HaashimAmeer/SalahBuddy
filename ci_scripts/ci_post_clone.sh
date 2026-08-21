@@ -24,3 +24,9 @@ xcodegen generate
 # with `make lock` after changing dependencies); copy it into place.
 mkdir -p SalahBuddy.xcodeproj/project.xcworkspace/xcshareddata/swiftpm
 cp Package.resolved SalahBuddy.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+
+# Self-heal: if project.yml added/changed dependencies since the committed
+# pin, resolve them here instead of failing with "a resolved file is
+# required". The ios.yml GitHub workflow persists the refreshed pin back to
+# the repo, so this drift lasts one build at most.
+xcodebuild -resolvePackageDependencies -project SalahBuddy.xcodeproj -scheme SalahBuddy
