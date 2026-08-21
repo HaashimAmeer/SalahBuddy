@@ -43,9 +43,10 @@ protocol CircleDataSource {
 
 /// A circle with nobody in it.
 ///
-/// v4: stands in for the real source until Phase B3 lands membership sync, so
-/// `circleMode == .real` renders like a solo account instead of leaking demo
-/// buddies into a real circle.
+/// v4: the degenerate source — a circle that answers nothing. `AppState` now
+/// reaches for `RemoteCircleDataSource` over an empty mirror instead (which
+/// gives the same answers and can fill in once membership syncs), so this
+/// remains as the explicit "no circle at all" case for callers that need one.
 struct EmptyCircleDataSource: CircleDataSource {
 
     var members: [CircleMember] { [] }

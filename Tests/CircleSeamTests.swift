@@ -318,3 +318,406 @@ final class CircleSeamTests: XCTestCase {
         XCTAssertEqual(AppClock.offset, 0, "still pinned, now at real time")
     }
 }
+
+// MARK: - Remote circle (v4)
+
+/// v4 Phase B2: `RemoteCircleDataSource` — the same seam, answered from a
+/// synced `CircleSnapshot` instead of the simulator.
+///
+/// Everything here runs off a hand-built mirror and no network, because that
+/// is the promise: a real circle draws from disk. The assertions are about the
+/// three things that could quietly go wrong — the reveal rule (nothing shows
+/// before its `loggedAt`), the scoring path (`GameEngine` and nothing else),
+/// and the photo boundary (a buddy's photo is a Storage path, never a
+/// `PhotoStore` filename).
+final class RemoteCircleSourceTests: XCTestCase {
+
+    private let cal = Calendar.current
+
+    private let circleID = UUID(uuidString: "33333333-3333-3333-3333-333333333333")!
+    private let meID = UUID(uuidString: "99999999-9999-9999-9999-999999999999")!
+    private let amira = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
+    private let bilal = UUID(uuidString: "22222222-2222-2222-2222-222222222222")!
+    private let stranger = UUID(uuidString: "66666666-6666-6666-6666-666666666666")!
+
+    /// Same synthetic day shape the simulated-seam tests use: five 90-minute
+    /// windows, so both halves of the seam are probed against one clock.
+    private let prayerHours: [Prayer: Double] = [.fajr: 5.5, .dhuhr: 13.0, .asr: 16.5,
+                                                 .maghrib: 19.5, .isha: 21.0]
+
+    private func date(_ y: Int, _ m: Int, _ d: Int) -> Date {
+        var c = DateComponents()
+        c.year = y; c.month = m; c.day = d
+        return cal.date(from: c)!
+    }
+
+    private func start(_ dayStart: Date, _ prayer: Prayer) -> Date {
+        dayStart.addingTimeInterval((prayerHours[prayer] ?? 0) * 3600)
+    }
+
+    private func end(_ dayStart: Date, _ prayer: Prayer) -> Date {
+        start(dayStart, prayer).addingTimeInterval(90 * 60)
+    }
+
+    private func schedule(dayKey: String, dayStart: Date) -> DaySchedule {
+        var windows: [PrayerWindow] = []
+        for prayer in Prayer.allCases {
+            windows.append(PrayerWindow(prayer: prayer,
+                                        start: start(dayStart, prayer),
+                                        end: end(dayStart, prayer)))
+        }
+        return DaySchedule(dayKey: dayKey, dayStart: dayStart, windows: windows)
+    }
+
+    private var mondayStart: Date { cal.startOfDay(for: date(2026, 6, 8)) }
+    private var tuesdayStart: Date { cal.startOfDay(for: date(2026, 6, 9)) }
+    private var mondayKey: String { AppClock.dayKey(for: mondayStart) }
+    private var tuesdayKey: String { AppClock.dayKey(for: tuesdayStart) }
+    private var monday: DaySchedule { schedule(dayKey: mondayKey, dayStart: mondayStart) }
+    private var tuesday: DaySchedule { schedule(dayKey: tuesdayKey, dayStart: tuesdayStart) }
+
+    private func weekDays() -> [(dayKey: String, schedule: DaySchedule)] {
+        var days: [(dayKey: String, schedule: DaySchedule)] = []
+        days.append((mondayKey, monday))
+        days.append((tuesdayKey, tuesday))
+        return days
+    }
+
+    private var amiraPhotoPath: String {
+        "\(circleID.uuidString)/\(amira.uuidString)/monday-fajr.jpg"
+    }
+
+    private func stamp(_ seconds: Double) -> Date {
+        Date(timeIntervalSince1970: 1_700_000_000 + seconds)
+    }
+
+    private func post(user: UUID, dayKey: String, prayer: Prayer, tier: LogTier,
+                      loggedAt: Date, jamaat: Bool = false,
+                      placeLabel: String? = nil, photoPath: String? = nil) -> RemotePost {
+        RemotePost(id: UUID(), userID: user, circleID: circleID, dayKey: dayKey,
+                   prayer: prayer, tier: tier, loggedAt: loggedAt, jamaat: jamaat,
+                   placeLabel: placeLabel, photoPath: photoPath)
+    }
+
+    /// The mirror under test: Amira prayed all of Monday and part of Tuesday;
+    /// Bilal rested on Monday and logged one Tuesday Fajr. Tuesday's rows are
+    /// inserted FIRST so `weekLogs`' ordering has real work to do.
+    private func fixture() -> CircleSnapshot {
+        let mon: Date = mondayStart
+        let tue: Date = tuesdayStart
+        var posts: [RemotePost] = []
+
+        posts.append(post(user: amira, dayKey: tuesdayKey, prayer: .dhuhr, tier: .prayed,
+                          loggedAt: start(tue, .dhuhr).addingTimeInterval(1800)))
+        // A make-up, logged an hour after the window shut.
+        posts.append(post(user: amira, dayKey: tuesdayKey, prayer: .fajr, tier: .qada,
+                          loggedAt: end(tue, .fajr).addingTimeInterval(3600)))
+        posts.append(post(user: bilal, dayKey: tuesdayKey, prayer: .fajr, tier: .prayed,
+                          loggedAt: start(tue, .fajr).addingTimeInterval(1800)))
+
+        posts.append(post(user: amira, dayKey: mondayKey, prayer: .fajr, tier: .onTime,
+                          loggedAt: start(mon, .fajr).addingTimeInterval(600),
+                          placeLabel: "🏠 Home", photoPath: amiraPhotoPath))
+        // An empty place label is a column that came back blank, not a pill.
+        posts.append(post(user: amira, dayKey: mondayKey, prayer: .dhuhr, tier: .onTime,
+                          loggedAt: start(mon, .dhuhr).addingTimeInterval(600),
+                          placeLabel: ""))
+        posts.append(post(user: amira, dayKey: mondayKey, prayer: .asr, tier: .onTime,
+                          loggedAt: start(mon, .asr).addingTimeInterval(600)))
+        posts.append(post(user: amira, dayKey: mondayKey, prayer: .maghrib, tier: .lastCall,
+                          loggedAt: start(mon, .maghrib).addingTimeInterval(4200), jamaat: true))
+        // Retention cleared this one's photo — an empty path is no path.
+        posts.append(post(user: amira, dayKey: mondayKey, prayer: .isha, tier: .onTime,
+                          loggedAt: start(mon, .isha).addingTimeInterval(600),
+                          photoPath: ""))
+
+        let profiles: [RemoteProfile] = [
+            RemoteProfile(id: amira, name: "Amira", avatarEmoji: "🌸",
+                          avatarPath: "avatars/amira.jpg"),
+            RemoteProfile(id: bilal, name: "Bilal", avatarEmoji: "🌙"),
+            RemoteProfile(id: meID, name: "Haashim", avatarEmoji: "😄"),
+        ]
+        let members: [RemoteMember] = [
+            RemoteMember(circleID: circleID, userID: amira, joinedAt: stamp(0)),
+            RemoteMember(circleID: circleID, userID: bilal, joinedAt: stamp(60)),
+            RemoteMember(circleID: circleID, userID: meID, joinedAt: stamp(120)),
+        ]
+        let excused: [RemoteExcusedDay] = [
+            RemoteExcusedDay(userID: bilal, circleID: circleID, dayKey: mondayKey),
+        ]
+        let recovery: [RemoteRecoveryWeek] = [
+            RemoteRecoveryWeek(userID: amira, circleID: circleID, weekKey: "2026-W24", xp: 40),
+            RemoteRecoveryWeek(userID: amira, circleID: circleID, weekKey: "2026-W25", xp: 10),
+        ]
+        return CircleSnapshot(circle: RemoteCircle(id: circleID, code: "ABC234"),
+                              me: meID, profiles: profiles, members: members,
+                              posts: posts, excusedDays: excused, recoveryWeeks: recovery)
+    }
+
+    private func source() -> RemoteCircleDataSource {
+        RemoteCircleDataSource(snapshot: fixture())
+    }
+
+    // MARK: - Roster
+
+    func testRosterComesFromTheMirrorWithoutYou() {
+        let src = source()
+        XCTAssertEqual(src.members.map { $0.id }, [amira.uuidString, bilal.uuidString],
+                       "join order, and you are not in it — AppState appends you")
+        XCTAssertEqual(src.members.map { $0.name }, ["Amira", "Bilal"])
+        XCTAssertEqual(src.members.first?.emoji, "🌸")
+        XCTAssertFalse(src.members.contains { $0.isYou })
+        XCTAssertTrue(src.members.allSatisfy { $0.avatarFilename == nil },
+                      "a buddy's avatar is a Storage path, never a PhotoStore filename")
+        XCTAssertEqual(src.avatarPath(forMember: amira.uuidString), "avatars/amira.jpg")
+        XCTAssertNil(src.avatarPath(forMember: bilal.uuidString))
+
+        // 8 seats in a circle means 7 FRIENDS — the off-by-one the invite copy
+        // would otherwise get wrong.
+        XCTAssertEqual(src.maxMembers, RemoteCircle.maxFriends)
+        XCTAssertEqual(src.maxMembers, RemoteCircle.maxMembers - 1)
+    }
+
+    // MARK: - Grid
+
+    func testASyncedDayDrawsTheSameStatesTheSimulatorWould() {
+        let src = source()
+        let id: String = amira.uuidString
+        let fajrWindow = monday.window(for: .fajr)
+        let loggedAt: Date = start(mondayStart, .fajr).addingTimeInterval(600)
+        let seed: UInt64 = BuddySimulator.seed(name: id, dayKey: mondayKey, prayer: .fajr)
+
+        let posted = src.entry(forMember: id, prayer: .fajr, dayKey: mondayKey,
+                               window: fajrWindow, now: loggedAt)
+        XCTAssertEqual(posted.state,
+                       .posted(.illustration(seed: seed), tier: .onTime, at: loggedAt))
+        XCTAssertEqual(posted.placeLabel, "🏠 Home")
+        XCTAssertEqual(src.cell(forMember: id, prayer: .fajr, dayKey: mondayKey,
+                                window: fajrWindow, now: loggedAt), .inWindow(.onTime))
+
+        // A blank place column is no pill at all.
+        let noPill = src.entry(forMember: id, prayer: .dhuhr, dayKey: mondayKey,
+                               window: monday.window(for: .dhuhr),
+                               now: start(mondayStart, .dhuhr).addingTimeInterval(600))
+        XCTAssertNil(noPill.placeLabel)
+
+        // A make-up: the blue "made up" tile, no photo and no pill, ever.
+        let qadaAt: Date = end(tuesdayStart, .fajr).addingTimeInterval(3600)
+        let qadaWindow = tuesday.window(for: .fajr)
+        let qada = src.entry(forMember: id, prayer: .fajr, dayKey: tuesdayKey,
+                             window: qadaWindow, now: qadaAt)
+        XCTAssertEqual(qada.state, .qada(at: qadaAt))
+        XCTAssertNil(qada.placeLabel)
+        XCTAssertEqual(src.cell(forMember: id, prayer: .fajr, dayKey: tuesdayKey,
+                                window: qadaWindow, now: qadaAt), .qada)
+
+        // Nothing logged: still hopeful inside the window, quietly missed after.
+        let asrWindow = tuesday.window(for: .asr)
+        let inside: Date = end(tuesdayStart, .asr).addingTimeInterval(-1)
+        XCTAssertEqual(src.entry(forMember: id, prayer: .asr, dayKey: tuesdayKey,
+                                 window: asrWindow, now: inside).state, .waiting)
+        XCTAssertEqual(src.cell(forMember: id, prayer: .asr, dayKey: tuesdayKey,
+                                window: asrWindow, now: inside), .future)
+        let after: Date = end(tuesdayStart, .asr)
+        XCTAssertEqual(src.entry(forMember: id, prayer: .asr, dayKey: tuesdayKey,
+                                 window: asrWindow, now: after).state, .missed)
+        XCTAssertEqual(src.cell(forMember: id, prayer: .asr, dayKey: tuesdayKey,
+                                window: asrWindow, now: after), .missed)
+
+        // No schedule for that day → nothing is decided either way.
+        XCTAssertEqual(src.entry(forMember: id, prayer: .asr, dayKey: tuesdayKey,
+                                 window: nil, now: after).state, .waiting)
+        XCTAssertEqual(src.cell(forMember: id, prayer: .asr, dayKey: tuesdayKey,
+                                window: nil, now: after), .future)
+    }
+
+    func testAPostIsInvisibleUntilItsLoggedAt() {
+        let src = source()
+        let id: String = bilal.uuidString
+        let fajrWindow = tuesday.window(for: .fajr)
+        let loggedAt: Date = start(tuesdayStart, .fajr).addingTimeInterval(1800)
+        let justBefore: Date = loggedAt.addingTimeInterval(-1)
+
+        let before = src.entry(forMember: id, prayer: .fajr, dayKey: tuesdayKey,
+                               window: fajrWindow, now: justBefore)
+        XCTAssertEqual(before.state, .waiting, "a post never shows before it was logged")
+        XCTAssertNil(before.placeLabel)
+        XCTAssertEqual(src.cell(forMember: id, prayer: .fajr, dayKey: tuesdayKey,
+                                window: fajrWindow, now: justBefore), .future)
+
+        let seed: UInt64 = BuddySimulator.seed(name: id, dayKey: tuesdayKey, prayer: .fajr)
+        let after = src.entry(forMember: id, prayer: .fajr, dayKey: tuesdayKey,
+                              window: fajrWindow, now: loggedAt)
+        XCTAssertEqual(after.state,
+                       .posted(.illustration(seed: seed), tier: .prayed, at: loggedAt))
+        XCTAssertEqual(src.cell(forMember: id, prayer: .fajr, dayKey: tuesdayKey,
+                                window: fajrWindow, now: loggedAt), .inWindow(.prayed))
+
+        // The week agrees with the grid, so the scoreboard can't run ahead of it.
+        let days = weekDays()
+        XCTAssertTrue(src.weekLogs(forMember: id, days: days, asOf: justBefore).isEmpty)
+        XCTAssertEqual(src.weeklyXP(forMember: id, days: days, asOf: justBefore), 0)
+        XCTAssertEqual(src.weekLogs(forMember: id, days: days, asOf: loggedAt).count, 1)
+
+        // A pending post whose window has ALREADY closed still waits — showing
+        // "missed" and then correcting itself would be the worst of both.
+        let pending: Date = end(tuesdayStart, .fajr).addingTimeInterval(60)
+        XCTAssertEqual(src.entry(forMember: amira.uuidString, prayer: .fajr, dayKey: tuesdayKey,
+                                 window: tuesday.window(for: .fajr), now: pending).state,
+                       .waiting, "Amira's make-up lands later; the square holds until then")
+        XCTAssertEqual(src.cell(forMember: amira.uuidString, prayer: .fajr, dayKey: tuesdayKey,
+                                window: tuesday.window(for: .fajr), now: pending), .future)
+    }
+
+    func testAnExcusedDayRestsTheWholeRow() {
+        let src = source()
+        let id: String = bilal.uuidString
+
+        for prayer in Prayer.allCases {
+            let window = monday.window(for: prayer)
+            // Before the window, inside it, and long after — a resting day
+            // reads the same all day long.
+            let probes: [Date] = [mondayStart,
+                                  start(mondayStart, prayer).addingTimeInterval(60),
+                                  end(mondayStart, prayer).addingTimeInterval(3600)]
+            for now in probes {
+                XCTAssertEqual(src.entry(forMember: id, prayer: prayer, dayKey: mondayKey,
+                                         window: window, now: now).state, .excused,
+                               "\(prayer.rawValue) at \(now)")
+                XCTAssertEqual(src.cell(forMember: id, prayer: prayer, dayKey: mondayKey,
+                                        window: window, now: now), .excused,
+                               "\(prayer.rawValue) at \(now)")
+            }
+        }
+
+        // The flag is per member — Amira wasn't resting.
+        let amiraState = src.entry(forMember: amira.uuidString, prayer: .fajr, dayKey: mondayKey,
+                                   window: monday.window(for: .fajr),
+                                   now: end(mondayStart, .isha)).state
+        XCTAssertNotEqual(amiraState, .excused)
+    }
+
+    // MARK: - Week
+
+    func testWeeklyXPRunsGameEngineOverTheMirror() {
+        let src = source()
+        let days = weekDays()
+        let asOf: Date = tuesdayStart.addingTimeInterval(86400)
+
+        let logs: [PrayerLog] = src.weekLogs(forMember: amira.uuidString, days: days, asOf: asOf)
+        XCTAssertEqual(logs.count, 7, "Amira's seven posts, and none of Bilal's")
+        let expectedDays: [String] = [mondayKey, mondayKey, mondayKey, mondayKey, mondayKey,
+                                      tuesdayKey, tuesdayKey]
+        XCTAssertEqual(logs.map { $0.dayKey }, expectedDays, "day order, oldest first")
+        let mondayPrayers: [Prayer] = logs.prefix(5).map { $0.prayer }
+        XCTAssertEqual(mondayPrayers, Array(Prayer.allCases),
+                       "then the canonical prayer order, like the simulator's week")
+        XCTAssertNil(logs.first?.photoFilename, "no buddy photo ever reaches PhotoStore")
+
+        // Monday: 4 × 30 on-time + a jamaat lastCall floored to 30 = 150, all
+        // five in-window so +25 perfect-day = 175. Tuesday: qada 5 + prayed 20.
+        XCTAssertEqual(GameEngine.xp(forDay: mondayKey, logs: logs), 175)
+        XCTAssertEqual(GameEngine.xp(forDay: tuesdayKey, logs: logs), 25)
+        XCTAssertEqual(src.weeklyXP(forMember: amira.uuidString, days: days, asOf: asOf), 200)
+        XCTAssertEqual(src.weeklyXP(forMember: bilal.uuidString, days: days, asOf: asOf), 20,
+                       "a rested Monday scores nothing, and scores no penalty either")
+    }
+
+    func testAnExcusedDayVoidsThePerfectDayBonusForABuddyToo() {
+        var snapshot = fixture()
+        snapshot.excusedDays.append(RemoteExcusedDay(userID: amira, circleID: circleID,
+                                                     dayKey: mondayKey))
+        let src = RemoteCircleDataSource(snapshot: snapshot)
+        let asOf: Date = tuesdayStart.addingTimeInterval(86400)
+        XCTAssertEqual(src.weeklyXP(forMember: amira.uuidString, days: weekDays(), asOf: asOf), 175,
+                       "200 minus the 25 perfect-day bonus a resting day can't earn")
+    }
+
+    func testRecoveryXPIsTheOpaqueWeeklyTotal() {
+        let src = source()
+        let id: String = amira.uuidString
+        XCTAssertEqual(src.recoveryXP(forMember: id, weekKeys: ["2026-W24"]), 40)
+        XCTAssertEqual(src.recoveryXP(forMember: id, weekKeys: ["2026-W24", "2026-W25"]), 50)
+        XCTAssertEqual(src.recoveryXP(forMember: id, weekKeys: ["2026-W30"]), 0)
+        XCTAssertEqual(src.recoveryXP(forMember: id, weekKeys: []), 0)
+        XCTAssertEqual(src.recoveryXP(forMember: bilal.uuidString, weekKeys: ["2026-W24"]), 0)
+    }
+
+    // MARK: - Photos (SPEC-V4 §4)
+
+    func testASyncedPhotoIsAPathNotAPhotoStoreFilename() {
+        let src = source()
+        let id: String = amira.uuidString
+        let loggedAt: Date = start(mondayStart, .fajr).addingTimeInterval(600)
+        let entry = src.entry(forMember: id, prayer: .fajr, dayKey: mondayKey,
+                              window: monday.window(for: .fajr), now: loggedAt)
+
+        guard case .posted(let content, _, _) = entry.state else {
+            XCTFail("Amira's Monday Fajr is a posted square")
+            return
+        }
+        if case .photo = content {
+            XCTFail("a Storage path must never be handed to PhotoStore as a filename")
+        }
+        let seed: UInt64 = BuddySimulator.seed(name: id, dayKey: mondayKey, prayer: .fajr)
+        XCTAssertEqual(content, .illustration(seed: seed),
+                       "the stand-in is seeded, so the same post looks the same on every phone")
+
+        // The real path travels alongside, for Phase C's buddy-photo cache.
+        XCTAssertEqual(src.photoPath(forMember: id, prayer: .fajr, dayKey: mondayKey),
+                       amiraPhotoPath)
+        // Retention cleared Isha's photo; Asr never had one; Tuesday's Asr has
+        // no post at all.
+        XCTAssertNil(src.photoPath(forMember: id, prayer: .isha, dayKey: mondayKey))
+        XCTAssertNil(src.photoPath(forMember: id, prayer: .asr, dayKey: mondayKey))
+        XCTAssertNil(src.photoPath(forMember: id, prayer: .asr, dayKey: tuesdayKey))
+    }
+
+    // MARK: - Offline safety
+
+    func testAnEmptyMirrorIsAnEmptyCircleNotACrash() throws {
+        let src = RemoteCircleDataSource(snapshot: .empty)
+        let days = weekDays()
+        let id: String = amira.uuidString
+        let window = monday.window(for: .fajr)
+
+        XCTAssertTrue(src.members.isEmpty, "no circle yet renders exactly like a solo account")
+        XCTAssertFalse(src.snapshot.hasCircle)
+        XCTAssertEqual(src.maxMembers, RemoteCircle.maxFriends)
+        XCTAssertEqual(src.entry(forMember: id, prayer: .fajr, dayKey: mondayKey,
+                                 window: window, now: mondayStart).state, .waiting)
+        XCTAssertEqual(src.cell(forMember: id, prayer: .fajr, dayKey: mondayKey,
+                                window: window, now: mondayStart), .future)
+        XCTAssertTrue(src.weekLogs(forMember: id, days: days, asOf: mondayStart).isEmpty)
+        XCTAssertEqual(src.weeklyXP(forMember: id, days: days, asOf: mondayStart), 0)
+        XCTAssertEqual(src.recoveryXP(forMember: id, weekKeys: ["2026-W24"]), 0)
+        XCTAssertNil(src.avatarPath(forMember: id))
+        XCTAssertNil(src.photoPath(forMember: id, prayer: .fajr, dayKey: mondayKey))
+
+        // An ABSENT circle.json decodes to exactly that mirror, so a first
+        // launch and a wiped one behave identically.
+        let blank = try JSONDecoder().decode(CircleSnapshot.self, from: Data("{}".utf8))
+        XCTAssertEqual(blank, CircleSnapshot.empty)
+    }
+
+    func testTheSourceNeverAnswersForYouOrAStranger() {
+        let src = source()
+        let days = weekDays()
+        let window = monday.window(for: .fajr)
+        // Long past every Monday window, so a wrongly-resolved id would answer
+        // `.missed` rather than the `.waiting` an unknown member gets.
+        let now: Date = end(mondayStart, .isha).addingTimeInterval(3600)
+        let ids: [String] = [meID.uuidString, stranger.uuidString, "you", "buddy.Mina", ""]
+
+        for id in ids {
+            XCTAssertEqual(src.entry(forMember: id, prayer: .fajr, dayKey: mondayKey,
+                                     window: window, now: now).state, .waiting, "id \(id)")
+            XCTAssertEqual(src.cell(forMember: id, prayer: .fajr, dayKey: mondayKey,
+                                    window: window, now: now), .future, "id \(id)")
+            XCTAssertTrue(src.weekLogs(forMember: id, days: days, asOf: now).isEmpty, "id \(id)")
+            XCTAssertEqual(src.weeklyXP(forMember: id, days: days, asOf: now), 0, "id \(id)")
+            XCTAssertEqual(src.recoveryXP(forMember: id, weekKeys: ["2026-W24"]), 0, "id \(id)")
+            XCTAssertNil(src.avatarPath(forMember: id), "id \(id)")
+        }
+    }
+}

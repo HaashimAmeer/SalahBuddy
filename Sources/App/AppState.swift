@@ -553,12 +553,12 @@ final class AppState: ObservableObject {
     // MARK: - Circle (v2; v4 seam)
 
     /// v4: everything about the OTHER members of the circle is answered here —
-    /// the local simulator in demo mode, the synced mirror once Phase B3 lands
-    /// real membership (SPEC-V4 §8). "You" is still appended by AppState.
+    /// the local simulator in demo mode, the offline mirror of a real circle
+    /// otherwise (SPEC-V4 §8). "You" is still appended by AppState.
     ///
-    /// Computed, not stored: it derives from `profile`/`settings` on every
-    /// read exactly as `activeBuddies` always has, so no circle mutation can
-    /// leave it stale.
+    /// Computed, not stored: it derives from `profile`/`settings`/the mirror on
+    /// every read exactly as `activeBuddies` always has, so no circle mutation
+    /// can leave it stale.
     var circleSource: any CircleDataSource {
         switch settings.circleMode {
         case .demo:
