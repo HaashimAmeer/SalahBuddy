@@ -70,7 +70,7 @@ struct CircleView: View {
                         // v3.9: no circle yet — the whole tab is the pitch.
                         // Still a tour target, so step 4 spotlights something
                         // real instead of dimming an empty page.
-                        SoloCircleCard { showInvite = true }
+                        SoloCircleCard(friendCapacity: state.friendCapacity) { showInvite = true }
                             .tutorialTarget(.leaderboard)
                     } else {
                         circleBody
@@ -413,6 +413,10 @@ private struct XPBar: View {
 /// shows no leaderboard, no grid and no challenges — an empty scoreboard with
 /// only your own row in it reads as a bug, not an invitation.
 private struct SoloCircleCard: View {
+    /// v4: passed in rather than read off `BuddySimulator` — a real circle
+    /// seats one fewer friend than the demo one, and this card is the first
+    /// place the number is quoted.
+    let friendCapacity: Int
     let onBuild: () -> Void
 
     private struct Perk: Identifiable {
@@ -458,7 +462,7 @@ private struct SoloCircleCard: View {
                 onBuild()
             }
 
-            Text("Up to \(BuddySimulator.maxFriends) friends — five photos a day is an intimate thing.")
+            Text("Up to \(friendCapacity) friends — five photos a day is an intimate thing.")
                 .font(Theme.sans(12, .medium))
                 .foregroundStyle(Theme.inkMuted)
                 .multilineTextAlignment(.center)
@@ -588,7 +592,9 @@ struct MemberDetailContent: View {
 
             weekStrip
 
-            if !member.isYou {
+            // v4: a real circle is leave-only (SPEC-V4 §2) — no remove button
+            // there, rather than a confirm dialog in front of a no-op.
+            if !member.isYou, state.canRemoveMembers {
                 if removeConfirm {
                     VStack(spacing: 8) {
                         Text("Remove \(member.name) from your circle?")
@@ -696,7 +702,9 @@ struct InviteSheet: View {
     private let inviteLink = "https://salahbuddy.app/join/HML7-MOON"
 
     /// Nobody in the circle yet — this invite is the one that starts it.
-    private var isFirstInvite: Bool { state.activeBuddies.isEmpty }
+    /// v4: through the seam, so a real circle isn't permanently "first invite"
+    /// just because it has no simulated buddies.
+    private var isFirstInvite: Bool { state.friendCount == 0 }
 
     var body: some View {
         VStack(spacing: 16) {
@@ -724,7 +732,7 @@ struct InviteSheet: View {
                     Text("Your circle is full")
                         .font(Theme.sans(16, .bold))
                         .foregroundStyle(Theme.inkDeep)
-                    Text("Eight friends keeps it intimate — remove someone from the leaderboard to make room.")
+                    Text(fullCopy)
                         .font(Theme.sans(13, .semibold))
                         .foregroundStyle(Theme.inkMuted)
                         .multilineTextAlignment(.center)
@@ -774,8 +782,17 @@ struct InviteSheet: View {
 
     private var subtitle: String {
         isFirstInvite
-            ? "Your first friend is where it begins — up to \(BuddySimulator.maxFriends), so it stays close."
-            : "Your circle: \(state.activeBuddies.count) of \(BuddySimulator.maxFriends) friends"
+            ? "Your first friend is where it begins — up to \(state.friendCapacity), so it stays close."
+            : "Your circle: \(state.friendCount) of \(state.friendCapacity) friends"
+    }
+
+    /// A full DEMO circle makes room by removing someone; a real one is
+    /// leave-only (SPEC-V4 §2), so there the copy can't promise a removal.
+    private var fullCopy: String {
+        if state.canRemoveMembers {
+            return "\(state.friendCapacity) friends keeps it intimate — remove someone from the leaderboard to make room."
+        }
+        return "\(state.friendCapacity) friends keeps it intimate — there's room again when someone leaves."
     }
 
     private func buddyRow(_ buddy: BuddySimulator.Buddy) -> some View {

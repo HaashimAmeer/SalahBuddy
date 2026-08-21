@@ -32,10 +32,15 @@ final class CircleSeamTests: XCTestCase {
     /// shape V2CoreTests uses, so both files agree on what a day looks like.
     private func schedule(dayKey: String, dayStart: Date) -> DaySchedule {
         let hours: [Double] = [5.5, 13.0, 16.5, 19.5, 21.0]
-        let windows = zip(Prayer.allCases, hours).map { prayer, hour in
-            PrayerWindow(prayer: prayer,
-                         start: dayStart.addingTimeInterval(hour * 3600),
-                         end: dayStart.addingTimeInterval(hour * 3600 + 90 * 60))
+        let length: TimeInterval = 90 * 60
+        // Annotated and unrolled on purpose: an inferred `zip(...).map` whose
+        // body does its own arithmetic is exactly the shape that blew the
+        // type-checker budget once already (see BuddySimulator.stableUUID).
+        var windows: [PrayerWindow] = []
+        for (prayer, hour) in zip(Prayer.allCases, hours) {
+            let start: Date = dayStart.addingTimeInterval(hour * 3600)
+            windows.append(PrayerWindow(prayer: prayer, start: start,
+                                        end: start.addingTimeInterval(length)))
         }
         return DaySchedule(dayKey: dayKey, dayStart: dayStart, windows: windows)
     }
@@ -255,6 +260,8 @@ final class CircleSeamTests: XCTestCase {
         let empty = EmptyCircleDataSource()
 
         XCTAssertTrue(empty.members.isEmpty, "a real circle renders solo until membership syncs")
+        XCTAssertEqual(empty.maxMembers, RemoteCircle.maxFriends,
+                       "a circle with nobody in it still has REAL seats, not the demo's 8")
         XCTAssertEqual(empty.entry(forMember: "anyone", prayer: .fajr, dayKey: day.dayKey,
                                    window: day.schedule.window(for: .fajr), now: now).state, .waiting)
         XCTAssertEqual(empty.cell(forMember: "anyone", prayer: .fajr, dayKey: day.dayKey,
@@ -698,6 +705,32 @@ final class RemoteCircleSourceTests: XCTestCase {
         // launch and a wiped one behave identically.
         let blank = try JSONDecoder().decode(CircleSnapshot.self, from: Data("{}".utf8))
         XCTAssertEqual(blank, CircleSnapshot.empty)
+    }
+
+    /// A mirror can hold a roster before it holds an identity: `circle.json`
+    /// loads on launch, auth resolves after. Rendering it in between would put
+    /// YOU in the buddy list — and `AppState` appends you on top of that, so
+    /// the scoreboard, the week grid and the crown would all see you twice.
+    func testAMirrorWithoutAnIdentityRendersNoCircleAtAll() {
+        var snapshot: CircleSnapshot = fixture()
+        snapshot.me = nil
+        let src = RemoteCircleDataSource(snapshot: snapshot)
+
+        XCTAssertTrue(snapshot.buddyMembers.isEmpty,
+                      "no identity, no circle — never a circle that still contains you")
+        XCTAssertTrue(src.members.isEmpty)
+
+        // And it answers for nobody, so your own posts can't surface inside a
+        // phantom buddy row either.
+        let now: Date = end(mondayStart, .isha).addingTimeInterval(3600)
+        let ids: [String] = [meID.uuidString, amira.uuidString]
+        for id in ids {
+            XCTAssertEqual(src.entry(forMember: id, prayer: .fajr, dayKey: mondayKey,
+                                     window: monday.window(for: .fajr), now: now).state,
+                           .waiting, "id \(id)")
+            XCTAssertEqual(src.weeklyXP(forMember: id, days: weekDays(), asOf: now), 0, "id \(id)")
+            XCTAssertNil(src.avatarPath(forMember: id), "id \(id)")
+        }
     }
 
     func testTheSourceNeverAnswersForYouOrAStranger() {

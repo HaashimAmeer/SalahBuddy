@@ -374,6 +374,73 @@ final class CircleSyncTests: XCTestCase {
         XCTAssertTrue(outbox.isEmpty, "a photo for a post that is going away is moot")
     }
 
+    // MARK: - In-flight safety
+
+    func testUndoDuringAnInFlightCreateStillQueuesTheDelete() {
+        // The create is ON THE WIRE when undo is tapped. Cancelling it locally
+        // used to swallow the delete while the POST went on to succeed —
+        // leaving an undone prayer in the circle's feed forever.
+        var outbox = outboxWith([.upsertPost(post())])
+        let sending: OutboxItem? = outbox.checkout()
+        XCTAssertEqual(sending?.op, CircleOp.upsertPost(post()))
+
+        outbox.enqueue(.deletePost(postID: postID), id: UUID(), at: stamp(5))
+        XCTAssertEqual(outbox.count, 2, "the in-flight create is never cancelled")
+        XCTAssertEqual(outbox.items.last?.op, CircleOp.deletePost(postID: postID))
+
+        // Once the create is acked the delete is the head, exactly as ordered.
+        guard let sentID: UUID = sending?.id else { return XCTFail("expected a queued item") }
+        outbox.remove(id: sentID)
+        XCTAssertEqual(outbox.peek?.op, CircleOp.deletePost(postID: postID))
+    }
+
+    func testAnInFlightUpsertIsNotReplacedByANewerOne() {
+        var outbox = outboxWith([.upsertPost(post(tier: .onTime))])
+        _ = outbox.checkout()
+        outbox.enqueue(.upsertPost(post(tier: .closeCall)), id: UUID(), at: stamp(5))
+
+        XCTAssertEqual(outbox.count, 2,
+                       "collapsing onto a sent op would ack the wrong item; the newer one queues")
+        guard case .upsertPost(let latest)? = outbox.items.last?.op else {
+            return XCTFail("expected the newer upsert to be queued behind the in-flight one")
+        }
+        XCTAssertEqual(latest.tier, .closeCall, "and it still carries the newer payload")
+    }
+
+    func testUndoDuringAnInFlightPhotoUploadRetractsTheObject() {
+        // The object may land in Storage after the row is deleted, and the
+        // retention sweep enumerates paths from `posts` — so it would never be
+        // collected, and would stay readable by the whole circle (§4).
+        let path = "c/u/a.jpg"
+        var outbox = outboxWith([.uploadPhoto(postID: postID, filename: "a.jpg", path: path)])
+        _ = outbox.checkout()
+
+        outbox.enqueue(.deletePost(postID: postID), id: UUID(), at: stamp(5))
+        XCTAssertEqual(outbox.items.map { $0.op.kind },
+                       [CircleOp.Kind.uploadPhoto, .deletePhoto, .deletePost],
+                       "the compensating delete follows the upload it can't cancel")
+        XCTAssertEqual(outbox.items[1].op, CircleOp.deletePhoto(path: path))
+    }
+
+    func testAQueuedButUnsentPhotoUploadNeedsNoRetraction() {
+        // Nothing reached Storage, so dropping the upload is the whole fix —
+        // a `.deletePhoto` here would 404 for no reason.
+        var outbox = outboxWith([.uploadPhoto(postID: postID, filename: "a.jpg", path: "c/u/a.jpg")])
+        outbox.enqueue(.deletePost(postID: postID), id: UUID(), at: stamp(5))
+        XCTAssertEqual(outbox.items.map { $0.op.kind }, [CircleOp.Kind.deletePost])
+    }
+
+    func testDeletePhotoSurvivesTheWireFormat() throws {
+        var outbox = CircleOutbox.empty
+        outbox.enqueue(.deletePhoto(path: "c/u/a.jpg"), id: UUID(), at: stamp(0))
+        let data = try encoder().encode(outbox)
+        let restored = try decoder().decode(CircleOutbox.self, from: data)
+        XCTAssertEqual(restored.items.map(\.op), [CircleOp.deletePhoto(path: "c/u/a.jpg")])
+        XCTAssertNil(restored.inFlightID, "a queue reloaded from disk has nothing on the wire")
+    }
+
+    // MARK: - Outbox collapsing (continued)
+
     func testRepeatedUpsertKeepsOneItemInItsOriginalPlace() {
         var outbox = outboxWith([
             .upsertPost(post(tier: .onTime)),
@@ -470,10 +537,16 @@ final class CircleSyncTests: XCTestCase {
         XCTAssertEqual(restored.items.map(\.createdAt),
                        (0..<4).map { stamp(TimeInterval($0)) })
 
-        // Draining takes the head first and leaves the rest in order.
-        let head = restored.dequeue()
+        // Draining takes the head and leaves it in place until it is acked —
+        // an op removed before the server confirms it is an op silently lost.
+        let head = restored.checkout()
         XCTAssertEqual(head?.id, ids[0])
+        XCTAssertEqual(restored.items.map(\.id), ids, "the head stays queued while in flight")
+        XCTAssertEqual(restored.inFlightID, ids[0])
+
+        restored.remove(id: ids[0])
         XCTAssertEqual(restored.items.map(\.id), Array(ids.dropFirst()))
+        XCTAssertNil(restored.inFlightID, "acking the head clears the wire")
 
         restored.remove(id: ids[2])
         XCTAssertEqual(restored.items.map(\.id), [ids[1], ids[3]])

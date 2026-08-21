@@ -246,8 +246,6 @@ struct CircleOutbox: Codable, Equatable, Sendable {
         return items.first { $0.id == inFlightID }
     }
 
-    private func isInFlight(_ item: OutboxItem) -> Bool { item.id == inFlightID }
-
     // MARK: Mutation
 
     /// Take the head to send it. It STAYS queued — only `remove(id:)`
@@ -274,8 +272,14 @@ struct CircleOutbox: Codable, Equatable, Sendable {
 
         let item = OutboxItem(id: id, op: op, createdAt: now, attempts: 0)
         let signature: String = op.collapseSignature
+        // `inFlightID` is read into a local before every `items` closure here
+        // and below. A closure that reaches back into `self` touches it while
+        // `items` is being accessed, which Swift's exclusivity checking rejects
+        // outright when the access is a mutation ("overlapping accesses to
+        // 'self.items', but modification requires exclusive access").
+        let inFlight: UUID? = inFlightID
         if let index = items.firstIndex(where: {
-            $0.op.collapseSignature == signature && !isInFlight($0)
+            $0.op.collapseSignature == signature && $0.id != inFlight
         }) {
             items[index] = item   // in place, so the queue's relative order holds
             return
@@ -317,7 +321,8 @@ struct CircleOutbox: Codable, Equatable, Sendable {
            let path: String = CircleOutbox.photoPath(of: sending.op) {
             items.append(OutboxItem(op: .deletePhoto(path: path), createdAt: now))
         }
-        items.removeAll { $0.op.collapseSignature == signature && !isInFlight($0) }
+        let inFlight: UUID? = inFlightID
+        items.removeAll { $0.op.collapseSignature == signature && $0.id != inFlight }
     }
 
     private static func photoPath(of op: CircleOp) -> String? {
@@ -330,8 +335,9 @@ struct CircleOutbox: Codable, Equatable, Sendable {
     /// work left to do on the server. An in-flight op is never dropped, so the
     /// cancelling op falls through and is queued behind it.
     private mutating func cancelPending(signature: String) -> Bool {
+        let inFlight: UUID? = inFlightID
         guard let index = items.firstIndex(where: {
-            $0.op.collapseSignature == signature && !isInFlight($0)
+            $0.op.collapseSignature == signature && $0.id != inFlight
         }) else {
             return false
         }
@@ -362,6 +368,14 @@ struct CircleOutbox: Codable, Equatable, Sendable {
         let raw: [LossyItem] = (try? c.decodeIfPresent([LossyItem].self, forKey: .items)) ?? []
         items = raw.compactMap { $0.item }
         inFlightID = nil
+    }
+
+    /// Spelled out rather than synthesised: `inFlightID` has no `CodingKeys`
+    /// case, and the queue file's shape is a compatibility promise — it should
+    /// change only when someone edits this function.
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(items, forKey: .items)
     }
 
     // MARK: Persistence

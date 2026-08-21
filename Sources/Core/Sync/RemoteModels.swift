@@ -289,24 +289,28 @@ struct RemotePost: Codable, Equatable, Sendable, Identifiable {
 
 /// A BARE FLAG. Period privacy is absolute (§3): `breakReason` never leaves the
 /// device, and there is no column here that could hold it.
+///
+/// v4 DECISION: the row's `created_at` is NOT mirrored. §7 gives this table
+/// three columns — user, circle, day — and the timestamp is the one thing on
+/// it that carries meaning the flag does not: it pins the minute a break
+/// started. It is not needed to render anything, so the client neither decodes
+/// it nor keeps it in `circle.json`. (The column still exists server-side; the
+/// matching column-scoped grant belongs with the backend migrations.)
 struct RemoteExcusedDay: Codable, Equatable, Sendable {
     var userID: UUID
     var circleID: UUID
     var dayKey: String
-    var createdAt: Date?
 
-    init(userID: UUID, circleID: UUID, dayKey: String, createdAt: Date? = nil) {
+    init(userID: UUID, circleID: UUID, dayKey: String) {
         self.userID = userID
         self.circleID = circleID
         self.dayKey = dayKey
-        self.createdAt = createdAt
     }
 
     enum CodingKeys: String, CodingKey {
         case userID = "user_id"
         case circleID = "circle_id"
         case dayKey = "day_key"
-        case createdAt = "created_at"
     }
 
     init(from decoder: Decoder) throws {
@@ -314,7 +318,6 @@ struct RemoteExcusedDay: Codable, Equatable, Sendable {
         userID = try c.decode(UUID.self, forKey: .userID)
         circleID = try c.decode(UUID.self, forKey: .circleID)
         dayKey = try c.decode(String.self, forKey: .dayKey)
-        createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -322,7 +325,6 @@ struct RemoteExcusedDay: Codable, Equatable, Sendable {
         try c.encode(userID, forKey: .userID)
         try c.encode(circleID, forKey: .circleID)
         try c.encode(dayKey, forKey: .dayKey)
-        try c.encodeIfPresent(createdAt, forKey: .createdAt)
     }
 }
 
@@ -330,19 +332,23 @@ struct RemoteExcusedDay: Codable, Equatable, Sendable {
 
 /// One opaque weekly integer per user (§3). The scoreboard sees the number and
 /// never what earned it — no dhikr counts, no deed ids, nothing per-day.
+///
+/// v4 DECISION: `updated_at` is NOT mirrored, for the same reason the excused
+/// row drops `created_at`. The total is meant to be opaque, but the timestamp
+/// advances on every dhikr tap and every deed, so keeping it would hand the
+/// circle a per-action activity trace hanging off the one row that exists to
+/// avoid exactly that. §7 lists four columns; these are them.
 struct RemoteRecoveryWeek: Codable, Equatable, Sendable {
     var userID: UUID
     var circleID: UUID
     var weekKey: String         // "yyyy-Www", e.g. "2026-W24"
     var xp: Int
-    var updatedAt: Date?
 
-    init(userID: UUID, circleID: UUID, weekKey: String, xp: Int, updatedAt: Date? = nil) {
+    init(userID: UUID, circleID: UUID, weekKey: String, xp: Int) {
         self.userID = userID
         self.circleID = circleID
         self.weekKey = weekKey
         self.xp = xp
-        self.updatedAt = updatedAt
     }
 
     enum CodingKeys: String, CodingKey {
@@ -350,7 +356,6 @@ struct RemoteRecoveryWeek: Codable, Equatable, Sendable {
         case circleID = "circle_id"
         case weekKey = "week_key"
         case xp
-        case updatedAt = "updated_at"
     }
 
     init(from decoder: Decoder) throws {
@@ -359,7 +364,6 @@ struct RemoteRecoveryWeek: Codable, Equatable, Sendable {
         circleID = try c.decode(UUID.self, forKey: .circleID)
         weekKey = try c.decode(String.self, forKey: .weekKey)
         xp = (try? c.decodeIfPresent(Int.self, forKey: .xp)) ?? 0
-        updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -368,7 +372,6 @@ struct RemoteRecoveryWeek: Codable, Equatable, Sendable {
         try c.encode(circleID, forKey: .circleID)
         try c.encode(weekKey, forKey: .weekKey)
         try c.encode(xp, forKey: .xp)
-        try c.encodeIfPresent(updatedAt, forKey: .updatedAt)
     }
 }
 
@@ -397,6 +400,10 @@ struct RemoteCustomChallenge: Codable, Equatable, Sendable, Identifiable {
         self.createdAt = createdAt
     }
 
+    // `created_at` is the ONE timestamp this file writes: it carries
+    // `CustomChallenge.createdAt`, which orders the challenge list on every
+    // device, so it is client-authored data rather than a server default and
+    // rule 2 does not apply to it.
     enum CodingKeys: String, CodingKey {
         case id
         case circleID = "circle_id"

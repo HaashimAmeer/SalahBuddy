@@ -39,10 +39,17 @@ final class AppState: ObservableObject {
     // MARK: - Init
 
     init() {
+        // v4: settings come first so the time-travel policy is applied BEFORE
+        // the first `AppClock.now` read — a stale offset left on disk would
+        // otherwise stamp a time-travelled `joinedAt` on a fresh profile in a
+        // real circle, which is the one thing the guard exists to prevent.
+        let loaded: AppSettings = Store.load(Store.settingsFile, default: AppSettings())
+        AppState.applyTimeTravelPolicy(for: loaded.circleMode)
+        settings = loaded
+
         let now = AppClock.now
         profile = Store.load(Store.profileFile, default: UserProfile.fresh(now: now))
         logs = Store.load(Store.logsFile, default: [PrayerLog]())
-        settings = Store.load(Store.settingsFile, default: AppSettings())
         // Offline-first: whatever the last sync left on disk is the circle we
         // render, before any network work has been attempted.
         circleSnapshot = CircleSnapshot.load()
@@ -573,6 +580,10 @@ final class AppState: ObservableObject {
 
     /// Phase B3+: `CircleService` hands the freshly synced mirror over here.
     /// Persisting it is the service's job — `AppState` only renders it.
+    ///
+    /// NO CALLER YET. Until B3 lands the mirror is read once in `init` and
+    /// never changes within a session, so a `.real` circle draws whatever the
+    /// last sync left on disk. That is the seam being in place, not wired.
     func applyCircleSnapshot(_ snapshot: CircleSnapshot) {
         circleSnapshot = snapshot
     }
@@ -615,6 +626,22 @@ final class AppState: ObservableObject {
         let source = circleSource
         return source.members.count >= source.maxMembers
     }
+
+    /// How many friends are in the circle right now, you excluded — what the
+    /// invite sheet counts. v4: reads the seam, so a real circle counts its
+    /// synced members rather than the (always empty) simulated roster.
+    var friendCount: Int { circleSource.members.count }
+
+    /// The friend cap the invite copy quotes. The two modes genuinely differ:
+    /// 8 simulated buddies in demo, 7 in a real circle (8 seats minus you), so
+    /// quoting a constant would advertise a slot the server refuses.
+    var friendCapacity: Int { circleSource.maxMembers }
+
+    /// v4: removing someone is a DEMO-only affordance. A real circle is
+    /// leave-only (SPEC-V4 §2), so the button must not be offered there —
+    /// `removeMember` already refuses, and a confirm dialog in front of a
+    /// silent no-op is worse than no button at all.
+    var canRemoveMembers: Bool { settings.circleMode == .demo }
 
     /// Demo invite acceptance: adds the friend and queues the one-time
     /// "just joined" celebration. Their simulated week backfills immediately —
@@ -904,13 +931,29 @@ final class AppState: ObservableObject {
                                        weekKey: BuddySimulator.weekKey(for: now),
                                        hardestPrayer: settings.hardestPrayer,
                                        completions: profile.challengeCompletions,
-                                       customChallenges: profile.customChallenges,
+                                       customChallenges: activeCustomChallenges,
                                        hasCircle: !isSoloMode,
                                        groupAwardsFrozen: profile.groupAwardsFrozenWeek
                                            == BuddySimulator.weekKey(for: now))
     }
 
     // MARK: - Custom group challenges (v3.2)
+
+    /// The group challenges in play. v4: in a real circle they belong to the
+    /// CIRCLE, so the synced mirror is the source — otherwise a challenge
+    /// someone else created is invisible and one you made is scored against
+    /// members who never agreed to it. One you just made is still only local
+    /// until the outbox drains, so it is offered alongside the synced set and
+    /// the id decides: the mirror's copy wins once it round-trips.
+    private var activeCustomChallenges: [CustomChallenge] {
+        guard settings.circleMode == .real else { return profile.customChallenges }
+        let synced: [CustomChallenge] = circleSnapshot.customChallenges
+        let syncedIDs: Set<String> = Set(synced.map { $0.id })
+        let pending: [CustomChallenge] = profile.customChallenges.filter {
+            !syncedIDs.contains($0.id)
+        }
+        return synced + pending
+    }
 
     func createCustomChallenge(prayer: Prayer, days: Int) {
         let challenge = CustomChallenge(id: "custom-\(UUID().uuidString)",
@@ -1039,7 +1082,7 @@ final class AppState: ObservableObject {
     /// Recompute today's schedule and reconcile the streak for elapsed days.
     /// Call on launch, foreground, day change, and settings change.
     func refresh() {
-        applyTimeTravelPolicy()
+        AppState.applyTimeTravelPolicy(for: settings.circleMode)
 
         let now = AppClock.now
         let coords = activeCoordinates
@@ -1091,10 +1134,16 @@ final class AppState: ObservableObject {
     /// A real circle pins it to real time and clears any offset already set;
     /// demo mode hands time travel back. Runs at the top of every refresh —
     /// launch, foreground, day change and settings change all pass through
-    /// here — and BEFORE anything reads `AppClock.now`.
-    private func applyTimeTravelPolicy() {
-        let allowed: Bool = settings.circleMode == .demo
-        AppClock.isTimeTravelAllowed = allowed
+    /// here — and, from `init`, before anything reads `AppClock.now`.
+    ///
+    /// Static because `init` must call it before `self` is fully formed, and
+    /// it writes only when the value actually changes: `refresh()` fires on
+    /// every location callback, and each of those was a `UserDefaults` write.
+    private static func applyTimeTravelPolicy(for mode: CircleMode) {
+        let allowed: Bool = (mode == .demo)
+        if AppClock.isTimeTravelAllowed != allowed {
+            AppClock.isTimeTravelAllowed = allowed
+        }
         if !allowed, AppClock.offset != 0 {
             AppClock.offset = 0
         }
@@ -1309,6 +1358,13 @@ final class AppState: ObservableObject {
     func resetAllData() {
         logs = []
         profile = UserProfile.fresh(now: AppClock.now)
+        // v4: the synced mirror and the pending writes go too. `AppSettings()`
+        // puts the app back in demo mode, so leaving them on disk would only
+        // hide a real circle — flipping back to `.real` would resurrect the
+        // roster, the posts and writes owed to a circle this device has wiped.
+        circleSnapshot = .empty
+        CircleSnapshot.clear()
+        CircleOutbox.clear()
         settings = AppSettings()       // didSet persists + refreshes
         PhotoStore.deleteAll()
         Store.delete(Store.logsFile)
