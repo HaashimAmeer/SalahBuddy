@@ -6,6 +6,11 @@ enum Store {
     static let profileFile = "profile.json"
     static let logsFile = "logs.json"
     static let settingsFile = "settings.json"
+    // v4: the real circle is offline-first — the synced mirror and the pending
+    // write queue persist exactly like everything else, so a cold launch with
+    // no network renders the circle and still owes the server the same writes.
+    static let circleFile = "circle.json"
+    static let outboxFile = "outbox.json"
 
     static var directory: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first

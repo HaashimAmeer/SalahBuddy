@@ -311,6 +311,13 @@ enum AsrMadhab: String, Codable, CaseIterable {
     case shafi, hanafi
 }
 
+/// v4: which circle the app is showing. The locally simulated demo circle and
+/// a real synced one are mutually exclusive (SPEC-V4 §2) — `.real` is entered
+/// only by creating or joining a circle, and leaving returns to `.demo`.
+enum CircleMode: String, Codable {
+    case demo, real
+}
+
 /// v3: a remembered coordinate for a place tag ("Home" etc.), captured the
 /// first time you tag that place with a device fix available. Powers the
 /// near-a-saved-place auto-suggestion on the post screen.
@@ -363,6 +370,10 @@ struct AppSettings: Codable {
     var notifyLastCall: Bool = true        // 30 min before a window closes
     var notifyFriendActivity: Bool = false // "Mina just posted Dhuhr" (opt-in)
     var hasSeenTutorial: Bool = false      // v3.7: guided first-run tour completed/skipped
+    /// v4: demo circle vs. a real synced one. Absent in a save means `.demo`,
+    /// which is byte-for-byte v3.9 behaviour (a solo account's empty circle
+    /// included), so every existing install keeps exactly what it had.
+    var circleMode: CircleMode = .demo
 
     init() {}
 
@@ -386,6 +397,8 @@ struct AppSettings: Codable {
         notifyLastCall = (try? c.decode(Bool.self, forKey: .notifyLastCall)) ?? true
         notifyFriendActivity = (try? c.decode(Bool.self, forKey: .notifyFriendActivity)) ?? false
         hasSeenTutorial = (try? c.decode(Bool.self, forKey: .hasSeenTutorial)) ?? false
+        // v4: absent → .demo, so a pre-v4 save keeps the simulated circle.
+        circleMode = (try? c.decode(CircleMode.self, forKey: .circleMode)) ?? .demo
     }
 }
 

@@ -541,27 +541,49 @@ final class AppState: ObservableObject {
     /// Legacy alias (older call sites) — one tasbih tap.
     func logDhikr() { tapTasbih() }
 
-    // MARK: - Circle (v2)
+    // MARK: - Circle (v2; v4 seam)
+
+    /// v4: everything about the OTHER members of the circle is answered here —
+    /// the local simulator in demo mode, the synced mirror once Phase B3 lands
+    /// real membership (SPEC-V4 §8). "You" is still appended by AppState.
+    ///
+    /// Computed, not stored: it derives from `profile`/`settings` on every
+    /// read exactly as `activeBuddies` always has, so no circle mutation can
+    /// leave it stale.
+    var circleSource: any CircleDataSource {
+        switch settings.circleMode {
+        case .demo:
+            return SimulatedCircleDataSource(buddies: activeBuddies)
+        case .real:
+            // Real membership arrives in Phase B3; until then a real circle
+            // renders as an empty one rather than borrowing demo buddies.
+            return EmptyCircleDataSource()
+        }
+    }
 
     /// v3.6: the circle as the user shaped it (removals + accepted invites).
     /// v3.9: a solo account's circle is its invites and nothing else.
+    /// v4: demo-only — a real circle's roster comes from `circleSource`.
     var activeBuddies: [BuddySimulator.Buddy] {
-        BuddySimulator.activeBuddies(removed: profile.removedBuddyNames,
-                                     invited: profile.invitedBuddyNames,
-                                     startedSolo: profile.startedSolo)
+        guard settings.circleMode == .demo else { return [] }
+        return BuddySimulator.activeBuddies(removed: profile.removedBuddyNames,
+                                            invited: profile.invitedBuddyNames,
+                                            startedSolo: profile.startedSolo)
     }
 
     /// v3.9: the single source of truth for solo presentation everywhere.
     /// DERIVED from the live circle, so it also covers the legacy path where
     /// someone removes all 8 members.
-    var isSoloMode: Bool { activeBuddies.isEmpty }
+    var isSoloMode: Bool { circleSource.members.isEmpty }
 
     /// Friends who can still accept an invite. An EMPTY circle (`isSoloMode` —
     /// a fresh solo account, or a legacy one whose members were all removed)
     /// rebuilds from the FULL roster; an established legacy circle draws from
     /// the extra pool plus anyone it removed, so a removal is always
     /// reversible — `acceptInvite` clears the name as it re-adds them.
+    /// v4: demo-only — real circles invite by code (SPEC-V4 §2, Phase B3).
     var invitableBuddies: [BuddySimulator.Buddy] {
+        guard settings.circleMode == .demo else { return [] }
         let active = Set(activeBuddies.map(\.name))
         let solo = isSoloMode
         return BuddySimulator.roster.filter { buddy in
@@ -573,13 +595,18 @@ final class AppState: ObservableObject {
         }
     }
 
-    var circleIsFull: Bool { activeBuddies.count >= BuddySimulator.maxFriends }
+    var circleIsFull: Bool {
+        let source = circleSource
+        return source.members.count >= source.maxMembers
+    }
 
     /// Demo invite acceptance: adds the friend and queues the one-time
     /// "just joined" celebration. Their simulated week backfills immediately —
     /// that's the deterministic derivation doing its job, not a bug.
+    /// v4: a no-op in a real circle — friends join by code (Phase B3).
     func acceptInvite(name: String) {
-        guard !circleIsFull,
+        guard settings.circleMode == .demo,
+              !circleIsFull,
               invitableBuddies.contains(where: { $0.name == name }) else { return }
         profile.invitedBuddyNames.append(name)
         profile.removedBuddyNames.removeAll { $0 == name }
@@ -588,7 +615,10 @@ final class AppState: ObservableObject {
         objectWillChange.send()
     }
 
+    /// v4: a no-op in a real circle — v4 is leave-only, nobody removes anyone
+    /// else (SPEC-V4 §2), and that flow lands with membership in Phase B3.
     func removeMember(name: String) {
+        guard settings.circleMode == .demo else { return }
         let before = activeBuddies.count
         profile.invitedBuddyNames.removeAll { $0 == name }
         // A BASE buddy invited back into a legacy circle sits in both lists —
@@ -650,7 +680,7 @@ final class AppState: ObservableObject {
 
     /// Grid order: buddies first, you LAST (isYou flag set).
     var circleMembers: [CircleMember] {
-        activeBuddies.map { BuddySimulator.member(for: $0) } + [youMember]
+        circleSource.members + [youMember]
     }
 
     private var youMember: CircleMember {
@@ -663,27 +693,15 @@ final class AppState: ObservableObject {
     func gridEntries(for prayer: Prayer, dayKey: String) -> [GridEntry] {
         let now = AppClock.now
         let window = schedule(forDayKey: dayKey)?.window(for: prayer)
+        let source = circleSource
         var entries: [GridEntry] = []
 
-        for buddy in activeBuddies {
-            let member = BuddySimulator.member(for: buddy)
-            var state: GridEntryState = .waiting
-            var placeLabel: String? = nil
-            if let window {
-                switch BuddySimulator.outcome(for: buddy, dayKey: dayKey, window: window) {
-                case .inWindow(let tier, let loggedAt, let seed):
-                    if now >= loggedAt {
-                        state = .posted(.illustration(seed: seed), tier: tier, at: loggedAt)
-                        placeLabel = BuddySimulator.placeTag(seed: seed).map { "\($0.emoji) \($0.displayName)" }
-                    }
-                case .qada(let at):
-                    if now >= at { state = .qada(at: at) }
-                case .missed:
-                    if now >= window.end { state = .missed }
-                }
-            }
+        for member in source.members {
+            let result = source.entry(forMember: member.id, prayer: prayer,
+                                      dayKey: dayKey, window: window, now: now)
             entries.append(GridEntry(id: "\(member.id)|\(dayKey)|\(prayer.rawValue)",
-                                     member: member, state: state, placeLabel: placeLabel))
+                                     member: member, state: result.state,
+                                     placeLabel: result.placeLabel))
         }
 
         let myState: GridEntryState
@@ -769,8 +787,18 @@ final class AppState: ObservableObject {
     func weeklyScores() -> [(member: CircleMember, xp: Int)] {
         let now = AppClock.now
         let days = currentWeekDays()
-        var scores: [(member: CircleMember, xp: Int)] = activeBuddies.map { buddy in
-            (BuddySimulator.member(for: buddy), BuddySimulator.weeklyXP(for: buddy, days: days, asOf: now))
+        let source = circleSource
+        // v4: one Mon-start week is exactly one ISO week key.
+        let weekKeys: [String] = [BuddySimulator.weekKey(for: now)]
+
+        var scores: [(member: CircleMember, xp: Int)] = []
+        for member in source.members {
+            let prayerXP: Int = source.weeklyXP(forMember: member.id, days: days, asOf: now)
+            // v4: a buddy's dhikr/deeds XP is one opaque weekly total, the same
+            // rule your own row follows below (SPEC-V4 §3). Simulated buddies
+            // have none, so the demo scoreboard is untouched.
+            let recoveryXP: Int = source.recoveryXP(forMember: member.id, weekKeys: weekKeys)
+            scores.append((member, prayerXP + recoveryXP))
         }
         let myXP = GameEngine.weeklyXP(logs: logs, weekStart: BuddySimulator.weekStart(for: now),
                                        excusedDayKeys: profile.excusedDayKeys)
@@ -792,14 +820,15 @@ final class AppState: ObservableObject {
     func weekRows() -> [MemberWeekRow] {
         let now = AppClock.now
         let dayKeys = BuddySimulator.weekDayKeys(for: now)
+        let source = circleSource
 
         var rows: [MemberWeekRow] = []
-        for buddy in activeBuddies {
-            let member = BuddySimulator.member(for: buddy)
+        for member in source.members {
             let days: [[GridCellState]] = dayKeys.map { key in
                 let schedule = self.schedule(forDayKey: key)
                 return Prayer.allCases.map { prayer in
-                    buddyCell(buddy: buddy, dayKey: key, window: schedule?.window(for: prayer), now: now)
+                    source.cell(forMember: member.id, prayer: prayer, dayKey: key,
+                                window: schedule?.window(for: prayer), now: now)
                 }
             }
             rows.append(MemberWeekRow(id: member.id, member: member, days: days))
@@ -813,19 +842,6 @@ final class AppState: ObservableObject {
         }
         rows.append(MemberWeekRow(id: "you", member: youMember, days: myDays))
         return rows
-    }
-
-    private func buddyCell(buddy: BuddySimulator.Buddy, dayKey: String,
-                           window: PrayerWindow?, now: Date) -> GridCellState {
-        guard let window, now >= window.start else { return .future }
-        switch BuddySimulator.outcome(for: buddy, dayKey: dayKey, window: window) {
-        case .inWindow(let tier, let loggedAt, _):
-            return now >= loggedAt ? .inWindow(tier) : .future
-        case .qada(let at):
-            return now >= at ? .qada : .future
-        case .missed:
-            return now >= window.end ? .missed : .future
-        }
     }
 
     private func myCell(dayKey: String, prayer: Prayer,
@@ -856,9 +872,11 @@ final class AppState: ObservableObject {
         let weekDayKeySet = Set(weekDayKeys)
         let days = currentWeekDays()
 
-        var memberWeekLogs: [(member: CircleMember, logs: [PrayerLog])] = activeBuddies.map { buddy in
-            (BuddySimulator.member(for: buddy),
-             BuddySimulator.visibleLogs(for: buddy, days: days, asOf: now))
+        let source = circleSource
+        var memberWeekLogs: [(member: CircleMember, logs: [PrayerLog])] = []
+        for member in source.members {
+            let weekLogs: [PrayerLog] = source.weekLogs(forMember: member.id, days: days, asOf: now)
+            memberWeekLogs.append((member, weekLogs))
         }
         memberWeekLogs.append((youMember, logs.filter { weekDayKeySet.contains($0.dayKey) }))
 
@@ -1005,6 +1023,8 @@ final class AppState: ObservableObject {
     /// Recompute today's schedule and reconcile the streak for elapsed days.
     /// Call on launch, foreground, day change, and settings change.
     func refresh() {
+        applyTimeTravelPolicy()
+
         let now = AppClock.now
         let coords = activeCoordinates
         let calendar = Calendar.current
@@ -1048,6 +1068,19 @@ final class AppState: ObservableObject {
 
         if settings.useDeviceLocation {
             location.refreshLocation()
+        }
+    }
+
+    /// v4: keep the developer clock in step with the circle mode (SPEC-V4 §3).
+    /// A real circle pins it to real time and clears any offset already set;
+    /// demo mode hands time travel back. Runs at the top of every refresh —
+    /// launch, foreground, day change and settings change all pass through
+    /// here — and BEFORE anything reads `AppClock.now`.
+    private func applyTimeTravelPolicy() {
+        let allowed: Bool = settings.circleMode == .demo
+        AppClock.isTimeTravelAllowed = allowed
+        if !allowed, AppClock.offset != 0 {
+            AppClock.offset = 0
         }
     }
 

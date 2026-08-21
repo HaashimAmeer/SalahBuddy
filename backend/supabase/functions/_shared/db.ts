@@ -1,0 +1,163 @@
+// Supabase clients + the small set of reads the functions need.
+//
+// Two clients, two jobs:
+//   * `serviceClient()` bypasses RLS and is the ONLY thing we believe. Every
+//     claim in a request body is re-checked through it.
+//   * `callerClient()` forwards the caller's own JWT so `auth.uid()` resolves
+//     inside SECURITY DEFINER RPCs (record_nudge derives the sender from it —
+//     the sender is never taken from the body).
+//
+// SUPABASE_URL / SUPABASE_ANON_KEY / SUPABASE_SERVICE_ROLE_KEY are injected by
+// the platform at runtime. Nothing here reads a repo-managed secret.
+
+import {
+  createClient,
+  type SupabaseClient,
+} from "npm:@supabase/supabase-js@2.58.0";
+import { HttpError } from "./http.ts";
+import { readEnv } from "./util.ts";
+import type { DeviceRow } from "./apns.ts";
+
+export const SUPABASE_URL_ENV = "SUPABASE_URL";
+export const SUPABASE_ANON_KEY_ENV = "SUPABASE_ANON_KEY";
+export const SUPABASE_SERVICE_ROLE_KEY_ENV = "SUPABASE_SERVICE_ROLE_KEY";
+
+export type Client = SupabaseClient;
+
+function requireEnv(name: string): string {
+  const value = readEnv(name);
+  if (!value) {
+    // Misconfiguration, not a caller error — and we never echo the name/value
+    // of a secret beyond the variable name itself.
+    throw new HttpError(500, "missing_env", `${name} is not set`);
+  }
+  return value;
+}
+
+/// Service-role client: bypasses RLS. Never hand its results to a caller
+/// without first checking the caller is entitled to them.
+export function serviceClient(): Client {
+  return createClient(
+    requireEnv(SUPABASE_URL_ENV),
+    requireEnv(SUPABASE_SERVICE_ROLE_KEY_ENV),
+    { auth: { persistSession: false, autoRefreshToken: false } },
+  );
+}
+
+/// Client that acts AS the caller (RLS + auth.uid() apply).
+export function callerClient(authorizationHeader: string): Client {
+  const apiKey = readEnv(SUPABASE_ANON_KEY_ENV) ??
+    requireEnv(SUPABASE_SERVICE_ROLE_KEY_ENV);
+  return createClient(requireEnv(SUPABASE_URL_ENV), apiKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+    global: { headers: { Authorization: authorizationHeader } },
+  });
+}
+
+/// Resolves the bearer token to a real user id via the auth server.
+/// `verify_jwt = true` already proved the signature; this proves the user still
+/// exists and is not banned.
+export async function resolveCallerId(
+  admin: Client,
+  jwt: string,
+): Promise<string | null> {
+  const { data, error } = await admin.auth.getUser(jwt);
+  if (error || !data?.user?.id) return null;
+  return data.user.id;
+}
+
+export interface ProfileRow {
+  id: string;
+  name: string | null;
+}
+
+export async function profileFor(
+  admin: Client,
+  userId: string,
+): Promise<ProfileRow | null> {
+  const { data, error } = await admin
+    .from("profiles")
+    .select("id,name")
+    .eq("id", userId)
+    .maybeSingle();
+  if (error) throw new HttpError(500, "profile_lookup_failed", error.message);
+  return (data as ProfileRow | null) ?? null;
+}
+
+/// The caller's circle — the one membership row `unique (user_id)` allows.
+export async function circleIdFor(
+  admin: Client,
+  userId: string,
+): Promise<string | null> {
+  const { data, error } = await admin
+    .from("circle_members")
+    .select("circle_id")
+    .eq("user_id", userId)
+    .maybeSingle();
+  if (error) throw new HttpError(500, "circle_lookup_failed", error.message);
+  return (data as { circle_id: string } | null)?.circle_id ?? null;
+}
+
+export async function circleMemberIds(
+  admin: Client,
+  circleId: string,
+  excludeUserId?: string,
+): Promise<string[]> {
+  let query = admin
+    .from("circle_members")
+    .select("user_id")
+    .eq("circle_id", circleId);
+  if (excludeUserId) query = query.neq("user_id", excludeUserId);
+  const { data, error } = await query;
+  if (error) throw new HttpError(500, "members_lookup_failed", error.message);
+  return ((data ?? []) as { user_id: string }[]).map((row) => row.user_id);
+}
+
+export async function devicesFor(
+  admin: Client,
+  userIds: readonly string[],
+): Promise<DeviceRow[]> {
+  if (userIds.length === 0) return [];
+  const { data, error } = await admin
+    .from("devices")
+    .select("user_id,apns_token,environment")
+    .in("user_id", userIds as string[]);
+  if (error) throw new HttpError(500, "devices_lookup_failed", error.message);
+  return (data ?? []) as DeviceRow[];
+}
+
+/// Drops a token Apple told us is dead (410 / BadDeviceToken).
+export async function deleteDevice(
+  admin: Client,
+  token: string,
+): Promise<void> {
+  const { error } = await admin.from("devices").delete().eq(
+    "apns_token",
+    token,
+  );
+  if (error) console.error("devices: delete failed", error.message);
+}
+
+export interface PostRow {
+  id: string;
+  user_id: string;
+  circle_id: string;
+  day_key: string;
+  prayer: string;
+  tier: string;
+  jamaat: boolean;
+  place_label: string | null;
+}
+
+export async function postById(
+  admin: Client,
+  postId: string,
+): Promise<PostRow | null> {
+  const { data, error } = await admin
+    .from("posts")
+    .select("id,user_id,circle_id,day_key,prayer,tier,jamaat,place_label")
+    .eq("id", postId)
+    .maybeSingle();
+  if (error) throw new HttpError(500, "post_lookup_failed", error.message);
+  return (data as PostRow | null) ?? null;
+}

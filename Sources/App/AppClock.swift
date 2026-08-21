@@ -4,11 +4,28 @@ import Foundation
 /// DEBUG time-travel controls work everywhere. Never use `Date()` directly.
 enum AppClock {
     private static let offsetKey = "debug.timeOffset"
+    private static let timeTravelKey = "debug.timeTravelAllowed"
+
+    /// v4: whether the developer clock may leave real time (SPEC-V4 §3).
+    /// False while a REAL circle is active — posting fictional timestamps to
+    /// real friends breaks everything time travel exists to test. `AppState`
+    /// sets it from `settings.circleMode`; demo mode keeps full time travel.
+    /// Persisted (and absent → true) so the guard holds from the first read of
+    /// launch, before `AppState` has booted.
+    static var isTimeTravelAllowed: Bool {
+        get { UserDefaults.standard.object(forKey: timeTravelKey) as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: timeTravelKey) }
+    }
 
     /// Debug time-travel offset, persisted in UserDefaults.
     static var offset: TimeInterval {
         get { UserDefaults.standard.double(forKey: offsetKey) }
-        set { UserDefaults.standard.set(newValue, forKey: offsetKey) }
+        set {
+            // A pinned clock refuses every move EXCEPT back to real time, so
+            // entering a real circle can always clear a stale offset.
+            guard isTimeTravelAllowed || newValue == 0 else { return }
+            UserDefaults.standard.set(newValue, forKey: offsetKey)
+        }
     }
 
     /// The app's notion of "now".

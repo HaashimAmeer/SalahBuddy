@@ -1,0 +1,20 @@
+# Supabase CLI config for the SalahBuddy backend.
+#
+# Deliberately minimal and project-agnostic. The staging and production
+# projects are selected with `--project-ref` from CI; this repo is PUBLIC, so
+# no project ref, URL, or key ever lands in this file. Runtime secrets for the
+# functions (APNS_*) are set out of band with `supabase secrets set`; the
+# SUPABASE_* variables the functions read are injected by the platform.
+
+project_id = "salahbuddy"
+
+[functions.notify]
+# The caller's own user JWT authenticates them — there is no shared secret to
+# leak. Every claim in the body is then re-derived from the database with the
+# platform-injected service-role key.
+verify_jwt = true
+
+[functions.retention]
+# Triggered on a schedule with the service-role key, or by a signed-in
+# developer forcing a sweep. Either way, an authenticated caller is required.
+verify_jwt = true

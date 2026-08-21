@@ -3,3 +3,7 @@ DerivedData/
 .DS_Store
 build/
 *.xcodeproj
+
+# Supabase CLI scratch (version probes, linked-project state)
+backend/supabase/.temp/
+backend/supabase/.branches/

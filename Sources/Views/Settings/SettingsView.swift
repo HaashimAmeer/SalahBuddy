@@ -686,9 +686,13 @@ struct SettingsView: View {
                     }
                     .buttonStyle(.plain)
                 }
-                Text(offsetDescription)
+                .disabled(!timeTravelEnabled)
+                .opacity(timeTravelEnabled ? 1 : 0.4)
+
+                Text(timeTravelEnabled ? offsetDescription : Self.timeTravelPausedNote)
                     .font(Theme.sans(12, .semibold))
                     .foregroundStyle(Theme.inkMuted)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Divider()
@@ -739,6 +743,14 @@ struct SettingsView: View {
         }
         .buttonStyle(.plain)
     }
+
+    /// v4: a real circle pins the clock to real time (SPEC-V4 §3) —
+    /// `AppClock.offset` refuses to move anyway; reading the mode here keeps
+    /// the row greyed out in step with SwiftUI's invalidation of `settings`.
+    private var timeTravelEnabled: Bool { state.settings.circleMode == .demo }
+
+    private static let timeTravelPausedNote =
+        "Paused while you're in a real circle — your friends see real timestamps."
 
     private var offsetDescription: String {
         let offset = AppClock.offset

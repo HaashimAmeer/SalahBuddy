@@ -542,8 +542,11 @@ extension AppState {
             return schedule.map { (key, $0) }
         }
 
-        var memberWeekLogs: [(member: CircleMember, logs: [PrayerLog])] = activeBuddies.map {
-            (BuddySimulator.member(for: $0), BuddySimulator.visibleLogs(for: $0, days: days, asOf: now))
+        // v4: the crown reads the same seam the scoreboard does, so a real
+        // circle races on synced posts without touching this math.
+        let source = circleSource
+        var memberWeekLogs: [(member: CircleMember, logs: [PrayerLog])] = source.members.map { member in
+            (member, source.weekLogs(forMember: member.id, days: days, asOf: now))
         }
         if let you = circleMembers.first(where: { $0.isYou }) {
             let weekKeySet = Set(dayKeys)
