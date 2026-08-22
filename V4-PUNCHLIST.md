@@ -140,23 +140,33 @@ Sign-in, push and photo sync have no simulator path. In rough dependency order:
 - [ ] **Delete account**: server rows go, local history stays.
 - [ ] **Report a buddy photo**: it disappears immediately for you.
 
-## 5. Decisions that are yours, not mine
+## 5. Decisions — SETTLED 2026-08-21/22
 
-Both are one-line changes; I picked the more conservative reading.
-
-- [ ] **The master Notifications switch blocks push registration entirely.**
-      Someone who declined notifications at onboarding and later joins a circle
-      is therefore never re-prompted and gets no nudges. That respects their
-      explicit "off", but it means the nudge button silently does nothing for
-      them. The alternative is prompting anyway when they join a circle.
-- [ ] **`announcePost` does not gate on the sender's own
-      `notifyFriendActivity`.** That toggle is a *receiving* preference, applied
-      per recipient by the backend, so gating the sender would silence friends
-      who did opt in. Flag if you read it the other way.
-- [ ] **Circle size differs by mode, deliberately**: a real circle seats **8
-      members total** (7 friends + you, enforced server-side); the demo circle
-      keeps its 8 simulated friends + you. The invite copy quotes whichever
-      applies, so the numbers on screen change between modes.
+- [x] ~~**The master Notifications switch blocks push registration entirely.**~~
+      DECIDED: the switch stays absolute — joining a circle never forces a
+      permission sheet on someone who turned notifications off — but the dead
+      end is no longer silent. `CirclePushHint` appears on the Circle screen in
+      a REAL circle when notifications are off, and is dismissible for good
+      (`AppSettings.circlePushHintDismissed`). It distinguishes the two states
+      that were previously identical dead ends: someone who tapped "Don't Allow"
+      cannot be re-prompted by iOS and is routed to system Settings, while
+      someone who merely SKIPPED the onboarding card is still `.notDetermined`,
+      so "Turn on" genuinely prompts.
+- [x] ~~**`announcePost` does not gate on the sender's own
+      `notifyFriendActivity`.**~~ DECIDED: leave it ungated. It is a RECEIVING
+      preference applied per recipient, so gating the sender would silence
+      friends who did opt in. No code change.
+- [x] ~~**Circle size differs by mode.**~~ DECIDED, and the premise was wrong.
+      **The cap is now 12 total, and demo matches exactly (11 friends + you).**
+      There was never a technical reason for 8 — it came from a v2/v3 comment
+      about the SIMULATED circle, which v4 inherited without re-deriving and
+      reinterpreted as 8 seats rather than 8 friends. That is the whole origin
+      of the demo/real off-by-one this section used to defend as deliberate.
+      12 seats a family or a masjid friend group and stays inside what the
+      35-day reconciling pull was built for (~1,400 posts -> ~2,100).
+      Migration `20260822000100_circle_cap_12.sql`.
+- [x] ~~**No production Supabase project.**~~ DECIDED: stay deferred until v4 is
+      validated on a device. Unchanged from §6.
 
 ## 6. Deferred, with reasons
 
@@ -176,3 +186,63 @@ Both are one-line changes; I picked the more conservative reading.
   pg_cron + pg_net, or a scheduled workflow, is the upgrade.
 - **Universal links** (`…/join/<CODE>`) wait on a domain existing. Invites are
   code-first, as §2 specifies.
+
+---
+
+## 7. Shipped since the list was last accurate (2026-08-21/22)
+
+Recorded here because this file is the continuity document and it went stale.
+
+**TestFlight compliance.** `ITSAppUsesNonExemptEncryption: false` now ships in
+`project.yml`. Every upload used to arrive as "Missing Compliance" needing a
+manual click, and — what looked like a second bug — **no tester group was
+assigned either**. One cause: App Store Connect will not RELEASE a build to
+testers until the export question is settled, so an unanswered build never
+reaches the internal group. **UNVERIFIED: build 22 is the first to carry it.**
+
+**Day one no longer opens with a bill.** Windows that closed before
+`profile.joinedAt` are `PrayerStatus.beforeJoining` — no "you missed out on
++120 XP", no "Missed" labels. They stay make-up-able at the normal qada +5,
+with the header asking "Already prayed today?" instead. The rule already
+existed for circle members (`gridEntries` gates on their joinedAt); it was
+simply never pointed at you.
+
+**Good deeds un-tick.** `GameEngine.recoveryEarnedAfterUndo` — the reversal
+cannot be `totalXP -= deedXP` (a deed ticked past the cap earned nothing) nor a
+recompute (the cap SHRINKS as prayer XP arrives, so banked XP would be
+stripped).
+
+**Perf.** Onboarding stutter: the step change was animated twice and the
+keyboard's dismissal was being re-timed to our spring — invisible on the
+Simulator because it defaults to a connected hardware keyboard. `HomeView.body`
+called `currentTodayBlock` three times per second. `RootView` held the 1s
+heartbeat as its own `@State`, re-evaluating the whole 5-tab shell every second;
+now `AppClockProvider`.
+
+**Tour.** Card sat at a screen edge rather than beside its target; oversized
+targets are no longer ringed; 7 steps down to 4; one tap on Next was running
+three animations. **Not device-verified.**
+
+**Asr madhab toggle** replaced with `SegmentedChoice` — `.pickerStyle(.segmented)`
+rendered grey-on-grey-on-grey against the mint.
+
+**Timezones — the big one.** See SPEC-V4 §7 for the full record.
+- Eastward streak loss FIXED (`profile.travelDayKeys`, skipped by `reconcile`,
+  3h threshold chosen so DST never trips it).
+- Westward re-lived day FIXED: identity is now `(dayKey, prayer, offset within
+  tolerance)`; grouping is untouched, so nothing changes for anyone who does not
+  fly. Migrations `…000300`/`…000400`.
+- Cross-zone push relevance FIXED: `notify` compares local clock readings, not
+  just dates. Migration `…000500`.
+- The shared-grid presentation question is recorded as INTENDED, not a defect.
+
+**Known gap:** "nudges and joins are never filtered" is enforced only by which
+call sites pass `relevance`, and `notify/index.ts` exports nothing, so there is
+no test for the wiring. Guarding it needs the handlers exported and a fake
+Supabase client.
+
+**Local tooling:** `deno` is not installed on this Mac (`brew install deno`).
+`run_sql_tests.sh` needs `PGHOST=/tmp PGPORT=5432 PGUSER=haashimameer
+PGDATABASE=postgres`.
+
+Current suites: **406 iOS, 30 SQL, 87 Deno, 0 failures.**
