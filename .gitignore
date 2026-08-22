@@ -7,3 +7,6 @@ build/
 # Supabase CLI scratch (version probes, linked-project state)
 backend/supabase/.temp/
 backend/supabase/.branches/
+
+# Local scratch for backend/tests/fake_buddy.sh — holds a session token
+backend/tests/.fake_buddy_state

@@ -65,19 +65,34 @@ never produce.
       `923951498597-445nb4q5o5k66imnbbul70h88s7bct72.apps.googleusercontent.com`.
       GoTrue checks the ID token's `aud` against that list; a mismatch fails
       sign-in with a message that does not obviously say why.
-- [ ] **APNs secrets**: `APNS_BUNDLE_ID` must be exactly
-      `org.amacvoters.salahbuddymock`. The other three (`APNS_KEY`,
-      `APNS_KEY_ID`, `APNS_TEAM_ID`) you reported as already set and
-      hash-verified. Every delivery path logs-and-skips when any is missing, so
-      a wrong value degrades quietly rather than crashing — which is safe, and
-      also why it needs checking by eye.
+- [x] ~~**APNs secrets**~~ — VERIFIED 2026-08-21, by arithmetic rather than by
+      eye. `supabase secrets list` prints a SHA-256 of each value, so:
+      `APNS_BUNDLE_ID` hashes to exactly `sha256("org.amacvoters.salahbuddymock")`
+      (no trailing newline), and `APNS_TEAM_ID` to `sha256("852AXZ2B57")`, which
+      is `DEVELOPMENT_TEAM` in `project.yml`. All four `APNS_*` are present.
+      This mattered because every delivery path logs-and-skips on a bad value,
+      so a wrong bundle id would have degraded silently into "push just doesn't
+      work".
 
 ## 3. Signing
 
-- [ ] **The first `staging` build may fail code signing once.** Adding Sign in
-      with Apple + Push Notifications to the App ID invalidated the existing
-      provisioning profiles; Xcode Cloud regenerates them on retry. Retry before
-      debugging anything.
+- [x] ~~**The first build may fail code signing once**~~ — CONFIRMED and
+      resolved locally on 2026-08-21. A Release archive failed with
+      "Provisioning profile *iOS Team Provisioning Profile: \** doesn't include
+      the Push Notifications capability"; retrying with
+      `-allowProvisioningUpdates` regenerated the stale DISTRIBUTION profile and
+      the archive succeeded.
+
+      Two things worth keeping. The App ID is fine — the *development* profile
+      already carried `aps-environment` and `applesignin`, and a profile can
+      only carry entitlements its App ID grants, so that settles it. And the
+      failure is distribution-only: a device build would have worked and hidden
+      this entirely.
+
+      Also verified rather than assumed: exporting the archive with the
+      `app-store-connect` method produces an ipa whose `aps-environment` is
+      **production** (rewritten from `development`) with `beta-reports-active`
+      set. Push entitlements will be right in a TestFlight build.
 - [ ] Optional, saves compute hours: the Xcode Cloud **Test** action still uses
       the multi-device "Recommended iPhones" alias. Switching it to a single
       simulator is only possible from Xcode's Cloud tab (the ASC web dropdown
@@ -86,6 +101,16 @@ never produce.
 ## 4. Device-only — cannot be exercised by any CI
 
 Sign-in, push and photo sync have no simulator path. In rough dependency order:
+
+> **`backend/tests/fake_buddy.sh` covers the two-phone items with one phone.**
+> It signs up a real throwaway account against staging, joins your circle with
+> the invite code, and posts prayers — so your phone sees a genuine second
+> member without a second device. `status` prints the XP total your leaderboard
+> must agree with, which is the Phase C check.
+>
+> It exercises the server contract and YOUR phone's half of the conversation.
+> It says nothing about how a second real iPhone renders things, so the items
+> below are narrowed, not deleted.
 
 - [ ] **Sign in with Apple** on a real device. This is the one to watch: the
       nonce is the only part of v4 that can fail *exclusively* on hardware. The
