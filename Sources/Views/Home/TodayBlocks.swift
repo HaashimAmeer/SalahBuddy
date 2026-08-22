@@ -609,12 +609,19 @@ struct MakeUpSection: View {
         }
         if !prayers.isEmpty {
             VStack(alignment: .leading, spacing: 10) {
-                Text("Make up")
+                Text(state.makeUpIsBeforeJoiningOnly ? "Already prayed today?" : "Make up")
                     .font(Theme.sans(13, .bold))
                     .foregroundStyle(Theme.inkMuted)
                     .textCase(.uppercase)
 
-                if state.missedOutXPToday > 0 {
+                // Day one asks a question; every other day states a fact. The
+                // rows underneath are identical either way.
+                if state.makeUpIsBeforeJoiningOnly {
+                    Text("Add the ones you've already prayed today — they still count 💙")
+                        .font(Theme.sans(13, .semibold))
+                        .foregroundStyle(Theme.inkMuted)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else if state.missedOutXPToday > 0 {
                     Text("You missed out on +\(state.missedOutXPToday) XP today — a make-up still counts 💙")
                         .font(Theme.sans(13, .semibold))
                         .foregroundStyle(Theme.inkMuted)

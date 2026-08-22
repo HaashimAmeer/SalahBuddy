@@ -128,9 +128,29 @@ extension AppState {
     }
 
     /// Today's passed-unlogged prayers — the make-up (qada) candidates.
+    ///
+    /// `.beforeJoining` counts. Somebody installing at Maghrib may well have
+    /// prayed Fajr through Asr already, and refusing to record that is a worse
+    /// wrong than the accusatory framing it was meant to avoid — it makes the
+    /// app's first act a refusal. What changes on day one is the WORDING and
+    /// the missed-XP arithmetic (see `beforeJoiningOnly` and
+    /// `GameEngine.missedOutXP`), not whether the action exists.
     var makeUpPrayers: [Prayer] {
         Prayer.allCases.filter {
-            if case .missedWindow = status(of: $0) { return true }
+            switch status(of: $0) {
+            case .missedWindow, .beforeJoining: return true
+            default: return false
+            }
+        }
+    }
+
+    /// Every make-up candidate predates the account — i.e. this is day one and
+    /// nothing has actually been missed. Drives the invitation-shaped copy.
+    var makeUpIsBeforeJoiningOnly: Bool {
+        let candidates = makeUpPrayers
+        guard !candidates.isEmpty else { return false }
+        return candidates.allSatisfy {
+            if case .beforeJoining = status(of: $0) { return true }
             return false
         }
     }
