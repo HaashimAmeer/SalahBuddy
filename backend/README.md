@@ -33,13 +33,19 @@ backend/
       20260821000700_reports.sql    # UGC reports — insert-only for the reporter, read by nobody else
       20260821000800_reports_subject.sql  # a report keeps its own copy of WHO and WHERE (undo-proof)
       20260821000900_register_device.sql  # claim an APNs token that changed hands on one phone
+      20260822000100_circle_cap_12.sql    # the circle cap moves from 8 to 12
+      20260822000200_post_utc_offset.sql  # record the poster's zone on every post
+      20260822000300_post_identity_offset.sql # ...and put it in the posts unique key
+      20260822000400_post_zone_wildcard.sql   # a NULL offset is a wildcard, not a third zone
+      20260822000500_device_utc_offset.sql    # the RECIPIENT's zone, so push can skip a stale day
     functions/
-      _shared/                      # apns.ts, auth.ts, db.ts, http.ts, messages.ts, util.ts, validate.ts
+      _shared/                      # apns.ts, auth.ts, db.ts, http.ts, messages.ts, util.ts,
+                                    #   validate.ts, zones.ts
       notify/index.ts               # post / join / nudge push fan-out (APNs, signed in-function)
       retention/index.ts            # the ~30-day photo sweep
   tests/
     shim/00_supabase_shim.sql       # fakes auth.*/storage.*/the API roles on vanilla Postgres
-    sql/01..25_*.sql                # assertion tests — RLS, cap-8, privacy, constraints
+    sql/01..29_*.sql                # assertion tests — RLS, caps, privacy, constraints
     run_sql_tests.sh                # scratch DB -> shim -> migrations -> assertions
     deno/*_test.ts                  # unit tests for the function helpers (offline, no permissions)
 ```
@@ -73,10 +79,30 @@ and the real project can never diverge on ordering.
   every outstanding invite (or set the code to `''` and capture anyone whose
   join field was blank). Test 12 pins the column matrix in both directions.
 - **The keys carry `circle_id`.** `posts` is unique on
-  `(user_id, circle_id, day_key, prayer)`, and `excused_days` / `recovery_weeks`
-  key on `(user_id, circle_id, …)`. Your rows outlive your membership (§2), so
-  a key without the circle makes the join-backfill of your current week collide
-  with the rows still sitting in the circle you just left.
+  `(user_id, circle_id, day_key, prayer, utc_offset)`, and `excused_days` /
+  `recovery_weeks` key on `(user_id, circle_id, …)`. Your rows outlive your
+  membership (§2), so a key without the circle makes the join-backfill of your
+  current week collide with the rows still sitting in the circle you just left.
+- **...and `posts` carries `utc_offset`, NULLS NOT DISTINCT** (migration
+  `20260822000300`). A long-haul flight makes two genuinely different prayers
+  share one `day_key`, so the zone is part of the row's identity; `nulls not
+  distinct` keeps pre-`20260822000200` rows, which have no offset, deduping
+  against each other. On real offsets this rule is deliberately LOOSER than the
+  client's, which folds offsets within 3h together so a DST hour never splits a
+  prayer — do not "tighten" it to match. Test 27 pins both halves.
+- **A NULL `utc_offset` is a WILDCARD, and that needs a trigger** (migration
+  `20260822000400`, `posts_zone_wildcard`). `nulls not distinct` makes NULL
+  equal to NULL and to nothing else, which leaves one pair the index cannot
+  see: a zoneless legacy row beside a zoned one. That is one prayer written
+  twice — the v4 rollout produces it by itself, from one device on an old build
+  and one on the new — and it scores that prayer twice on every circle-mate's
+  leaderboard, permanently, because no later upsert ever conflicts with either
+  row. The trigger refuses the pair with **23505**, so the client's existing
+  slot-repair path (`SupabaseCircleTransport.upsertPost` →
+  `updatePostSlot`, scoped `utc_offset = n OR utc_offset is null`) lands on the
+  row that refused the insert. It stays SILENT on the pairs the unique key
+  already refuses: `on conflict do nothing` can swallow a constraint violation
+  and cannot swallow a trigger's exception, and `seed.sql` runs twice. Test 28.
 - **Two tables are the sweep's private bookkeeping** and are granted to nobody:
   `circle_departures` (who left which circle, and when — the purge clock) and
   `photo_tombstones` (Storage paths whose row is gone). The tombstone list is
@@ -384,6 +410,48 @@ preferences.
   any row carrying that token before inserting the caller's; deleting by token
   alone is safe because a token is an unguessable value APNs issues to one
   install. Test 26 pins both halves.
+- **A post's push is scoped to the day it is about, and "unknown" is never
+  silence** (migration `20260822000500`, `functions/_shared/zones.ts`, test 29
+  + `tests/deno/zones_test.ts`). `notify` used to fan "📸 X posted first for
+  Fajr" out to every member regardless of where they were standing: a 5am Fajr
+  in Mumbai woke a friend in Seattle at 4:30pm, twelve hours after their own
+  Fajr. `devices.utc_offset` is the missing half of `posts.utc_offset` — with
+  both, the function can compute each recipient's local day and drop the ones
+  the post has already gone stale for. Four things about it are load-bearing:
+  - **the window is anchored on the POSTER**, spanning `day_key` to the
+    poster's own current local day. That is what guarantees nobody in the
+    poster's own zone is ever filtered, and it is what keeps an Isha logged
+    after midnight — which carries YESTERDAY's `day_key` — reaching the same
+    city. A bare `recipient_day == day_key` would have silenced that case for
+    everyone, in one line, with no timezone involved at all.
+  - **the recipient gets the same after-midnight allowance**, or the poster's
+    half of it is a bug rather than a fix. `day_key` is a SCHEDULE day and
+    `localDayKey` is a CALENDAR day, and between midnight and dawn those are
+    two different dates: with the poster in London at 23:30 the window is a
+    single date, so a circle-mate one hour east reading 00:30 — the same clock
+    face that keeps a same-city recipient in — was dropped for standing on
+    tomorrow's date. Seattle/Denver and UK/Central Europe lost the "posted
+    first for Isha" push that way most nights. `isCurrentForOffset` therefore
+    accepts `window.to + 1` while the recipient is before dawn
+    (`PRE_DAWN_SECONDS`, a flat four hours — the function has no coordinates
+    and so cannot know their real Fajr). It only ever ADDS recipients, so the
+    poster-zone invariant is untouched.
+  - **NULL is a third answer, not a zone.** The column is nullable forever and
+    has no default: every row written before the migration genuinely has no
+    offset, and 0 is a real place (London in winter, Reykjavík all year), so a
+    `not null default 0` would file every unknown device in Greenwich and mute
+    the ones whose day has not turned over. A NULL recipient offset is always
+    notified; a post with a NULL `utc_offset` filters nobody at all.
+  - **only the post fan-out is filtered.** A nudge is aimed at one named person
+    a human just picked out of a grid and never goes through `fanOut`;
+    `{kind:"join"}` is not about a day and passes no window.
+  `register_device()` gained `p_utc_offset int default null` here, and the
+  three-argument function was DROPPED rather than left beside it — two
+  overloads differing only by a defaulted trailing parameter make every
+  existing call ambiguous. An out-of-range offset is coerced to NULL by the RPC
+  rather than raised, because a phone with no `devices` row gets no nudges and
+  no join alerts either: a bad clock must cost the filtering, never the
+  registration.
 - **Push is opt-in and first-only.** §6's friend-activity alert is
   `devices.notify_friend_activity`, which mirrors `AppSettings` and defaults to
   **false**; the fan-out filters on it, because iOS cannot suppress an alert it

@@ -130,12 +130,15 @@ struct PrayerLog: Codable, Identifiable, Equatable {
     ///
     /// `dayKey` is a local-time string, so "2026-08-22" means one thing in
     /// Seattle and another in Mumbai and nothing on the log says which. This
-    /// is the missing half. Nothing scores off it yet — the day model that
-    /// would is a project of its own — but a log written without it can never
-    /// be told which zone it belonged to, and no amount of later work can
-    /// recover that. Cheap to capture, impossible to backfill.
+    /// is the missing half, and it is what makes a prayer's IDENTITY
+    /// `(prayer, dayKey, zone)` rather than `(prayer, dayKey)` — see
+    /// `GameEngine.isSamePrayerInstance`. Scoring is untouched: `dayKey` alone
+    /// still groups a day, so a six-prayer travel day is one complete day.
     ///
-    /// nil for every log written before v4, and honestly so.
+    /// nil for every log written before v4, and honestly so — a log written
+    /// without it can never be told which zone it belonged to, so identity
+    /// reads nil as "matches anything" and old data can never gain a
+    /// duplicate.
     var utcOffset: Int?
 
     init(id: UUID, prayer: Prayer, dayKey: String, loggedAt: Date, tier: LogTier, xp: Int,

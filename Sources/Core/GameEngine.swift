@@ -216,12 +216,24 @@ enum GameEngine {
     /// `joinedAt` windows are skipped entirely: XP that was foregone before
     /// the account existed was never on offer, so counting it would greet a
     /// brand-new user with a bill for a day they were not present for.
+    ///
+    /// v4 — IDENTITY, not grouping, and `currentOffset` is why. `schedule` is
+    /// the CURRENT zone's windows for the day the device is standing in, so
+    /// "did I pray this one?" has to be asked of the current zone's prayer.
+    /// A traveller who prayed fajr in Mumbai and then landed in Seattle after
+    /// Seattle's fajr closed really did forgo Seattle's fajr — answering by
+    /// `dayKey` alone would report zero foregone XP for a window nobody prayed,
+    /// and contradict the make-up row the Today screen is offering right next
+    /// to this number. Only ever called for TODAY (`AppState.missedOutXPToday`);
+    /// a past day has no comparable zone and must not be asked this.
     static func missedOutXP(logs: [PrayerLog], schedule: DaySchedule, now: Date,
-                            isExcused: Bool, joinedAt: Date = .distantPast) -> Int {
+                            isExcused: Bool, joinedAt: Date = .distantPast,
+                            currentOffset: Int) -> Int {
         guard !isExcused else { return 0 }
         var total = 0
         for window in schedule.windows where now >= window.end && window.end > joinedAt {
-            let log = logs.first { $0.dayKey == schedule.dayKey && $0.prayer == window.prayer }
+            let log = loggedInstance(prayer: window.prayer, dayKey: schedule.dayKey,
+                                     currentOffset: currentOffset, in: logs)
             if let log {
                 if !log.tier.isInWindow {
                     total += max(0, LogTier.onTime.xp - log.xp)   // qada recovered some
@@ -316,6 +328,220 @@ enum GameEngine {
     static func isTravelShift(from previous: Int?, to current: Int) -> Bool {
         guard let previous else { return false }
         return abs(current - previous) >= travelOffsetThreshold
+    }
+
+    /// Whether a stored log is the SAME prayer instance the device is living in
+    /// right now — the answer to "have I already prayed this one?".
+    ///
+    /// `dayKey` alone used to answer that, and it was doing two jobs: labelling
+    /// a calendar day AND identifying a prayer. They agree for everyone who
+    /// stays put and part company on a long-haul flight. Mumbai's fajr and
+    /// Seattle's fajr on 2026-08-22 are two genuinely different prayers, hours
+    /// apart, sharing one calendar date; asking `dayKey` says they are one, and
+    /// the second — really prayed — could not be logged. So identity is
+    /// `(prayer, dayKey, zone)`, and this is the zone half.
+    ///
+    /// TOLERANCE, NOT EQUALITY, and the same three hours `isTravelShift` uses:
+    /// a DST shift is exactly one hour and must never re-open a prayer already
+    /// prayed, and a device whose offset moved an hour is still standing in the
+    /// same day. Below the threshold it is the same prayer; at or above it, the
+    /// day itself has been truncated (which is what `isTravelShift` says) and
+    /// the prayer on the other side is a new one. The two questions share a
+    /// threshold because they are the same question asked twice.
+    ///
+    /// `nil` — every log written before v4 captured the offset — matches
+    /// ANYTHING, deliberately. Old data has no zone to compare, and the
+    /// conservative reading is "already prayed": history can lose a duplicate
+    /// it should have been allowed, but can never gain one it should not.
+    ///
+    /// Note this is NOT the identity of a DAY. `dayKey` remains the grouping
+    /// key everywhere — `isDayComplete`, `isPerfectDay`, `xp(forDay:)`,
+    /// `weeklyXP`, the streak walk and the grids are untouched by this, and a
+    /// six-prayer travel day is still one day with one streak increment.
+    static func isSamePrayerInstance(storedOffset: Int?, currentOffset: Int) -> Bool {
+        !isTravelShift(from: storedOffset, to: currentOffset)
+    }
+
+    /// How far a stored log's zone is from the one the device is standing in,
+    /// for RANKING two logs that both match. `nil` — a pre-v4 log with no zone
+    /// recorded — is the least specific answer there is and therefore ranks
+    /// last, so a real zone match always beats "matches anything".
+    ///
+    /// Only meaningful for logs `isSamePrayerInstance` already accepted; it is
+    /// a tie-break, not a second gate.
+    private static func zoneDistance(storedOffset: Int?, currentOffset: Int) -> Int {
+        guard let storedOffset else { return Int.max }
+        return abs(currentOffset - storedOffset)
+    }
+
+    /// Index of the log that IS this prayer instance, if it has already been
+    /// prayed — the identity lookup `AppState` runs before offering to log
+    /// anything, and the SAME one `undoLog` runs before taking one back.
+    ///
+    /// `dayKeys` is a set because undo has to consider yesterday's key too: an
+    /// isha logged after midnight carries YESTERDAY's dayKey (§6.8).
+    ///
+    /// MORE THAN ONE LOG CAN MATCH, and this is the single place that decides
+    /// which. Tolerance is not equality, so two logs three to six hours of zone
+    /// apart can both sit within three hours of where the device is now — fajr
+    /// in Seattle and fajr in New York, asked from Chicago. Every caller must
+    /// get the SAME answer or the Today tile renders one log while Undo deletes
+    /// the other, so the choice is made once, here:
+    ///
+    ///   1. the closest zone wins — it is the prayer you are standing nearest;
+    ///   2. a real zone beats a zoneless legacy log, which matches everything
+    ///      and therefore distinguishes nothing;
+    ///   3. ties go to the LAST log in the array, i.e. the most recently
+    ///      appended. Undo means "take back what I just did", and for status it
+    ///      cannot matter: a tie means the two logs are the same prayer in the
+    ///      same zone, which nothing in the app is allowed to create.
+    ///
+    /// Pure, and the current offset is an argument rather than a clock read, so
+    /// the whole "is this the same prayer?" question is testable without a
+    /// device that can fly.
+    /// `preferredDayKey` outranks zone distance, and that ordering is the whole
+    /// point of the parameter. Undo hands this a SET — for isha it holds the
+    /// target day, today and yesterday, because an isha logged past midnight
+    /// carries yesterday's key. Ranking that set by zone distance alone let a
+    /// far-away day win: log today's isha at one offset, move three hours or
+    /// more, tap Undo, and yesterday's isha — logged nearer the new offset —
+    /// scored better and was the one deleted, taking its XP and possibly a
+    /// streak increment with it. Probably unreachable through today's UI, since
+    /// `status(of:)` would stop reporting `.logged` and hide the affordance,
+    /// but "the button is currently hidden" is not where this rule should live.
+    static func loggedInstanceIndex(prayer: Prayer, dayKeys: Set<String>, currentOffset: Int,
+                                    preferredDayKey: String? = nil,
+                                    in logs: [PrayerLog]) -> Int? {
+        // A preference has to be applied BEFORE the identity filter, not as a
+        // ranking after it — which is the mistake a first attempt made, and a
+        // test caught. Today's isha logged in Mumbai does not survive the
+        // identity guard once the device is in Seattle, so it is not a
+        // candidate at all and no amount of ranking can prefer it; yesterday's
+        // Seattle isha then wins by default and Undo eats a day that was
+        // already banked. Once the preferred day holds a log for this prayer,
+        // the other days stop being candidates at all — the fall-through to
+        // `previousDayKey` exists for "today has no isha YET", not for "today's
+        // isha is not the one you are standing in".
+        let searchKeys: Set<String>
+        if let preferredDayKey,
+           logs.contains(where: { $0.prayer == prayer && $0.dayKey == preferredDayKey }) {
+            searchKeys = [preferredDayKey]
+        } else {
+            searchKeys = dayKeys
+        }
+
+        var best: Int? = nil
+        var bestDistance: Int = Int.max
+        for (index, log) in logs.enumerated() {
+            guard log.prayer == prayer, searchKeys.contains(log.dayKey),
+                  isSamePrayerInstance(storedOffset: log.utcOffset,
+                                       currentOffset: currentOffset) else { continue }
+            let distance: Int = zoneDistance(storedOffset: log.utcOffset,
+                                             currentOffset: currentOffset)
+            // `<=` is the tie-break: a later log at the same distance wins.
+            if best == nil || distance <= bestDistance {
+                best = index
+                bestDistance = distance
+            }
+        }
+        return best
+    }
+
+    /// The log that IS this prayer instance, if it has already been prayed.
+    /// See `loggedInstanceIndex` — this is the same decision, dereferenced.
+    static func loggedInstance(prayer: Prayer, dayKey: String, currentOffset: Int,
+                               in logs: [PrayerLog]) -> PrayerLog? {
+        loggedInstanceIndex(prayer: prayer, dayKeys: [dayKey],
+                            currentOffset: currentOffset, in: logs).map { logs[$0] }
+    }
+
+    /// The log a SQUARE draws for `(prayer, dayKey)` — a Today grid tile, a
+    /// week-grid cell, a day sheet.
+    ///
+    /// `isLiveDay` is the whole decision, and it is the caller's to make: TRUE
+    /// for the day the device is standing in (today, and — before fajr —
+    /// yesterday's still-open isha), FALSE for history.
+    ///
+    /// A LIVE day answers by IDENTITY, so the square sitting next to the camera
+    /// CTA gives the same answer `status(of:)` does. It used to answer by
+    /// dayKey alone, and the two contradicted each other the moment somebody
+    /// flew: a traveller who prayed fajr in Mumbai and landed in Seattle after
+    /// Seattle's fajr had closed was offered "Make up Fajr" by one part of the
+    /// screen while another drew a photo for it, and the inline make-up button
+    /// was hidden by a cell that disagreed with the row above it.
+    ///
+    /// A PAST day answers by GROUPING. The zone the device is in today has
+    /// nothing to say about the zone Monday was lived in, and asking would
+    /// repaint a whole travelled week as missed.
+    static func cellLog(prayer: Prayer, dayKey: String, isLiveDay: Bool,
+                        currentOffset: Int, in logs: [PrayerLog]) -> PrayerLog? {
+        guard isLiveDay else { return latestLog(prayer: prayer, dayKey: dayKey, in: logs) }
+        return loggedInstance(prayer: prayer, dayKey: dayKey,
+                              currentOffset: currentOffset, in: logs)
+    }
+
+    /// The profile after ONE log is taken back — the whole of undo's
+    /// arithmetic, in the one place scoring is allowed to live.
+    ///
+    /// `remainingLogs` is the array with `removed` already gone; the day as it
+    /// stood before is reconstructed from the two, so the caller cannot get the
+    /// order wrong.
+    ///
+    /// THE BONUSES COME OFF ONLY ON A TRUE -> FALSE TRANSITION. This used to
+    /// read the day BEFORE the removal and assume the removal broke it, which
+    /// held exactly as long as `(prayer, dayKey)` was unique — and v4 ended
+    /// that on purpose. A traveller with all five prayers banked who logs a
+    /// sixth on the other side of a flight and then undoes it still has a
+    /// perfect, complete day: charging them 25 XP, a perfect day and a streak
+    /// increment for tidying up is a bug that nothing later puts right, because
+    /// `reconcile` never increments and the bonus is only ever awarded at log
+    /// time. Undo it twice and the 25 comes off twice.
+    ///
+    /// Badges are deliberately NOT revoked.
+    static func profileAfterUndo(of removed: PrayerLog, from profile: UserProfile,
+                                 remainingLogs: [PrayerLog],
+                                 excusedDayKeys: Set<String> = []) -> UserProfile {
+        let dayKey: String = removed.dayKey
+        let before: [PrayerLog] = remainingLogs + [removed]
+
+        let lostPerfect: Bool =
+            isPerfectDay(logs: before, dayKey: dayKey, excusedDayKeys: excusedDayKeys)
+            && !isPerfectDay(logs: remainingLogs, dayKey: dayKey, excusedDayKeys: excusedDayKeys)
+        let lostCompletion: Bool =
+            isDayComplete(logs: before, dayKey: dayKey)
+            && !isDayComplete(logs: remainingLogs, dayKey: dayKey)
+
+        var next: UserProfile = profile
+        next.totalXP = max(0, next.totalXP - removed.xp)      // includes any jamaat bonus
+        if lostPerfect {
+            next.totalXP = max(0, next.totalXP - perfectDayBonus)
+            next.perfectDayCount = max(0, next.perfectDayCount - 1)
+        }
+        if lostCompletion {
+            next = reverseStreakIncrement(on: next, dayKey: dayKey)
+        }
+        return next
+    }
+
+    /// The log that REPRESENTS `(prayer, dayKey)` in a view of a PAST day — a
+    /// week-grid cell, a memory, a day sheet.
+    ///
+    /// Identity is unusable there: the zone the device is standing in today has
+    /// nothing to do with the zone Monday was lived in, and comparing them
+    /// would repaint a whole travelled week as missed. So this is grouping, and
+    /// all it has to do is be TOTAL and DETERMINISTIC — a travel day can hold
+    /// two logs for one prayer, and a cell that picked `first` would flip to
+    /// the other one the moment anything reordered the array.
+    ///
+    /// The latest prayer wins, by `loggedAt` and then by id so the order never
+    /// depends on the array's.
+    static func latestLog(prayer: Prayer, dayKey: String, in logs: [PrayerLog]) -> PrayerLog? {
+        logs.lazy
+            .filter { $0.prayer == prayer && $0.dayKey == dayKey }
+            .max { a, b in
+                a.loggedAt == b.loggedAt ? a.id.uuidString < b.id.uuidString
+                                         : a.loggedAt < b.loggedAt
+            }
     }
 
     // MARK: - Weekly XP (circle scoreboard)

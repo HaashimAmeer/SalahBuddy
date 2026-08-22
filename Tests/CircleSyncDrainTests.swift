@@ -129,26 +129,35 @@ final class CircleSyncDrainTests: XCTestCase {
                           excused: [RemoteExcusedDay] = [],
                           recovery: [RemoteRecoveryWeek] = [],
                           challenges: [RemoteCustomChallenge] = [],
+                          alsoMembers: [UUID] = [],
                           lastSyncedAt: Date? = nil) -> CircleSnapshot {
-        CircleSnapshot(circle: circle(), me: me,
-                       profiles: [], members: [RemoteMember(circleID: circleID, userID: me)],
+        let members: [RemoteMember] = [RemoteMember(circleID: circleID, userID: me)]
+            + alsoMembers.map { RemoteMember(circleID: circleID, userID: $0) }
+        return CircleSnapshot(circle: circle(), me: me,
+                       profiles: [], members: members,
                        posts: posts, excusedDays: excused, recoveryWeeks: recovery,
                        challenges: challenges, lastSyncedAt: lastSyncedAt)
     }
 
     private func log(_ prayer: Prayer, dayKey: String, id: UUID = UUID(),
                      tier: LogTier = .onTime, photo: String? = nil,
-                     placeTag: PlaceTag? = nil, placeName: String? = nil) -> PrayerLog {
+                     placeTag: PlaceTag? = nil, placeName: String? = nil,
+                     utcOffset: Int? = -7 * 3600) -> PrayerLog {
+        // A REAL zone by default — see the note on CircleMirrorTests.log. With
+        // nil here the "zone rides along" assertion compared nil to nil.
         PrayerLog(id: id, prayer: prayer, dayKey: dayKey, loggedAt: stamp(0), tier: tier,
                   xp: GameEngine.prayerXP(tier: tier, jamaat: false),
                   photoFilename: photo, jamaat: false,
-                  placeTag: placeTag, placeName: placeName)
+                  placeTag: placeTag, placeName: placeName, utcOffset: utcOffset)
     }
 
     private func post(_ prayer: Prayer, dayKey: String, user: UUID,
-                      id: UUID = UUID(), tier: LogTier = .onTime) -> RemotePost {
+                      id: UUID = UUID(), tier: LogTier = .onTime,
+                      utcOffset: Int? = nil, at: Date? = nil,
+                      photoPath: String? = nil) -> RemotePost {
         RemotePost(id: id, userID: user, circleID: circleID, dayKey: dayKey,
-                   prayer: prayer, tier: tier, loggedAt: stamp(0))
+                   prayer: prayer, tier: tier, loggedAt: at ?? stamp(0),
+                   photoPath: photoPath, utcOffset: utcOffset)
     }
 
     /// A sync wired to a live circle, with the network replaced.
@@ -439,7 +448,7 @@ final class CircleSyncDrainTests: XCTestCase {
         XCTAssertEqual(posts[1].id, entry.id)
 
         let paths: [String] = transport.sent.compactMap { (op: CircleOp) -> String? in
-            if case .uploadPhoto(_, _, _, _, let path) = op { return path }
+            if case .uploadPhoto(_, _, _, _, _, let path) = op { return path }
             return nil
         }
         XCTAssertEqual(paths.count, 2)
@@ -473,10 +482,13 @@ final class CircleSyncDrainTests: XCTestCase {
         let merged: CircleSnapshot = CircleSync.merged(base, delta: page)
 
         XCTAssertEqual(merged.posts.count, 3)
-        XCTAssertEqual(merged.post(userID: me, dayKey: monday, prayer: .fajr)?.tier, .onTime)
+        XCTAssertEqual(merged.post(userID: me, dayKey: monday, prayer: .fajr,
+                                   asOf: .distantFuture)?.tier, .onTime)
         // The row nobody mentioned is exactly as it was.
-        XCTAssertEqual(merged.post(userID: friend, dayKey: monday, prayer: .dhuhr), theirs)
-        XCTAssertNotNil(merged.post(userID: friend, dayKey: monday, prayer: .asr))
+        XCTAssertEqual(merged.post(userID: friend, dayKey: monday, prayer: .dhuhr,
+                                   asOf: .distantFuture), theirs)
+        XCTAssertNotNil(merged.post(userID: friend, dayKey: monday, prayer: .asr,
+                                    asOf: .distantFuture))
     }
 
     func testADeltaThatMentionsNothingLeavesTheMirrorAlone() {
@@ -498,6 +510,182 @@ final class CircleSyncDrainTests: XCTestCase {
         let merged: CircleSnapshot = CircleSync.merged(base, delta: CircleSyncPage(posts: [new]))
         XCTAssertEqual(merged.posts.count, 1)
         XCTAssertEqual(merged.posts.first?.id, new.id)
+    }
+
+    func testTwoSameDayFajrsFromDifferentZonesBothSurviveTheMerge() {
+        // v4: the server's uniqueness key gained utc_offset (migration
+        // 20260822000300) because a long-haul flight makes two genuinely
+        // different prayers share one day_key. `slotKey` mirrors that key, so
+        // the mirror has to hold both rows — collapsing them here would drop a
+        // prayer that the database kept.
+        let mumbai: RemotePost = post(.fajr, dayKey: monday, user: friend,
+                                      id: UUID(), utcOffset: 5 * 3600 + 1800)
+        let seattle: RemotePost = post(.fajr, dayKey: monday, user: friend,
+                                       id: UUID(), utcOffset: -7 * 3600)
+        let base: CircleSnapshot = snapshot(posts: [mumbai])
+
+        let merged: CircleSnapshot = CircleSync.merged(base, delta: CircleSyncPage(posts: [seattle]))
+        XCTAssertEqual(merged.posts.count, 2, "two zones, two prayers, two rows")
+        XCTAssertEqual(Set(merged.posts.map(\.id)), [mumbai.id, seattle.id])
+    }
+
+    func testARelogInTheSameZoneStillCollapses() {
+        // The other half of the same rule: an undo-and-relog of one prayer in
+        // one place is still ONE row on the server and must be one here. The
+        // traveller's exemption is not a licence to draw a cell twice.
+        let zone: Int = -7 * 3600
+        let old: RemotePost = post(.maghrib, dayKey: monday, user: friend,
+                                   id: UUID(), tier: .lastCall, utcOffset: zone)
+        let new: RemotePost = post(.maghrib, dayKey: monday, user: friend,
+                                   id: UUID(), tier: .onTime, utcOffset: zone)
+        let base: CircleSnapshot = snapshot(posts: [old])
+
+        let merged: CircleSnapshot = CircleSync.merged(base, delta: CircleSyncPage(posts: [new]))
+        XCTAssertEqual(merged.posts.count, 1)
+        XCTAssertEqual(merged.posts.first?.id, new.id)
+    }
+
+    func testZonelessLegacyPostsStillCollapseIntoOneSlot() {
+        // `slotKey`'s spelling of the constraint's NULLS NOT DISTINCT. Every
+        // post written before 20260822000200 has no offset; if "no offset"
+        // rendered as something unique per row, all of history would stop
+        // deduping at once.
+        let old: RemotePost = post(.asr, dayKey: monday, user: friend, id: UUID(), tier: .lastCall)
+        let new: RemotePost = post(.asr, dayKey: monday, user: friend, id: UUID(), tier: .onTime)
+        let merged: CircleSnapshot = CircleSync.merged(snapshot(posts: [old]),
+                                                       delta: CircleSyncPage(posts: [new]))
+        XCTAssertEqual(merged.posts.count, 1)
+        XCTAssertEqual(merged.posts.first?.id, new.id)
+
+        // ...and a zoneless row is a WILDCARD, not a third zone: a zoned row for
+        // the same prayer DISPLACES it rather than sitting beside it.
+        //
+        // This is the pair the v4 rollout produces on its own — one device on
+        // an old build writes the zoneless row, the same account's second
+        // device writes the zoned one — and it is one prayer, not two. Left
+        // side by side, no later delta could displace either (their slot keys
+        // differ), `CircleSnapshot.prayerLogs` fed both into `GameEngine`, and
+        // that member's weekly score read a whole prayer high on every other
+        // device in the circle. 20260822000400 refuses the pair server-side;
+        // this is the mirror agreeing.
+        let zoned: RemotePost = post(.asr, dayKey: monday, user: friend,
+                                     id: UUID(), utcOffset: -7 * 3600)
+        let healed: CircleSnapshot = CircleSync.merged(merged, delta: CircleSyncPage(posts: [zoned]))
+        XCTAssertEqual(healed.posts.count, 1, "a zoneless post matches every zone")
+        XCTAssertEqual(healed.posts.first?.id, zoned.id, "incoming is the server, and it wins")
+
+        // And the other way round: a zoneless row arriving over a zoned one is
+        // still the same prayer. Symmetry matters — whichever order the two
+        // devices reach this mirror in, it must settle on one row.
+        let backwards: CircleSnapshot = CircleSync.merged(
+            snapshot(posts: [zoned]), delta: CircleSyncPage(posts: [old]))
+        XCTAssertEqual(backwards.posts.count, 1)
+        XCTAssertEqual(backwards.posts.first?.id, old.id)
+    }
+
+    // MARK: One member, one cell, two prayers
+
+    /// A traveller's slot holds two rows, and the cell drawing it must pick one
+    /// BY A RULE rather than by array order.
+    ///
+    /// Maghrib in London at 20:00 BST, a flight, Maghrib in New York at 19:45
+    /// EDT on the same local date. Both rows are real and both survive. The
+    /// lookup used to take `first`, so when a photo patch bumped the London
+    /// row's `updated_at`, the next delta re-appended it at the END of the
+    /// array and the cell silently switched to the other prayer's photo, tier
+    /// and time — with nobody touching anything.
+    func testATravellersCellPicksTheLatestPrayerThatHasHappened() {
+        let london = post(.maghrib, dayKey: monday, user: friend, id: UUID(),
+                          tier: .onTime, utcOffset: 3600, at: stamp(0),
+                          photoPath: "c/u/london.jpg")
+        let newYork = post(.maghrib, dayKey: monday, user: friend, id: UUID(),
+                           tier: .lastCall, utcOffset: -4 * 3600, at: stamp(5 * 3600),
+                           photoPath: "c/u/newyork.jpg")
+        let now = stamp(6 * 3600)
+
+        for order in [[london, newYork], [newYork, london]] {
+            let mirror: CircleSnapshot = snapshot(posts: order, alsoMembers: [friend])
+            XCTAssertEqual(mirror.post(userID: friend, dayKey: monday, prayer: .maghrib,
+                                       asOf: now)?.id,
+                           newYork.id,
+                           "the latest prayer that has actually happened, whatever the array order")
+            XCTAssertEqual(mirror.posts(userID: friend, dayKey: monday, prayer: .maghrib)
+                             .map(\.id),
+                           [london.id, newYork.id],
+                           "and the slot itself is ordered by the data, not by the array")
+
+            // The tile and the photograph behind it are resolved at the same
+            // instant by the same rule, so a cell can never show one prayer's
+            // tier above the other one's picture.
+            let source = RemoteCircleDataSource(snapshot: mirror)
+            let (state, _) = source.entry(forMember: friend.uuidString, prayer: .maghrib,
+                                          dayKey: monday, window: nil, now: now)
+            guard case .posted(_, let tier, let at) = state else {
+                return XCTFail("expected a posted square")
+            }
+            XCTAssertEqual(tier, newYork.tier)
+            XCTAssertEqual(at, newYork.loggedAt)
+            XCTAssertEqual(source.photoPath(forMember: friend.uuidString, prayer: .maghrib,
+                                            dayKey: monday, asOf: now),
+                           newYork.photoPath)
+        }
+    }
+
+    /// The cell only ever moves FORWARD in time. Before the second prayer's
+    /// `loggedAt` arrives, the square is still the first one's — it must not
+    /// jump ahead to a prayer that has not happened yet, and it must not fall
+    /// back to "missed" either.
+    func testACellDoesNotJumpAheadToAPrayerThatHasNotHappenedYet() {
+        let london = post(.maghrib, dayKey: monday, user: friend, id: UUID(),
+                          tier: .onTime, utcOffset: 3600, at: stamp(0))
+        let newYork = post(.maghrib, dayKey: monday, user: friend, id: UUID(),
+                           tier: .lastCall, utcOffset: -4 * 3600, at: stamp(5 * 3600))
+        let mirror: CircleSnapshot = snapshot(posts: [newYork, london],
+                                              alsoMembers: [friend])
+
+        XCTAssertEqual(mirror.post(userID: friend, dayKey: monday, prayer: .maghrib,
+                                   asOf: stamp(3600))?.id, london.id)
+        XCTAssertEqual(mirror.post(userID: friend, dayKey: monday, prayer: .maghrib,
+                                   asOf: stamp(5 * 3600))?.id, newYork.id)
+
+        // Nothing has arrived yet: the earliest row is handed back so the
+        // caller can hold the square rather than flashing "missed".
+        XCTAssertEqual(mirror.post(userID: friend, dayKey: monday, prayer: .maghrib,
+                                   asOf: stamp(-3600))?.id, london.id)
+        let source = RemoteCircleDataSource(snapshot: mirror)
+        XCTAssertEqual(source.cell(forMember: friend.uuidString, prayer: .maghrib,
+                                   dayKey: monday, window: nil, now: stamp(-3600)),
+                       .future, "held, not flashed as missed")
+        // ...and once the first prayer has landed the cell is ITS tier, not the
+        // one still in the future — proof the assertion above is not passing
+        // because the member is invisible.
+        XCTAssertEqual(source.cell(forMember: friend.uuidString, prayer: .maghrib,
+                                   dayKey: monday, window: nil, now: stamp(3600)),
+                       .inWindow(london.tier))
+        XCTAssertEqual(source.cell(forMember: friend.uuidString, prayer: .maghrib,
+                                   dayKey: monday, window: nil, now: stamp(5 * 3600)),
+                       .inWindow(newYork.tier))
+    }
+
+    /// Two rows with two DIFFERENT real zones are two prayers and both score.
+    /// A zoneless row beside a zoned one is ONE prayer written twice and must
+    /// not — that pair is what inflated a member's weekly total by a whole
+    /// prayer on everybody else's device.
+    func testOnlyGenuinelyDifferentZonesScoreTwice() {
+        let mumbai: Int = 5 * 3600 + 1800
+        let both: CircleSnapshot = snapshot(posts: [
+            post(.fajr, dayKey: monday, user: friend, id: UUID(), utcOffset: mumbai),
+            post(.fajr, dayKey: monday, user: friend, id: UUID(), utcOffset: -7 * 3600),
+        ])
+        XCTAssertEqual(both.prayerLogs(userID: friend).count, 2,
+                       "two real prayers, hours apart, sharing a calendar date")
+
+        let legacyPlusZoned: CircleSnapshot = CircleSync.merged(
+            snapshot(posts: [post(.fajr, dayKey: monday, user: friend, id: UUID())]),
+            delta: CircleSyncPage(posts: [post(.fajr, dayKey: monday, user: friend,
+                                               id: UUID(), utcOffset: -7 * 3600)]))
+        XCTAssertEqual(legacyPlusZoned.prayerLogs(userID: friend).count, 1,
+                       "a zoneless row matches every zone — it cannot also be a second prayer")
     }
 
     func testFullPullRemovesRowsThatVanishedServerSide() {
@@ -728,16 +916,17 @@ final class CircleSyncDrainTests: XCTestCase {
         XCTAssertEqual(expected,
                        "\(circleID.uuidString.lowercased())/\(me.uuidString.lowercased())/"
                        + "\(entry.id.uuidString.lowercased()).jpg")
-        if case .uploadPhoto(let postID, let dayKey, let prayer,
+        if case .uploadPhoto(let postID, let dayKey, let prayer, let utcOffset,
                             let filename, let path) = sync.outbox.items[1].op {
             XCTAssertEqual(postID, entry.id)
             XCTAssertEqual(filename, "m.jpg")
             XCTAssertEqual(path, expected)
             // The SLOT rides along, because `photo_path` is patched by
-            // (user, circle, day, prayer) and not by the row id — see
-            // `CircleOp.uploadPhoto`.
+            // (user, circle, day, prayer, utc_offset) and not by the row id —
+            // see `CircleOp.uploadPhoto`.
             XCTAssertEqual(dayKey, monday)
             XCTAssertEqual(prayer, .maghrib)
+            XCTAssertEqual(utcOffset, entry.utcOffset)
         } else {
             XCTFail("expected a photo upload")
         }
@@ -1048,7 +1237,7 @@ final class CircleSyncDrainTests: XCTestCase {
             return String(decoding: try encoder().encode(row), as: UTF8.self)
         case .upsertChallenge(let challenge):
             return String(decoding: try encoder().encode(challenge), as: UTF8.self)
-        case .uploadPhoto(_, _, _, _, let path):
+        case .uploadPhoto(_, _, _, _, _, let path):
             return path
         case .deletePost, .deleteChallenge, .deletePhoto:
             return nil

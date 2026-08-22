@@ -254,7 +254,7 @@ struct PhotoSquare: View {
         guard let coords = AppState.gridEntryCoordinates(entry.id) else { return nil }
         let source: RemoteCircleDataSource = RemoteCircleDataSource(snapshot: circleMirror)
         let path: String? = source.photoPath(forMember: coords.memberID, prayer: coords.prayer,
-                                             dayKey: coords.dayKey)
+                                             dayKey: coords.dayKey, asOf: AppClock.now)
         // The `@State` half covers this frame; the book covers every other tile
         // and every render after it. Compared rather than assumed, so a
         // recycled cell now drawing a DIFFERENT photo is not hidden by the last
@@ -293,8 +293,11 @@ struct PhotoSquare: View {
         guard case .posted = entry.state else { return nil }
         guard let coords = AppState.gridEntryCoordinates(entry.id) else { return nil }
         guard let userID = UUID(uuidString: coords.memberID) else { return nil }
+        // The same instant the square itself was resolved at, so the report
+        // lands on the post the person is actually looking at.
         guard let post = circleMirror.post(userID: userID, dayKey: coords.dayKey,
-                                           prayer: coords.prayer) else { return nil }
+                                           prayer: coords.prayer,
+                                           asOf: AppClock.now) else { return nil }
         guard let path: String = post.photoPath, path != reportedPath else { return nil }
         guard PhotoReports.shared.visiblePath(path) != nil else { return nil }
         return post

@@ -153,13 +153,20 @@ reset role;
 --     RPC has to be closed to it explicitly — the project's default privileges
 --     on `public` hand out an EXPLICIT grant that a revoke aimed at PUBLIC does
 --     not remove.
+--
+--     The signature gained `p_utc_offset int` in 20260822000500 (the old
+--     three-argument function was dropped, not left beside it — two overloads
+--     differing by a defaulted trailing parameter make the calls above
+--     ambiguous). Everything this file asserts about reclaiming a token is
+--     unchanged; only the name the privilege is looked up under moved.
 do $$
 begin
-  if has_function_privilege('anon', 'public.register_device(text, text, boolean)', 'execute') then
+  if has_function_privilege('anon',
+                            'public.register_device(text, text, boolean, int)', 'execute') then
     raise exception 'anon can execute register_device';
   end if;
   if not has_function_privilege('authenticated',
-                                'public.register_device(text, text, boolean)', 'execute') then
+                                'public.register_device(text, text, boolean, int)', 'execute') then
     raise exception 'authenticated cannot execute register_device';
   end if;
 end $$;

@@ -204,10 +204,11 @@ struct RemotePost: Codable, Equatable, Sendable, Identifiable {
     var placeLabel: String?     // the rendered pill ("🏠 Home"), not the raw tag
     var photoPath: String?      // Storage path; nil once retention ages the photo out
     var travelCombined: Bool
-    /// v4: the poster's UTC offset in seconds. See `PrayerLog.utcOffset` —
-    /// captured now so a future cross-timezone day model has history, read by
-    /// nothing today. Inside the INSERT grant, so it encodes unconditionally;
-    /// this is not one of the mirror-only columns.
+    /// v4: the poster's UTC offset in seconds. See `PrayerLog.utcOffset` — part
+    /// of a post's identity since migration 20260822000300, which put it in the
+    /// `posts` unique key, and mirrored by `CircleSync.slotKey`. Inside the
+    /// INSERT grant, so it encodes unconditionally; this is not one of the
+    /// mirror-only columns.
     var utcOffset: Int?
 
     /// The SERVER's `updated_at`, decoded and never encoded (rule 2).

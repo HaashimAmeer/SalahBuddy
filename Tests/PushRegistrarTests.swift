@@ -407,6 +407,120 @@ final class PushRegistrarTests: XCTestCase {
         XCTAssertEqual(rig.transport.upserts.last?.notifyFriendActivity, false)
     }
 
+    // MARK: - The zone the device is standing in (v4 Phase 2, §6)
+
+    /// `notify` decides whether a post's `day_key` is still the recipient's
+    /// current local day, and the ONLY thing that tells it where a recipient is
+    /// standing is this column. A row without it is a member who gets a 5am
+    /// Mumbai Fajr at 4:30pm in Seattle.
+    func testTheZoneTravelsInTheDeviceRow() async {
+        let rig: Rig = await registeredRig()
+        XCTAssertEqual(rig.transport.upserts.first?.utcOffset, AppClock.utcOffsetSeconds)
+    }
+
+    /// The wire contract with `public.register_device(..., p_utc_offset int)`
+    /// (`20260822000500_device_utc_offset.sql`). Snake-cased params, all four
+    /// present — the three-argument overload was DROPPED by that migration, so
+    /// a body that omits the key is not a supported shape for this build.
+    func testTheRegisterParamsMatchTheRPCSignature() throws {
+        let device = RemoteDevice(userID: me, apnsToken: token,
+                                  environment: APNsEnvironment.production,
+                                  notifyFriendActivity: true,
+                                  utcOffset: -25_200)
+        let data: Data = try JSONEncoder().encode(device.registerParams)
+        let object = try JSONSerialization.jsonObject(with: data)
+        let body: [String: Any] = try XCTUnwrap(object as? [String: Any])
+        XCTAssertEqual(Set(body.keys),
+                       ["p_token", "p_environment", "p_friend_activity", "p_utc_offset"])
+        XCTAssertEqual(body["p_utc_offset"] as? Int, -25_200)
+    }
+
+    /// Seconds, signed, east-positive — the same unit and sign as
+    /// `posts.utc_offset` and `PrayerLog.utcOffset`. A half-hour zone survives
+    /// intact, because fifteen minutes of offset can decide which calendar day
+    /// a device is on and the server compares dates.
+    func testAHalfHourZoneIsCarriedExactly() throws {
+        let mumbai: Int = 5 * 3600 + 30 * 60
+        let device = RemoteDevice(userID: me, apnsToken: token,
+                                  environment: APNsEnvironment.production,
+                                  notifyFriendActivity: false, utcOffset: mumbai)
+        let data: Data = try JSONEncoder().encode(device.registerParams)
+        let object = try JSONSerialization.jsonObject(with: data)
+        let body: [String: Any] = try XCTUnwrap(object as? [String: Any])
+        XCTAssertEqual(body["p_utc_offset"] as? Int, 19_800)
+    }
+
+    /// The fingerprint is what decides whether a foreground costs a round trip.
+    /// The zone is the one field that changes when the PERSON changed nothing,
+    /// so it has to be in there — otherwise a traveller keeps their departure
+    /// offset until they happen to flip a setting.
+    func testTheFingerprintNoticesAZoneChange() {
+        func device(offset: Int) -> RemoteDevice {
+            RemoteDevice(userID: me, apnsToken: token,
+                         environment: APNsEnvironment.production,
+                         notifyFriendActivity: false, utcOffset: offset)
+        }
+        XCTAssertEqual(device(offset: -25_200).fingerprint, device(offset: -25_200).fingerprint)
+        XCTAssertNotEqual(device(offset: -25_200).fingerprint, device(offset: 19_800).fingerprint)
+        // UTC+0 is a real place, not a stand-in for "unknown", so it has to be
+        // a distinct fingerprint from every other zone.
+        XCTAssertNotEqual(device(offset: 0).fingerprint, device(offset: 3600).fingerprint)
+    }
+
+    /// The traveller, end to end: a fingerprint left behind by the departure
+    /// zone must NOT be mistaken for "the server already knows this".
+    ///
+    /// `refresh` runs on every foreground, which is the moment somebody who has
+    /// just landed opens the app — so this is the whole re-registration path,
+    /// and a stale offset on the server means the circle's pushes are filtered
+    /// away from a member who is wide awake.
+    func testLandingInANewZoneRewritesTheRow() async {
+        let rig: Rig = makeRig()
+        rig.system.status = .authorized
+        // What the last launch, half a world away, would have persisted.
+        let departure = RemoteDevice(userID: me, apnsToken: token,
+                                     environment: APNsEnvironment.current,
+                                     notifyFriendActivity: false,
+                                     utcOffset: AppClock.utcOffsetSeconds + 8 * 3600)
+        rig.system.stored = departure.fingerprint
+
+        await rig.push.refresh(userID: me, hasCircle: true)
+        await rig.push.adoptDeviceToken(token)
+
+        XCTAssertEqual(rig.transport.upserts.count, 1)
+        XCTAssertEqual(rig.transport.upserts.last?.utcOffset, AppClock.utcOffsetSeconds)
+        XCTAssertTrue(rig.push.isRegistered)
+    }
+
+    /// ...and the converse, because the fingerprint's whole job is to make the
+    /// common case free: standing still costs no round trip.
+    func testStayingPutCostsNoRoundTrip() async {
+        let rig: Rig = makeRig()
+        rig.system.status = .authorized
+        let here = RemoteDevice(userID: me, apnsToken: token,
+                                environment: APNsEnvironment.current,
+                                notifyFriendActivity: false,
+                                utcOffset: AppClock.utcOffsetSeconds)
+        rig.system.stored = here.fingerprint
+
+        await rig.push.refresh(userID: me, hasCircle: true)
+        await rig.push.adoptDeviceToken(token)
+
+        XCTAssertTrue(rig.transport.upserts.isEmpty)
+        XCTAssertTrue(rig.push.isRegistered)
+    }
+
+    /// A settings flip is the other door into `writeDeviceRow`, and it must
+    /// carry the CURRENT zone rather than whatever was there at launch.
+    func testASettingsFlipCarriesTheCurrentZone() async {
+        let rig: Rig = await registeredRig()
+        rig.system.preferencesValue = PushPreferences(notificationsEnabled: true,
+                                                      friendActivity: true)
+        await rig.push.preferencesChanged()
+        XCTAssertEqual(rig.transport.upserts.count, 2)
+        XCTAssertEqual(rig.transport.upserts.last?.utcOffset, AppClock.utcOffsetSeconds)
+    }
+
     /// The Settings screen nests "Friend activity" under the master switch, so
     /// the master switch has to mean the same thing here.
     func testTheMasterSwitchGovernsFriendActivity() {

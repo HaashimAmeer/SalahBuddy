@@ -82,7 +82,11 @@ from (values
   ('00000000-0000-4000-a000-000000000004'::uuid, 'dhuhr'::public.prayer_kind,   'prayed'::public.log_tier,   interval '3 hours', false, null),
   ('00000000-0000-4000-a000-000000000002'::uuid, 'asr'::public.prayer_kind,     'onTime'::public.log_tier,   interval '1 hour',  true,  'Masjid')
 ) as post(user_id, prayer, tier, ago, jamaat, place)
-on conflict (user_id, circle_id, day_key, prayer) do nothing;
+-- The slot key gained utc_offset in 20260822000300 (a long-haul flight makes
+-- two different prayers share one day_key). These seed rows leave the offset
+-- NULL, and the constraint is NULLS NOT DISTINCT, so the second pass still
+-- collides with the first and this stays idempotent.
+on conflict (user_id, circle_id, day_key, prayer, utc_offset) do nothing;
 
 -- A resting day, synced as a bare flag. There is no reason column and there
 -- never will be — period/illness privacy is absolute (SPEC-V4 §3).

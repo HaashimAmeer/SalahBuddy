@@ -40,8 +40,15 @@ enum CircleOp: Codable, Equatable, Sendable {
     /// sweep could never collect it and a private photo stayed readable by the
     /// whole circle forever (§4). Patching by the slot lands on whichever row
     /// won it, and the trigger tombstones whatever path it displaced.
+    ///
+    /// v4: the slot gained `utcOffset` when migration 20260822000300 put the
+    /// zone into the posts unique key — two same-date fajrs from either side of
+    /// a flight are two rows, and a zoneless patch would stamp one prayer's
+    /// photo onto both. `nil` means "don't narrow by zone", which is what a
+    /// queue item written before this build says and exactly the behaviour it
+    /// was written expecting.
     case uploadPhoto(postID: UUID, dayKey: String, prayer: Prayer,
-                     filename: String, path: String)
+                     utcOffset: Int?, filename: String, path: String)
     /// Retract an object that already reached Storage. Deleting the post ROW
     /// is not enough: the retention sweep enumerates paths from `posts`, so an
     /// object whose row is gone is never collected and stays readable by every
@@ -101,7 +108,7 @@ enum CircleOp: Codable, Equatable, Sendable {
             return CircleOp.upsertChallengeSignature(challenge.id)
         case .deleteChallenge(let challengeID):
             return "challenge.delete:\(challengeID)"
-        case .uploadPhoto(let postID, _, _, _, _):
+        case .uploadPhoto(let postID, _, _, _, _, _):
             return CircleOp.uploadPhotoSignature(postID)
         case .deletePhoto(let path):
             return "photo.delete:\(path)"
@@ -112,7 +119,7 @@ enum CircleOp: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case kind, post, postID, dayKey, prayer, excused, weekKey, xp
-        case challenge, challengeID, filename, path
+        case challenge, challengeID, filename, path, utcOffset
     }
 
     init(from decoder: Decoder) throws {
@@ -154,8 +161,14 @@ enum CircleOp: Codable, Equatable, Sendable {
             // would then be patched onto the wrong row.
             let dayKey = try c.decode(String.self, forKey: .dayKey)
             let prayer = try c.decode(Prayer.self, forKey: .prayer)
+            // The zone came later than the slot did, and unlike the slot it IS
+            // tolerated as absent: an item queued by the previous build has no
+            // answer, and "no answer" narrows nothing, which is precisely what
+            // that build did. Dropping the item instead would lose a prayer's
+            // photo over a filter that only ever matters mid-flight.
+            let utcOffset: Int? = (try? c.decodeIfPresent(Int.self, forKey: .utcOffset)) ?? nil
             self = .uploadPhoto(postID: postID, dayKey: dayKey, prayer: prayer,
-                                filename: filename, path: path)
+                                utcOffset: utcOffset, filename: filename, path: path)
         case .deletePhoto:
             let path = try c.decode(String.self, forKey: .path)
             self = .deletePhoto(path: path)
@@ -180,10 +193,12 @@ enum CircleOp: Codable, Equatable, Sendable {
             try c.encode(challenge, forKey: .challenge)
         case .deleteChallenge(let challengeID):
             try c.encode(challengeID, forKey: .challengeID)
-        case .uploadPhoto(let postID, let dayKey, let prayer, let filename, let path):
+        case .uploadPhoto(let postID, let dayKey, let prayer, let utcOffset,
+                          let filename, let path):
             try c.encode(postID, forKey: .postID)
             try c.encode(dayKey, forKey: .dayKey)
             try c.encode(prayer, forKey: .prayer)
+            try c.encodeIfPresent(utcOffset, forKey: .utcOffset)
             try c.encode(filename, forKey: .filename)
             try c.encode(path, forKey: .path)
         case .deletePhoto(let path):
@@ -368,7 +383,7 @@ struct CircleOutbox: Codable, Equatable, Sendable {
     }
 
     private static func photoPath(of op: CircleOp) -> String? {
-        guard case .uploadPhoto(_, _, _, _, let path) = op else { return nil }
+        guard case .uploadPhoto(_, _, _, _, _, let path) = op else { return nil }
         return path
     }
 

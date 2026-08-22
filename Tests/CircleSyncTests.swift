@@ -403,8 +403,10 @@ final class CircleSyncTests: XCTestCase {
         XCTAssertNil(snapshot.member(for: stranger))
 
         XCTAssertEqual(snapshot.posts(dayKey: monday, prayer: .fajr).count, 2)
-        XCTAssertEqual(snapshot.post(userID: userA, dayKey: monday, prayer: .isha)?.tier, .onTime)
-        XCTAssertNil(snapshot.post(userID: userB, dayKey: tuesday, prayer: .isha))
+        XCTAssertEqual(snapshot.post(userID: userA, dayKey: monday, prayer: .isha,
+                                     asOf: .distantFuture)?.tier, .onTime)
+        XCTAssertNil(snapshot.post(userID: userB, dayKey: tuesday, prayer: .isha,
+                                   asOf: .distantFuture))
         XCTAssertEqual(snapshot.prayerLogs(userID: userA, dayKeys: [tuesday]).count, 2)
     }
 
@@ -498,7 +500,7 @@ final class CircleSyncTests: XCTestCase {
     func testDeleteAlsoDropsTheQueuedPhotoUpload() {
         let outbox = outboxWith([
             .upsertPost(post()),
-            .uploadPhoto(postID: postID, dayKey: monday, prayer: .dhuhr, filename: "a.jpg", path: "c/u/a.jpg"),
+            .uploadPhoto(postID: postID, dayKey: monday, prayer: .dhuhr, utcOffset: nil, filename: "a.jpg", path: "c/u/a.jpg"),
             .deletePost(postID: postID),
         ])
         XCTAssertTrue(outbox.isEmpty, "a photo for a post that is going away is moot")
@@ -542,7 +544,7 @@ final class CircleSyncTests: XCTestCase {
         // retention sweep enumerates paths from `posts` — so it would never be
         // collected, and would stay readable by the whole circle (§4).
         let path = "c/u/a.jpg"
-        var outbox = outboxWith([.uploadPhoto(postID: postID, dayKey: monday, prayer: .dhuhr, filename: "a.jpg", path: path)])
+        var outbox = outboxWith([.uploadPhoto(postID: postID, dayKey: monday, prayer: .dhuhr, utcOffset: nil, filename: "a.jpg", path: path)])
         _ = outbox.checkout()
 
         outbox.enqueue(.deletePost(postID: postID), id: UUID(), at: stamp(5))
@@ -555,7 +557,7 @@ final class CircleSyncTests: XCTestCase {
     func testAQueuedButUnsentPhotoUploadNeedsNoRetraction() {
         // Nothing reached Storage, so dropping the upload is the whole fix —
         // a `.deletePhoto` here would 404 for no reason.
-        var outbox = outboxWith([.uploadPhoto(postID: postID, dayKey: monday, prayer: .dhuhr, filename: "a.jpg", path: "c/u/a.jpg")])
+        var outbox = outboxWith([.uploadPhoto(postID: postID, dayKey: monday, prayer: .dhuhr, utcOffset: nil, filename: "a.jpg", path: "c/u/a.jpg")])
         outbox.enqueue(.deletePost(postID: postID), id: UUID(), at: stamp(5))
         XCTAssertEqual(outbox.items.map { $0.op.kind }, [CircleOp.Kind.deletePost])
     }
@@ -621,13 +623,13 @@ final class CircleSyncTests: XCTestCase {
 
     func testRepeatedPhotoUploadForOnePostCollapses() {
         let outbox = outboxWith([
-            .uploadPhoto(postID: postID, dayKey: monday, prayer: .dhuhr, filename: "a.jpg", path: "c/u/a.jpg"),
-            .uploadPhoto(postID: postID, dayKey: monday, prayer: .dhuhr, filename: "b.jpg", path: "c/u/b.jpg"),
-            .uploadPhoto(postID: otherPostID, dayKey: monday, prayer: .asr, filename: "c.jpg", path: "c/u/c.jpg"),
+            .uploadPhoto(postID: postID, dayKey: monday, prayer: .dhuhr, utcOffset: nil, filename: "a.jpg", path: "c/u/a.jpg"),
+            .uploadPhoto(postID: postID, dayKey: monday, prayer: .dhuhr, utcOffset: nil, filename: "b.jpg", path: "c/u/b.jpg"),
+            .uploadPhoto(postID: otherPostID, dayKey: monday, prayer: .asr, utcOffset: nil, filename: "c.jpg", path: "c/u/c.jpg"),
         ])
         XCTAssertEqual(outbox.count, 2)
         XCTAssertEqual(outbox.peek?.op,
-                       CircleOp.uploadPhoto(postID: postID, dayKey: monday, prayer: .dhuhr, filename: "b.jpg", path: "c/u/b.jpg"))
+                       CircleOp.uploadPhoto(postID: postID, dayKey: monday, prayer: .dhuhr, utcOffset: nil, filename: "b.jpg", path: "c/u/b.jpg"))
     }
 
     func testALongOfflineStretchCollapsesToTheRealWork() {
@@ -650,7 +652,7 @@ final class CircleSyncTests: XCTestCase {
         let ids: [UUID] = (0..<4).map { _ in UUID() }
         let ops: [CircleOp] = [
             .upsertPost(post()),
-            .uploadPhoto(postID: postID, dayKey: monday, prayer: .dhuhr, filename: "a.jpg", path: "c/u/a.jpg"),
+            .uploadPhoto(postID: postID, dayKey: monday, prayer: .dhuhr, utcOffset: nil, filename: "a.jpg", path: "c/u/a.jpg"),
             .setExcused(dayKey: tuesday, excused: true),
             .setRecoveryWeek(weekKey: "2026-W24", xp: 30),
         ]
@@ -703,6 +705,87 @@ final class CircleSyncTests: XCTestCase {
 
         XCTAssertEqual(restored.count, 2)
         XCTAssertEqual(restored.items.map { $0.op.kind }, [CircleOp.Kind.deletePost, .setRecoveryWeek])
+    }
+
+    // MARK: - The slot repair has to land on the row that refused the insert
+
+    /// `scopedToSlot`'s zone predicate, spelled out. A write that matches zero
+    /// rows fails SILENTLY — PostgREST reports success — so this string is the
+    /// difference between repairing a post and stranding a JPEG in Storage with
+    /// no row pointing at it and nothing able to collect it (§4).
+    ///
+    /// It has to match the row's own zone OR a zoneless legacy one, because the
+    /// row that refuses a zoned insert is either a same-zone duplicate or a
+    /// pre-v4 row with no offset — and `utc_offset = -25200` is never true of
+    /// a NULL.
+    func testTheSlotRepairMatchesItsOwnZoneOrTheLegacyZonelessRow() {
+        XCTAssertEqual(SupabaseCircleTransport.zoneOrLegacyFilter(-25200),
+                       "utc_offset.eq.-25200,utc_offset.is.null")
+        XCTAssertEqual(SupabaseCircleTransport.zoneOrLegacyFilter(19800),
+                       "utc_offset.eq.19800,utc_offset.is.null")
+        // UTC is a real zone, not an absent one.
+        XCTAssertEqual(SupabaseCircleTransport.zoneOrLegacyFilter(0),
+                       "utc_offset.eq.0,utc_offset.is.null")
+    }
+
+    /// A `uploadPhoto` queued by a build older than this one has no zone, and
+    /// decoding must keep the item rather than drop a prayer's photo over a
+    /// filter that only matters mid-flight. nil means "don't narrow by zone",
+    /// which is exactly what that build did.
+    func testAPhotoUploadQueuedBeforeTheZoneExistedStillDecodes() throws {
+        let legacy = """
+        {"kind":"uploadPhoto","postID":"\(postID.uuidString)","dayKey":"\(monday)",
+         "prayer":"dhuhr","filename":"a.jpg","path":"c/u/a.jpg"}
+        """
+        let op = try decoder().decode(CircleOp.self, from: Data(legacy.utf8))
+        XCTAssertEqual(op, CircleOp.uploadPhoto(postID: postID, dayKey: monday, prayer: .dhuhr,
+                                                utcOffset: nil, filename: "a.jpg",
+                                                path: "c/u/a.jpg"))
+    }
+
+    /// ...and a zone that IS present survives the round trip, or a traveller's
+    /// second fajr would have its photo patched onto the first one's row.
+    func testAPhotoUploadCarriesItsZoneThroughTheQueue() throws {
+        let op = CircleOp.uploadPhoto(postID: postID, dayKey: monday, prayer: .dhuhr,
+                                      utcOffset: -25200, filename: "a.jpg", path: "c/u/a.jpg")
+        let round = try decoder().decode(CircleOp.self, from: encoder().encode(op))
+        XCTAssertEqual(round, op)
+    }
+
+    // MARK: - Last call
+
+    /// The reminder is suppressed by the prayer you PRAYED, not by the calendar
+    /// date. A traveller who prayed Asr on Mumbai time in the air and landed in
+    /// Seattle, where Asr's window is still ahead, is being offered the camera
+    /// for it — and used to be the only prayer of the day with no reminder.
+    func testLastCallSurvivesAZoneChangeOnTheSameDayKey() {
+        let mumbai = 5 * 3600 + 1800
+        let seattle = -7 * 3600
+        let inTheAir = PrayerLog(id: UUID(), prayer: .asr, dayKey: monday,
+                                 loggedAt: stamp(0), tier: .onTime, xp: LogTier.onTime.xp,
+                                 utcOffset: mumbai)
+
+        XCTAssertTrue(NotificationManager.needsLastCall(prayer: .asr, dayKey: monday,
+                                                        currentOffset: seattle,
+                                                        logs: [inTheAir]),
+                      "Seattle's Asr has not been prayed; it needs its reminder")
+        XCTAssertFalse(NotificationManager.needsLastCall(prayer: .asr, dayKey: monday,
+                                                         currentOffset: mumbai,
+                                                         logs: [inTheAir]),
+                       "and staying put still silences it")
+
+        // A pre-v4 log has no zone and matches anything, so nobody upgrading
+        // starts getting reminders for prayers they already logged.
+        let legacy = PrayerLog(id: UUID(), prayer: .asr, dayKey: monday, loggedAt: stamp(0),
+                               tier: .onTime, xp: LogTier.onTime.xp)
+        XCTAssertFalse(NotificationManager.needsLastCall(prayer: .asr, dayKey: monday,
+                                                         currentOffset: seattle,
+                                                         logs: [legacy]))
+        // A DST hour is not a flight.
+        let dst = PrayerLog(id: UUID(), prayer: .asr, dayKey: monday, loggedAt: stamp(0),
+                            tier: .onTime, xp: LogTier.onTime.xp, utcOffset: -8 * 3600)
+        XCTAssertFalse(NotificationManager.needsLastCall(prayer: .asr, dayKey: monday,
+                                                         currentOffset: seattle, logs: [dst]))
     }
 
     func testRepeatedFailureEventuallyDropsTheItemSoTheQueueDrains() {

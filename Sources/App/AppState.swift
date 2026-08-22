@@ -142,7 +142,8 @@ final class AppState: ObservableObject {
         guard let schedule = todaySchedule else { return 0 }
         return GameEngine.missedOutXP(logs: logs, schedule: schedule,
                                       now: AppClock.now, isExcused: isTodayExcused,
-                                      joinedAt: profile.joinedAt)
+                                      joinedAt: profile.joinedAt,
+                                      currentOffset: AppClock.utcOffsetSeconds)
     }
 
     /// Coordinates currently in use (device fix or fixed fallback).
@@ -175,7 +176,11 @@ final class AppState: ObservableObject {
             return .open(closesAt: prev.end)
         }
 
-        if let log = todayLogs.first(where: { $0.prayer == prayer }) {
+        // IDENTITY, not grouping: after a long-haul flight today's dayKey can
+        // hold the zone you left AND the zone you landed in, and only a log
+        // from THIS zone means "already prayed". `todayLogs` (grouping) stays
+        // as it is — the XP breakdown must still sum every log on the day.
+        if let log = currentInstanceLog(prayer: prayer, dayKey: todayKey) {
             return .logged(log.tier)
         }
         guard let window = todaySchedule?.window(for: prayer) else {
@@ -212,8 +217,71 @@ final class AppState: ObservableObject {
         return (window, todayKey)
     }
 
+    /// Has THIS instance of `prayer` on `dayKey` already been logged?
+    ///
+    /// v4 — PRAYER IDENTITY. `dayKey` stays the grouping key for a day and
+    /// nothing about scoring moves, but it is no longer the whole identity of a
+    /// prayer. Cross enough timezones and one calendar date holds two different
+    /// fajrs (see `GameEngine.isSamePrayerInstance`), so identity is
+    /// `(prayer, dayKey, zone)` and the zone is compared with tolerance: a
+    /// madhab change or a DST hour must never make a logged prayer look
+    /// unlogged, and a legacy log with no offset matches anything.
+    ///
+    /// Every caller of this asks an IDENTITY question — "may I log this?",
+    /// "is the CTA still live?", "can a late isha still land?". Callers asking
+    /// a GROUPING question ("what happened on this day?") use `hasAnyLog` or
+    /// go straight to `GameEngine`, and must not be routed through here.
     private func hasLog(prayer: Prayer, dayKey: String) -> Bool {
+        currentInstanceLog(prayer: prayer, dayKey: dayKey) != nil
+    }
+
+    /// The log for this prayer instance, if there is one. See `hasLog`.
+    /// The rule lives in `GameEngine` and the clock read lives here, which is
+    /// the usual division: the engine decides, orchestration supplies the now.
+    private func currentInstanceLog(prayer: Prayer, dayKey: String) -> PrayerLog? {
+        GameEngine.loggedInstance(prayer: prayer, dayKey: dayKey,
+                                  currentOffset: AppClock.utcOffsetSeconds, in: logs)
+    }
+
+    /// GROUPING: does this schedule day contain `prayer` at all, from any zone?
+    /// The question the Journey day sheet asks before offering a make-up — that
+    /// sheet lists a past day's prayers by dayKey alone, and a zone you are no
+    /// longer standing in is not a reason to offer to log one twice.
+    private func hasAnyLog(prayer: Prayer, dayKey: String) -> Bool {
         logs.contains { $0.prayer == prayer && $0.dayKey == dayKey }
+    }
+
+    /// Is `(prayer, dayKey)` the instance the device is LIVING IN right now?
+    ///
+    /// Identity only means anything against a zone you are actually standing
+    /// in. Today is that day; so — before fajr — is yesterday's still-open
+    /// isha, which is the one past-dated thing `status(of:)` also answers by
+    /// identity. Everything older is history: the zone the device is in today
+    /// has nothing to say about the zone Monday was lived in, and asking would
+    /// repaint a whole travelled week as missed.
+    private func isLiveInstance(prayer: Prayer, dayKey: String) -> Bool {
+        if dayKey == todayKey { return true }
+        // `targetWindow` is the one place that decides whether yesterday's isha
+        // is still the live block, so it is asked rather than re-derived.
+        guard prayer == .isha, dayKey == previousDayKey else { return false }
+        return targetWindow(for: .isha)?.dayKey == dayKey
+    }
+
+    /// The log a SQUARE draws for `(prayer, dayKey)` — the Today grid, the week
+    /// grid, a day sheet.
+    ///
+    /// v4: for the day you are standing in this is the IDENTITY lookup, so the
+    /// square sitting next to the camera CTA can never contradict
+    /// `status(of:)`. Before this, a traveller who prayed fajr in Mumbai and
+    /// landed in Seattle after Seattle's fajr closed saw the "Make up Fajr"
+    /// row and a posted photo for the same prayer at the same time, and the
+    /// inline make-up button was hidden by a cell that disagreed with it.
+    /// For a PAST day it is grouping, deterministically — see
+    /// `GameEngine.latestLog`.
+    private func cellLog(prayer: Prayer, dayKey: String) -> PrayerLog? {
+        GameEngine.cellLog(prayer: prayer, dayKey: dayKey,
+                           isLiveDay: isLiveInstance(prayer: prayer, dayKey: dayKey),
+                           currentOffset: AppClock.utcOffsetSeconds, in: logs)
     }
 
     // MARK: - Logging (v2)
@@ -471,7 +539,12 @@ final class AppState: ObservableObject {
     /// reconciled).
     func logPastMakeUp(_ prayer: Prayer, dayKey: String) {
         guard dayKey < todayKey,                                   // past days only
-              !hasLog(prayer: prayer, dayKey: dayKey),
+              // GROUPING on purpose (v4): the day sheet that offers this button
+              // shows one row per prayer per dayKey and hides it the moment ANY
+              // log exists, so the guard has to agree with what the user saw.
+              // The zone identity is unknowable for a past day anyway — the
+              // offset in hand is the EDIT's, not the day's.
+              !hasAnyLog(prayer: prayer, dayKey: dayKey),
               !isExcused(prayer: prayer, dayKey: dayKey) else { return }
         let xp = GameEngine.lateEditXP(dayKey: dayKey, todayKey: todayKey)
         // The offset of the EDIT, not of the day being edited — that day's
@@ -504,13 +577,18 @@ final class AppState: ObservableObject {
         // window (its hasLog check trips and it falls through to today), so
         // the yesterday-keyed log must be matched explicitly.
         if prayer == .isha { candidateDayKeys.insert(previousDayKey) }
-        guard let index = logs.lastIndex(where: { $0.prayer == prayer && candidateDayKeys.contains($0.dayKey) })
+        // IDENTITY (v4): undo takes back the prayer you are standing in, which
+        // on a travel day is not the only one on this dayKey. It picks through
+        // the SAME resolver `status(of:)` uses — see
+        // `GameEngine.loggedInstanceIndex` — because two logs can match at once
+        // and a tile that showed one while Undo deleted the other left the
+        // button looking dead and took the wrong XP with it.
+        guard let index = GameEngine.loggedInstanceIndex(
+            prayer: prayer, dayKeys: candidateDayKeys,
+            currentOffset: AppClock.utcOffsetSeconds,
+            preferredDayKey: dayKey, in: logs)
         else { return }
         let removed = logs[index]
-
-        let wasPerfect = GameEngine.isPerfectDay(logs: logs, dayKey: removed.dayKey,
-                                                 excusedDayKeys: profile.excusedDayKeys)
-        let wasComplete = GameEngine.isDayComplete(logs: logs, dayKey: removed.dayKey)
 
         logs.remove(at: index)
 
@@ -522,18 +600,14 @@ final class AppState: ObservableObject {
             PhotoStore.delete(photo)
         }
 
-        var newProfile = profile
-        newProfile.totalXP = max(0, newProfile.totalXP - removed.xp)   // includes any jamaat bonus
-        if wasPerfect {
-            newProfile.totalXP = max(0, newProfile.totalXP - GameEngine.perfectDayBonus)
-            newProfile.perfectDayCount = max(0, newProfile.perfectDayCount - 1)
-        }
-        if wasComplete {
-            newProfile = GameEngine.reverseStreakIncrement(on: newProfile, dayKey: removed.dayKey)
-        }
-        // Badges are intentionally NOT revoked on undo.
-
-        profile = newProfile
+        // All of undo's arithmetic, in `GameEngine` where scoring lives. It
+        // compares the day BEFORE against the day AFTER rather than assuming
+        // the removal broke it — on a travel day one prayer can be logged
+        // twice, so taking one back can leave the day just as perfect and just
+        // as complete as it was.
+        profile = GameEngine.profileAfterUndo(of: removed, from: profile,
+                                              remainingLogs: logs,
+                                              excusedDayKeys: profile.excusedDayKeys)
         persist()
         // v4 §3: undo DELETES the post. The outbox collapses this against a
         // create that never left the device, so undoing straight after logging
@@ -1025,7 +1099,7 @@ final class AppState: ObservableObject {
 
         let myState: GridEntryState
         var myPlaceLabel: String? = nil
-        if let myLog = logs.first(where: { $0.dayKey == dayKey && $0.prayer == prayer }) {
+        if let myLog = cellLog(prayer: prayer, dayKey: dayKey) {
             if myLog.tier.isInWindow {
                 let content: PostContent = myLog.photoFilename.map { .photo(filename: $0) }
                     ?? .illustration(seed: BuddySimulator.seed(name: "you", dayKey: dayKey, prayer: prayer))
@@ -1164,9 +1238,25 @@ final class AppState: ObservableObject {
         return rows
     }
 
+    /// YOUR square in the week grid.
+    ///
+    /// GROUPING, not identity — including for today, and unlike `cellLog`.
+    /// A week-grid cell answers "how did that DAY go", which is the same
+    /// question asked of every other member's row: those go through
+    /// `RemoteCircleDataSource.cell` -> `CircleSnapshot.post(...)`, which keys
+    /// on day_key alone. Answering your own row by identity made the grid
+    /// disagree with itself — fly Mumbai to Seattle and your fajr cell read
+    /// `.missed` while `weeklyXP` on the same screen counted its 30 XP and put
+    /// you higher on the scoreboard, and a circle-mate who took the identical
+    /// flight rendered `.posted` because their row took the other path.
+    ///
+    /// Identity still governs the TODAY screen (`gridEntries`, line ~1101),
+    /// where the question really is "can I log this one now" and the square
+    /// has to agree with the camera CTA beside it. Two different questions,
+    /// two different rules, and the grid is the day one.
     private func myCell(dayKey: String, prayer: Prayer,
                         window: PrayerWindow?, now: Date) -> GridCellState {
-        if let log = logs.first(where: { $0.dayKey == dayKey && $0.prayer == prayer }) {
+        if let log = GameEngine.latestLog(prayer: prayer, dayKey: dayKey, in: logs) {
             return log.tier.isInWindow ? .inWindow(log.tier) : .qada
         }
         if isExcused(prayer: prayer, dayKey: dayKey) { return .excused }

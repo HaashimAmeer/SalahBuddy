@@ -13,9 +13,11 @@ final class GameEngineTests: XCTestCase {
         return cal.date(from: c)!
     }
 
-    private func log(_ prayer: Prayer, _ tier: LogTier, dayKey: String) -> PrayerLog {
+    private func log(_ prayer: Prayer, _ tier: LogTier, dayKey: String,
+                     offset: Int? = nil) -> PrayerLog {
         PrayerLog(id: UUID(), prayer: prayer, dayKey: dayKey,
-                  loggedAt: Date(timeIntervalSince1970: 0), tier: tier, xp: tier.xp)
+                  loggedAt: Date(timeIntervalSince1970: 0), tier: tier, xp: tier.xp,
+                  utcOffset: offset)
     }
 
     private func fullDay(dayKey: String, tier: LogTier = .onTime) -> [PrayerLog] {
@@ -410,5 +412,549 @@ final class GameEngineTests: XCTestCase {
             excusedDayKeys: ["2026-08-20"],
             travelDayKeys: ["2026-08-21"])
         XCTAssertEqual(reconciled.streak, 5, "one excused, one travelled, neither breaks it")
+    }
+
+    // MARK: - Prayer identity (v4: dayKey groups a DAY, it does not name a PRAYER)
+
+    // The zones the whole feature is about. Seattle in August is UTC-7;
+    // Mumbai is UTC+5:30, twelve and a half hours away.
+    private var seattle: Int { -7 * 3600 }
+    private var mumbai: Int { 5 * 3600 + 1800 }
+
+    /// Row 1 of the table: same zone, delta 0. The overwhelmingly common case,
+    /// and the one that must not move a millimetre — a prayer logged where you
+    /// are standing is logged, and asking again gets the same answer.
+    func testSameZoneIsTheSamePrayerAndCannotBeDoubleLogged() {
+        XCTAssertTrue(GameEngine.isSamePrayerInstance(storedOffset: seattle,
+                                                      currentOffset: seattle))
+
+        let logs = [log(.fajr, .onTime, dayKey: "2026-08-22", offset: seattle)]
+        XCTAssertNotNil(GameEngine.loggedInstance(prayer: .fajr, dayKey: "2026-08-22",
+                                                  currentOffset: seattle, in: logs),
+                        "logging fajr twice at home is still a no-op")
+    }
+
+    /// Row 2: a calc-method or madhab change moves the WINDOW without moving
+    /// the zone, so identity must not be keyed on the window.
+    ///
+    /// The assertion has two halves on purpose. The first proves the premise is
+    /// real — switching to Hanafi genuinely shifts Asr by the better part of an
+    /// hour — and the second proves the identity rule is blind to it. Had we
+    /// used window-start as the identity, every Asr ever logged would have read
+    /// as unlogged the moment somebody changed a setting in Settings.
+    func testAMadhabChangeMovesTheWindowButNotThePrayer() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "America/Los_Angeles"))
+        let day = date(2026, 8, 22, 12, 0)
+
+        let shafi = try XCTUnwrap(PrayerTimeService.schedule(for: day, latitude: 47.6062,
+                                                             longitude: -122.3321,
+                                                             method: .northAmerica, madhab: .shafi,
+                                                             calendar: calendar))
+        let hanafi = try XCTUnwrap(PrayerTimeService.schedule(for: day, latitude: 47.6062,
+                                                              longitude: -122.3321,
+                                                              method: .northAmerica, madhab: .hanafi,
+                                                              calendar: calendar))
+        let shafiAsr = try XCTUnwrap(shafi.window(for: .asr)).start
+        let hanafiAsr = try XCTUnwrap(hanafi.window(for: .asr)).start
+        XCTAssertGreaterThan(hanafiAsr.timeIntervalSince(shafiAsr), 30 * 60,
+                             "premise: the madhab really does move Asr by most of an hour")
+
+        // The zone did not move, so the prayer did not change.
+        XCTAssertTrue(GameEngine.isSamePrayerInstance(storedOffset: seattle,
+                                                      currentOffset: seattle))
+        let logs = [log(.asr, .onTime, dayKey: "2026-08-22", offset: seattle)]
+        XCTAssertNotNil(GameEngine.loggedInstance(prayer: .asr, dayKey: "2026-08-22",
+                                                  currentOffset: seattle, in: logs),
+                        "a settings change must never un-log a prayer somebody prayed")
+    }
+
+    /// Row 3: DST. Exactly one hour, mid-window, to every user in a region at
+    /// once. Tolerance rather than equality exists for this: on an equality
+    /// rule the clocks going back would re-open every prayer logged that day
+    /// and hand out a second helping of XP nationwide.
+    func testADSTShiftLeavesThePrayerLogged() {
+        XCTAssertTrue(GameEngine.isSamePrayerInstance(storedOffset: -8 * 3600,
+                                                      currentOffset: -7 * 3600))
+        XCTAssertTrue(GameEngine.isSamePrayerInstance(storedOffset: -7 * 3600,
+                                                      currentOffset: -8 * 3600))
+
+        let logs = [log(.maghrib, .onTime, dayKey: "2026-11-01", offset: -7 * 3600)]
+        XCTAssertNotNil(GameEngine.loggedInstance(prayer: .maghrib, dayKey: "2026-11-01",
+                                                  currentOffset: -8 * 3600, in: logs))
+    }
+
+    /// Row 4: the case the whole change exists for. Mumbai's fajr and Seattle's
+    /// fajr on 2026-08-22 share a calendar date and are two different prayers,
+    /// prayed hours apart. The second one must be loggable.
+    func testALongHaulFlightMakesTheSecondFajrANewPrayer() {
+        XCTAssertFalse(GameEngine.isSamePrayerInstance(storedOffset: mumbai,
+                                                       currentOffset: seattle))
+        XCTAssertFalse(GameEngine.isSamePrayerInstance(storedOffset: seattle,
+                                                       currentOffset: mumbai))
+
+        let logs = [log(.fajr, .onTime, dayKey: "2026-08-22", offset: mumbai)]
+        XCTAssertNil(GameEngine.loggedInstance(prayer: .fajr, dayKey: "2026-08-22",
+                                               currentOffset: seattle, in: logs),
+                     "landed in Seattle, fajr came round again, and it must be loggable")
+        // ...while the prayer you actually prayed in Mumbai is still found from
+        // Mumbai. Neither zone erases the other.
+        XCTAssertNotNil(GameEngine.loggedInstance(prayer: .fajr, dayKey: "2026-08-22",
+                                                  currentOffset: mumbai, in: logs))
+    }
+
+    /// The boundary, shared with `isTravelShift` and deliberately so. Under
+    /// three hours is the same prayer; three hours exactly is a new one.
+    func testTheIdentityThresholdIsTheTravelThreshold() {
+        let below = GameEngine.travelOffsetThreshold - 1
+        XCTAssertTrue(GameEngine.isSamePrayerInstance(storedOffset: 0, currentOffset: below))
+        XCTAssertTrue(GameEngine.isSamePrayerInstance(storedOffset: 0, currentOffset: -below))
+        XCTAssertFalse(GameEngine.isSamePrayerInstance(storedOffset: 0,
+                                                       currentOffset: GameEngine.travelOffsetThreshold))
+        XCTAssertFalse(GameEngine.isSamePrayerInstance(storedOffset: 0,
+                                                       currentOffset: -GameEngine.travelOffsetThreshold))
+    }
+
+    /// Row 5: every log written before v4 has no offset. Those match ANYTHING,
+    /// which is the conservative direction — old history can lose a duplicate
+    /// it should have been allowed, but it can never GAIN one it should not.
+    func testALegacyLogWithNoOffsetMatchesEveryZone() {
+        for zone in [seattle, mumbai, 0, 14 * 3600] {
+            XCTAssertTrue(GameEngine.isSamePrayerInstance(storedOffset: nil, currentOffset: zone),
+                          "a pre-v4 log has no zone to disagree with")
+        }
+        let legacy = [log(.isha, .prayed, dayKey: "2026-01-04")]     // helper defaults to nil
+        XCTAssertNotNil(GameEngine.loggedInstance(prayer: .isha, dayKey: "2026-01-04",
+                                                  currentOffset: mumbai, in: legacy))
+        XCTAssertNotNil(GameEngine.loggedInstance(prayer: .isha, dayKey: "2026-01-04",
+                                                  currentOffset: seattle, in: legacy))
+    }
+
+    /// The property that matters more than any of the above: for somebody who
+    /// never changes zone, identity answers EXACTLY what the old dayKey-only
+    /// lookup answered — for every prayer, on a full day, with offsets present
+    /// and with the nil offsets of a pre-v4 save.
+    func testStayingPutBehavesExactlyAsBefore() {
+        for offset: Int? in [nil, seattle, mumbai, 0] {
+            let logs: [PrayerLog] = Prayer.allCases.map {
+                log($0, .onTime, dayKey: "2026-08-22", offset: offset)
+            }
+            let current: Int = offset ?? seattle
+            for prayer in Prayer.allCases {
+                let identity = GameEngine.loggedInstance(prayer: prayer, dayKey: "2026-08-22",
+                                                         currentOffset: current, in: logs)
+                let dayKeyOnly = logs.first { $0.prayer == prayer && $0.dayKey == "2026-08-22" }
+                XCTAssertEqual(identity?.id, dayKeyOnly?.id,
+                               "same zone: identity must be the old lookup, exactly")
+                XCTAssertNil(GameEngine.loggedInstance(prayer: prayer, dayKey: "2026-08-21",
+                                                       currentOffset: current, in: logs),
+                             "and it must not reach into another day")
+            }
+        }
+    }
+
+    /// A six-prayer day: two fajrs on one calendar date, because the flight
+    /// landed before the second one. dayKey stays the GROUPING key, so all six
+    /// belong to one day — one completion, one streak increment, and XP summed
+    /// over every one of them.
+    func testASixPrayerTravelDayIsStillOneDay() {
+        let key = "2026-08-22"
+        var logs: [PrayerLog] = [log(.fajr, .onTime, dayKey: key, offset: mumbai)]
+        logs.append(log(.fajr, .onTime, dayKey: key, offset: seattle))
+        for prayer in Prayer.allCases where prayer != .fajr {
+            logs.append(log(prayer, .onTime, dayKey: key, offset: seattle))
+        }
+        XCTAssertEqual(logs.count, 6)
+
+        // ONE day, and a complete one — grouping is untouched by the extra log.
+        XCTAssertTrue(GameEngine.isDayComplete(logs: logs, dayKey: key))
+        XCTAssertTrue(GameEngine.isPerfectDay(logs: logs, dayKey: key))
+
+        // XP counts all six prayers, plus the single perfect-day bonus. The
+        // sixth prayer was really prayed; it is not a duplicate to be swallowed.
+        XCTAssertEqual(GameEngine.xp(forDay: key, logs: logs),
+                       6 * LogTier.onTime.xp + GameEngine.perfectDayBonus)
+
+        // ONE streak increment, no matter how many times completion is noticed.
+        var profile = UserProfile.fresh(now: Date(timeIntervalSince1970: 0))
+        profile.streak = 4
+        profile = GameEngine.applyStreakIncrement(to: profile, dayKey: key)
+        profile = GameEngine.applyStreakIncrement(to: profile, dayKey: key)
+        XCTAssertEqual(profile.streak, 5, "six prayers, one day, one increment")
+
+        // And the identity rule keeps the two fajrs apart: each zone sees its own.
+        let fromMumbai = GameEngine.loggedInstance(prayer: .fajr, dayKey: key,
+                                                   currentOffset: mumbai, in: logs)
+        let fromSeattle = GameEngine.loggedInstance(prayer: .fajr, dayKey: key,
+                                                    currentOffset: seattle, in: logs)
+        XCTAssertNotNil(fromMumbai)
+        XCTAssertNotNil(fromSeattle)
+        XCTAssertNotEqual(fromMumbai?.id, fromSeattle?.id)
+    }
+
+    // MARK: - One log, one answer (the resolver every caller shares)
+
+    /// Two logs can match at once, and every caller must be told the SAME one.
+    ///
+    /// Tolerance is not equality, so two logs three to six hours of zone apart
+    /// can BOTH sit within three hours of where the device is standing now:
+    /// fajr in Seattle (-07:00) and fajr in New York (-04:00), asked from
+    /// Chicago (-05:00). Before this, `status(of:)` took `first` and `undoLog`
+    /// took `lastIndex` — the tile rendered Seattle's onTime while Undo deleted
+    /// New York's qada, so the button looked dead, a friend's post vanished,
+    /// and 5 XP came off a tile that was advertising 30.
+    func testTwoMatchingLogsResolveToOneAndTheSameLog() {
+        let key = "2026-08-22"
+        let chicago = -5 * 3600
+        let seattleFajr = log(.fajr, .onTime, dayKey: key, offset: -7 * 3600)
+        let newYorkFajr = log(.fajr, .qada, dayKey: key, offset: -4 * 3600)
+        let logs = [seattleFajr, newYorkFajr]
+
+        // Premise: both really do match. If this stops being true the test
+        // below is proving nothing.
+        XCTAssertTrue(GameEngine.isSamePrayerInstance(storedOffset: seattleFajr.utcOffset,
+                                                      currentOffset: chicago))
+        XCTAssertTrue(GameEngine.isSamePrayerInstance(storedOffset: newYorkFajr.utcOffset,
+                                                      currentOffset: chicago))
+
+        // The closest zone wins — 1h away beats 2h away.
+        let shown = GameEngine.loggedInstance(prayer: .fajr, dayKey: key,
+                                              currentOffset: chicago, in: logs)
+        XCTAssertEqual(shown?.id, newYorkFajr.id)
+
+        // And undo's index resolves to that very log, not to whichever the
+        // array happens to end with.
+        let index = GameEngine.loggedInstanceIndex(prayer: .fajr, dayKeys: [key],
+                                                   currentOffset: chicago, in: logs)
+        XCTAssertEqual(index.map { logs[$0].id }, shown?.id,
+                       "what the tile shows is what Undo takes back")
+
+        // Reversing the array must not change either answer.
+        let reversed: [PrayerLog] = logs.reversed()
+        XCTAssertEqual(GameEngine.loggedInstance(prayer: .fajr, dayKey: key,
+                                                 currentOffset: chicago, in: reversed)?.id,
+                       newYorkFajr.id)
+    }
+
+    /// A real zone beats a zoneless legacy log. "Matches anything"
+    /// distinguishes nothing, so it can only ever be the fallback.
+    func testARealZoneOutranksAZonelessLegacyLog() {
+        let key = "2026-08-22"
+        let legacy = log(.asr, .qada, dayKey: key)                    // no offset
+        let here = log(.asr, .onTime, dayKey: key, offset: seattle)
+        for order in [[legacy, here], [here, legacy]] {
+            XCTAssertEqual(GameEngine.loggedInstance(prayer: .asr, dayKey: key,
+                                                     currentOffset: seattle, in: order)?.id,
+                           here.id, "the log that knows where it was wins")
+        }
+        // On its own, the legacy log is still the answer — it matches anything.
+        XCTAssertEqual(GameEngine.loggedInstance(prayer: .asr, dayKey: key,
+                                                 currentOffset: mumbai, in: [legacy])?.id,
+                       legacy.id)
+    }
+
+    /// Undo reaches yesterday's key for a late isha (§6.8), and it has to do so
+    /// through the same resolver — that is the only reason `dayKeys` is a set.
+    func testUndoResolvesAnAfterMidnightIshaOnYesterdaysKey() {
+        let yesterday = "2026-08-21"
+        let entry = log(.isha, .onTime, dayKey: yesterday, offset: seattle)
+        let index = GameEngine.loggedInstanceIndex(prayer: .isha,
+                                                   dayKeys: [yesterday, "2026-08-22"],
+                                                   currentOffset: seattle, in: [entry])
+        XCTAssertEqual(index, 0)
+        // ...and a zone half a world away is somebody else's isha.
+        XCTAssertNil(GameEngine.loggedInstanceIndex(prayer: .isha,
+                                                    dayKeys: [yesterday, "2026-08-22"],
+                                                    currentOffset: mumbai, in: [entry]))
+    }
+
+    // MARK: - Undo (bonuses come off on a transition, not on a removal)
+
+    /// The traveller's six-prayer day, undone. All five prayers were logged in
+    /// window and the perfect day is banked; a sixth (the other side of a
+    /// flight) is logged and then taken back. The day is STILL perfect and
+    /// STILL complete, so nothing but that log's own XP may come off.
+    func testUndoingADuplicateLeavesAStillPerfectDayIntact() {
+        let key = "2026-08-22"
+        var logs: [PrayerLog] = Prayer.allCases.map {
+            log($0, .onTime, dayKey: key, offset: seattle)
+        }
+        let duplicate = log(.dhuhr, .onTime, dayKey: key, offset: -4 * 3600)
+        logs.append(duplicate)
+
+        var profile = UserProfile.fresh(now: Date(timeIntervalSince1970: 0))
+        profile.totalXP = 6 * LogTier.onTime.xp + GameEngine.perfectDayBonus
+        profile.perfectDayCount = 1
+        profile.streak = 5
+        profile.longestStreak = 5
+        profile.lastStreakDayKey = key
+
+        let remaining: [PrayerLog] = logs.filter { $0.id != duplicate.id }
+        let after = GameEngine.profileAfterUndo(of: duplicate, from: profile,
+                                                remainingLogs: remaining)
+
+        XCTAssertEqual(after.totalXP, 5 * LogTier.onTime.xp + GameEngine.perfectDayBonus,
+                       "only the undone prayer's own XP comes off")
+        XCTAssertEqual(after.perfectDayCount, 1, "the day is still perfect")
+        XCTAssertEqual(after.streak, 5, "the day is still complete")
+        XCTAssertEqual(after.lastStreakDayKey, key)
+    }
+
+    /// The other half: undoing the prayer that really does break the day still
+    /// costs the bonus and reverses the increment, exactly once.
+    func testUndoingTheLastCopyOfAPrayerStillBreaksTheDay() throws {
+        let key = "2026-08-22"
+        let full: [PrayerLog] = Prayer.allCases.map {
+            log($0, .onTime, dayKey: key, offset: seattle)
+        }
+        var profile = UserProfile.fresh(now: Date(timeIntervalSince1970: 0))
+        profile.totalXP = 5 * LogTier.onTime.xp + GameEngine.perfectDayBonus
+        profile.perfectDayCount = 1
+        profile.streak = 5
+        profile.longestStreak = 5
+        profile.lastStreakDayKey = key
+
+        let dhuhr = try XCTUnwrap(full.first { $0.prayer == .dhuhr })
+        let after = GameEngine.profileAfterUndo(of: dhuhr, from: profile,
+                                                remainingLogs: full.filter { $0.id != dhuhr.id })
+        XCTAssertEqual(after.totalXP, 4 * LogTier.onTime.xp)
+        XCTAssertEqual(after.perfectDayCount, 0)
+        XCTAssertEqual(after.streak, 4)
+        XCTAssertNil(after.lastStreakDayKey)
+    }
+
+    /// Undoing BOTH copies charges the perfect day once, not twice — the
+    /// regression that the old "was perfect before the removal" reading
+    /// produced the moment a day could hold two logs for one prayer.
+    func testUndoingBothCopiesChargesThePerfectDayOnlyOnce() throws {
+        let key = "2026-08-22"
+        var logs: [PrayerLog] = Prayer.allCases.map {
+            log($0, .onTime, dayKey: key, offset: seattle)
+        }
+        let duplicate = log(.dhuhr, .onTime, dayKey: key, offset: -4 * 3600)
+        logs.append(duplicate)
+
+        var profile = UserProfile.fresh(now: Date(timeIntervalSince1970: 0))
+        profile.totalXP = 6 * LogTier.onTime.xp + GameEngine.perfectDayBonus
+        profile.perfectDayCount = 1
+        profile.streak = 5
+        profile.lastStreakDayKey = key
+
+        logs.removeAll { $0.id == duplicate.id }
+        profile = GameEngine.profileAfterUndo(of: duplicate, from: profile, remainingLogs: logs)
+
+        let original = try XCTUnwrap(logs.first { $0.prayer == .dhuhr })
+        logs.removeAll { $0.id == original.id }
+        profile = GameEngine.profileAfterUndo(of: original, from: profile, remainingLogs: logs)
+
+        XCTAssertEqual(profile.totalXP, 4 * LogTier.onTime.xp,
+                       "two undos, four prayers left, one perfect-day bonus reversed")
+        XCTAssertEqual(profile.perfectDayCount, 0)
+        XCTAssertEqual(profile.streak, 4)
+    }
+
+    /// Undo can never take the total below zero, and a day that was never
+    /// perfect never had a bonus to lose.
+    func testUndoingAnOrdinaryLogTouchesNothingElse() {
+        let key = "2026-08-22"
+        let entry = log(.fajr, .qada, dayKey: key, offset: seattle)
+        var profile = UserProfile.fresh(now: Date(timeIntervalSince1970: 0))
+        profile.totalXP = 2
+        profile.streak = 3
+        profile.lastStreakDayKey = "2026-08-21"
+
+        let after = GameEngine.profileAfterUndo(of: entry, from: profile, remainingLogs: [])
+        XCTAssertEqual(after.totalXP, 0, "clamped, never negative")
+        XCTAssertEqual(after.streak, 3)
+        XCTAssertEqual(after.lastStreakDayKey, "2026-08-21")
+        XCTAssertEqual(after.perfectDayCount, 0)
+    }
+
+    // MARK: - What a square draws
+
+    /// The Today grid and `status(of:)` must never contradict each other. On
+    /// the day you are standing in, the square IS the identity lookup.
+    ///
+    /// The §7.2 re-lived day: fajr prayed in Mumbai, an 18-hour flight, and
+    /// Seattle's fajr window has already closed on the same dayKey. Seattle's
+    /// fajr really was not prayed — so the square says missed (nil log), the
+    /// "Make up" row is offered, and the inline button beside the square is no
+    /// longer hidden by a cell that disagreed with it.
+    func testALiveDaysSquareAnswersTheSameQuestionStatusDoes() {
+        let key = "2026-08-22"
+        let logs = [log(.fajr, .onTime, dayKey: key, offset: mumbai)]
+
+        XCTAssertNil(GameEngine.cellLog(prayer: .fajr, dayKey: key, isLiveDay: true,
+                                        currentOffset: seattle, in: logs),
+                     "Seattle's fajr was not prayed, and the square must not claim it was")
+        XCTAssertEqual(GameEngine.cellLog(prayer: .fajr, dayKey: key, isLiveDay: true,
+                                          currentOffset: seattle, in: logs)?.id,
+                       GameEngine.loggedInstance(prayer: .fajr, dayKey: key,
+                                                 currentOffset: seattle, in: logs)?.id,
+                       "the square and the status are one function on a live day")
+
+        // Still in Mumbai, it is drawn — nothing changes for staying put.
+        XCTAssertEqual(GameEngine.cellLog(prayer: .fajr, dayKey: key, isLiveDay: true,
+                                          currentOffset: mumbai, in: logs)?.id, logs[0].id)
+    }
+
+    /// ...and the foregone-XP line agrees with the square beside it. Reporting
+    /// zero for a window nobody prayed is what made the two contradict.
+    func testMissedOutXPChargesAWindowTheTravellerDidNotPray() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "America/Los_Angeles"))
+        let noon = date(2026, 8, 22, 12, 0)
+        let schedule = try XCTUnwrap(PrayerTimeService.schedule(for: noon, latitude: 47.6062,
+                                                                longitude: -122.3321,
+                                                                method: .northAmerica,
+                                                                madhab: .shafi,
+                                                                calendar: calendar))
+        let fajrEnd = try XCTUnwrap(schedule.window(for: .fajr)).end
+        let justAfterFajr = fajrEnd.addingTimeInterval(60)
+        let mumbaiFajr = [PrayerLog(id: UUID(), prayer: .fajr, dayKey: schedule.dayKey,
+                                    loggedAt: fajrEnd.addingTimeInterval(-20 * 3600),
+                                    tier: .onTime, xp: LogTier.onTime.xp, utcOffset: mumbai)]
+
+        XCTAssertEqual(GameEngine.missedOutXP(logs: mumbaiFajr, schedule: schedule,
+                                              now: justAfterFajr, isExcused: false,
+                                              currentOffset: seattle),
+                       LogTier.onTime.xp,
+                       "Seattle's fajr window passed unprayed — that XP really was foregone")
+
+        // The same log, asked from Mumbai, forgoes nothing.
+        XCTAssertEqual(GameEngine.missedOutXP(logs: mumbaiFajr, schedule: schedule,
+                                              now: justAfterFajr, isExcused: false,
+                                              currentOffset: mumbai), 0)
+    }
+
+    /// A PAST day is grouping, and it has to be: the zone the device is in
+    /// today says nothing about the zone Monday was lived in. Asking by
+    /// identity there would repaint a whole travelled week as missed.
+    func testAPastDaysSquareIsNotJudgedByTodaysZone() {
+        let monday = "2026-08-17"
+        let logs: [PrayerLog] = Prayer.allCases.map {
+            log($0, .onTime, dayKey: monday, offset: mumbai)
+        }
+        for prayer in Prayer.allCases {
+            XCTAssertNotNil(GameEngine.cellLog(prayer: prayer, dayKey: monday, isLiveDay: false,
+                                               currentOffset: seattle, in: logs),
+                            "flying home must not erase the week you prayed abroad")
+        }
+    }
+
+    /// A past day that holds two logs for one prayer picks one DETERMINISTICALLY
+    /// — the latest prayer — so a cell never flips because the array reordered.
+    func testAPastDaysSquarePicksTheLatestPrayerWhicheverOrderItArrivesIn() {
+        let key = "2026-08-22"
+        let early = PrayerLog(id: UUID(), prayer: .maghrib, dayKey: key,
+                              loggedAt: date(2026, 8, 22, 20, 0), tier: .onTime,
+                              xp: LogTier.onTime.xp, utcOffset: 3600)
+        let late = PrayerLog(id: UUID(), prayer: .maghrib, dayKey: key,
+                             loggedAt: date(2026, 8, 23, 1, 45), tier: .lastCall,
+                             xp: LogTier.lastCall.xp, utcOffset: -4 * 3600)
+        for order in [[early, late], [late, early]] {
+            XCTAssertEqual(GameEngine.cellLog(prayer: .maghrib, dayKey: key, isLiveDay: false,
+                                              currentOffset: seattle, in: order)?.id,
+                           late.id)
+            XCTAssertEqual(GameEngine.latestLog(prayer: .maghrib, dayKey: key, in: order)?.id,
+                           late.id)
+        }
+    }
+
+    /// The week's arithmetic is grouping too, and a travel day must not be
+    /// double-counted as two days or collapsed into fewer prayers.
+    func testWeeklyXPCountsATravelDayOnce() {
+        let monday = date(2026, 8, 17)
+        let key = AppClock.dayKey(for: monday)
+        var logs: [PrayerLog] = Prayer.allCases.map { log($0, .onTime, dayKey: key, offset: mumbai) }
+        let single: Int = GameEngine.weeklyXP(logs: logs, weekStart: monday)
+
+        logs.append(log(.fajr, .onTime, dayKey: key, offset: seattle))
+        XCTAssertEqual(GameEngine.weeklyXP(logs: logs, weekStart: monday),
+                       single + LogTier.onTime.xp,
+                       "one extra prayer is one extra prayer's XP — not an extra day")
+    }
+
+    // MARK: - Undo picks the day you are on, not the nearest zone
+
+    func testUndoPrefersTheLiveDayOverACloserZone() {
+        // Today's isha logged in Mumbai (+5:30); yesterday's isha logged in
+        // Seattle (-7). The device is now back in Seattle, so YESTERDAY's log
+        // is the zone-nearest match — but undo must still take today's.
+        let mumbai = 5 * 3600 + 1800
+        let seattle = -7 * 3600
+        let logs = [
+            PrayerLog(id: UUID(), prayer: .isha, dayKey: "2026-08-21",
+                      loggedAt: Date(timeIntervalSince1970: 0), tier: .onTime, xp: 30,
+                      utcOffset: seattle),
+            PrayerLog(id: UUID(), prayer: .isha, dayKey: "2026-08-22",
+                      loggedAt: Date(timeIntervalSince1970: 1), tier: .onTime, xp: 30,
+                      utcOffset: mumbai),
+        ]
+        // Today's Mumbai isha does not survive the identity guard from Seattle,
+        // so it is not a candidate. The point is what happens NEXT: without the
+        // preference, yesterday's Seattle isha wins by default and Undo deletes
+        // a day that was already banked, taking its XP and possibly a streak
+        // increment. Nothing to undo is the correct answer.
+        let index = GameEngine.loggedInstanceIndex(
+            prayer: .isha, dayKeys: ["2026-08-21", "2026-08-22"],
+            currentOffset: seattle, preferredDayKey: "2026-08-22", in: logs)
+        XCTAssertNil(index, "undo must never reach past today into a banked day")
+
+        // Same inputs without the preference: this is the bug, preserved so the
+        // test says what it is protecting against.
+        XCTAssertEqual(GameEngine.loggedInstanceIndex(
+            prayer: .isha, dayKeys: ["2026-08-21", "2026-08-22"],
+            currentOffset: seattle, in: logs), 0)
+    }
+
+    func testUndoStillFallsBackWhenThePreferredDayHasNoMatch() {
+        // Pre-fajr: the live isha carries YESTERDAY's dayKey, so the preferred
+        // key (today) matches nothing and the resolver must not come back nil.
+        let seattle = -7 * 3600
+        let logs = [
+            PrayerLog(id: UUID(), prayer: .isha, dayKey: "2026-08-21",
+                      loggedAt: Date(timeIntervalSince1970: 0), tier: .onTime, xp: 30,
+                      utcOffset: seattle),
+        ]
+        let index = GameEngine.loggedInstanceIndex(
+            prayer: .isha, dayKeys: ["2026-08-21", "2026-08-22"],
+            currentOffset: seattle, preferredDayKey: "2026-08-22", in: logs)
+        XCTAssertEqual(index, 0, "a preference is a ranking, not a filter")
+    }
+
+    func testOmittingThePreferenceKeepsTheOldRanking() {
+        let seattle = -7 * 3600
+        let logs = [
+            PrayerLog(id: UUID(), prayer: .fajr, dayKey: "2026-08-22",
+                      loggedAt: Date(timeIntervalSince1970: 0), tier: .onTime, xp: 30,
+                      utcOffset: seattle),
+        ]
+        XCTAssertEqual(GameEngine.loggedInstanceIndex(prayer: .fajr, dayKeys: ["2026-08-22"],
+                                                      currentOffset: seattle, in: logs), 0)
+    }
+
+    // MARK: - A week-grid cell is a DAY question, for everyone
+
+    func testTheWeekGridReadsATravelDayTheSameWayForEveryone() {
+        // Two fajrs on one date: Mumbai then Seattle. A buddy's row resolves
+        // through CircleSnapshot.post, which keys on dayKey alone, so YOUR row
+        // must reach the same verdict — latestLog, not the identity lookup.
+        // With identity, standing in Seattle after logging only Mumbai's fajr
+        // rendered your own cell `.missed` while weeklyXP counted its 30 XP.
+        let mumbai = 5 * 3600 + 1800
+        let seattle = -7 * 3600
+        let logs = [
+            PrayerLog(id: UUID(), prayer: .fajr, dayKey: "2026-08-22",
+                      loggedAt: Date(timeIntervalSince1970: 0), tier: .onTime, xp: 30,
+                      utcOffset: mumbai),
+        ]
+        XCTAssertNotNil(GameEngine.latestLog(prayer: .fajr, dayKey: "2026-08-22", in: logs),
+                        "the day holds a fajr, whatever zone it was prayed in")
+        // The identity lookup deliberately DISagrees — that is its job on the
+        // Today screen, where the question is "can I log this one now".
+        XCTAssertNil(GameEngine.loggedInstance(prayer: .fajr, dayKey: "2026-08-22",
+                                               currentOffset: seattle, in: logs),
+                     "Seattle's fajr is a different prayer and is still unlogged")
     }
 }

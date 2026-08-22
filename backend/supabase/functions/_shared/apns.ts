@@ -237,6 +237,13 @@ export interface DeviceRow {
   user_id: string;
   apns_token: string;
   environment: APNsEnvironment | string;
+  /// The device's UTC offset in seconds (20260822000500). Optional and
+  /// nullable: rows registered by an older build have no answer, and `_shared/
+  /// zones.ts` reads that as "cannot judge, send anyway". Nothing in THIS file
+  /// looks at it — delivery does not care where a phone is — it rides along
+  /// because `devicesFor` selects the row once and `notify` filters it before
+  /// handing the list here.
+  utc_offset?: number | null;
 }
 
 export interface APNsSendResult {

@@ -103,6 +103,10 @@ final class NotificationManager {
         guard status == .authorized || status == .provisional else { return }
 
         let now = AppClock.now
+        // Read once: every window in the 48h horizon is judged against the zone
+        // the device is standing in NOW, which is the same zone the schedules
+        // below are computed in.
+        let currentOffset = AppClock.utcOffsetSeconds
         let profile = Store.load(Store.profileFile, default: UserProfile.fresh(now: now))
         let logs = Store.load(Store.logsFile, default: [PrayerLog]())
         // v3.9: solo accounts have no circle yet — derive it the same way
@@ -136,7 +140,7 @@ final class NotificationManager {
                 if settings.notifyLastCall {
                     scheduleLastCall(for: window, dayKey: schedule.dayKey,
                                      now: now, horizon: horizon, logs: logs,
-                                     center: center)
+                                     currentOffset: currentOffset, center: center)
                 }
                 if settings.notifyFriendActivity {
                     scheduleFriendActivity(for: window, dayKey: schedule.dayKey,
@@ -199,11 +203,12 @@ final class NotificationManager {
 
     private func scheduleLastCall(for window: PrayerWindow, dayKey: String,
                                   now: Date, horizon: Date, logs: [PrayerLog],
+                                  currentOffset: Int,
                                   center: UNUserNotificationCenter) {
         let fireDate = window.end.addingTimeInterval(-Self.lastCallLeadTime)
         guard fireDate > now, fireDate <= horizon else { return }
-        // Skip if already logged for that schedule day.
-        guard !logs.contains(where: { $0.prayer == window.prayer && $0.dayKey == dayKey })
+        guard NotificationManager.needsLastCall(prayer: window.prayer, dayKey: dayKey,
+                                                currentOffset: currentOffset, logs: logs)
         else { return }
 
         let content = UNMutableNotificationContent()
@@ -215,6 +220,25 @@ final class NotificationManager {
             fireDate: fireDate,
             identifier: "\(Self.idPrefix)lastcall.\(dayKey).\(window.prayer.rawValue)",
             now: now, center: center)
+    }
+
+    /// Is there still a prayer here to remind somebody about?
+    ///
+    /// v4 — IDENTITY, not grouping, and the distinction is the whole reason
+    /// this is a named function. `window` belongs to the zone the device is
+    /// standing in; a log on the same `dayKey` from a zone half a world away is
+    /// a DIFFERENT prayer. A traveller who prayed Asr on Mumbai time in the air
+    /// and then landed in Seattle, where Asr's window is still hours off, is
+    /// being shown the camera CTA for it by `AppState.status(of:)` — and the
+    /// old `prayer + dayKey` test suppressed its reminder, silencing the one
+    /// prayer of the day that most needed one. See
+    /// `GameEngine.isSamePrayerInstance`; a pre-v4 log has no zone and still
+    /// matches, so nobody standing still sees any change.
+    nonisolated static func needsLastCall(prayer: Prayer, dayKey: String,
+                                          currentOffset: Int,
+                                          logs: [PrayerLog]) -> Bool {
+        GameEngine.loggedInstance(prayer: prayer, dayKey: dayKey,
+                                  currentOffset: currentOffset, in: logs) == nil
     }
 
     private func add(content: UNNotificationContent, fireDate: Date,

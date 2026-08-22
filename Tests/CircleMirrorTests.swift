@@ -127,11 +127,17 @@ final class CircleMirrorTests: XCTestCase {
     private func log(_ prayer: Prayer, dayKey: String, id: UUID = UUID(),
                      tier: LogTier = .onTime, at: TimeInterval = 0,
                      photo: String? = nil, jamaat: Bool = false,
-                     placeTag: PlaceTag? = nil, placeName: String? = nil) -> PrayerLog {
+                     placeTag: PlaceTag? = nil, placeName: String? = nil,
+                     utcOffset: Int? = -7 * 3600) -> PrayerLog {
+        // utcOffset defaults to a REAL zone, not nil. A nil default made the
+        // "the zone rides along" assertions below compare nil to nil, so they
+        // passed while proving nothing: hard-coding `utcOffset: nil` in
+        // CircleSync.postLogged left the whole suite green and reintroduced the
+        // bug scopedToSlot exists to prevent.
         PrayerLog(id: id, prayer: prayer, dayKey: dayKey, loggedAt: stamp(at), tier: tier,
                   xp: GameEngine.prayerXP(tier: tier, jamaat: jamaat),
                   photoFilename: photo, jamaat: jamaat,
-                  placeTag: placeTag, placeName: placeName)
+                  placeTag: placeTag, placeName: placeName, utcOffset: utcOffset)
     }
 
     /// A sync wired to a live circle with the network stubbed and the monitor
@@ -200,7 +206,7 @@ final class CircleMirrorTests: XCTestCase {
 
         XCTAssertEqual(ops(sync).map { $0.kind }, [.upsertPost, .uploadPhoto],
                        "row first, bytes second — order is the whole point")
-        guard case .uploadPhoto(let postID, let dayKey, let prayer,
+        guard case .uploadPhoto(let postID, let dayKey, let prayer, let utcOffset,
                                let filename, let path) = ops(sync)[1] else {
             return XCTFail("expected an upload")
         }
@@ -208,6 +214,9 @@ final class CircleMirrorTests: XCTestCase {
         XCTAssertEqual(filename, entry.photoFilename)
         XCTAssertEqual(dayKey, entry.dayKey)
         XCTAssertEqual(prayer, entry.prayer)
+        XCTAssertEqual(utcOffset, entry.utcOffset,
+                       "the zone rides along: `photo_path` is patched by the SLOT, and v4 put "
+                       + "utc_offset in it, so a traveller's two same-day fajrs stay two rows")
         XCTAssertTrue(path.hasPrefix("\(circleID.uuidString.lowercased())/"),
                       "RLS reads folder 1 as the circle id, and Postgres renders uuids lowercase")
         XCTAssertFalse(path.contains("dhuhr"),
@@ -626,9 +635,11 @@ final class CircleMirrorTests: XCTestCase {
                                                         RemoteMember(circleID: circleID, userID: friend)])
         let source = RemoteCircleDataSource(snapshot: mirror)
 
-        XCTAssertEqual(source.photoPath(forMember: friend.uuidString, prayer: .fajr, dayKey: monday),
+        XCTAssertEqual(source.photoPath(forMember: friend.uuidString, prayer: .fajr,
+                                        dayKey: monday, asOf: .distantFuture),
                        path)
-        XCTAssertNil(source.photoPath(forMember: me.uuidString, prayer: .fajr, dayKey: monday),
+        XCTAssertNil(source.photoPath(forMember: me.uuidString, prayer: .fajr, dayKey: monday,
+                                      asOf: .distantFuture),
                      "the source speaks for BUDDIES; your own tile draws from PhotoStore")
     }
 

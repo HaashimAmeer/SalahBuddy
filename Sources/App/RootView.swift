@@ -66,6 +66,27 @@ struct RootView: View {
                 guard let step, Tour.steps.indices.contains(step) else { return }
                 withAnimation(Theme.spring) { selectedTab = Tour.steps[step].tab }
             }
+            // The zone moved while the app was OPEN — which is the ordinary
+            // case for the one feature whose entire subject is travellers:
+            // land, take the phone off airplane mode, SalahBuddy already
+            // foregrounded. Nothing else notices. scenePhase does not fire,
+            // and until it does the schedule is still computing the departure
+            // city's prayer times, the local notifications are still queued
+            // against them, and `devices.utc_offset` still says the zone the
+            // person left — so the server filters their pushes against a
+            // clock on the other side of the world.
+            //
+            // refresh() is the right hammer: noteTimeZoneIfChanged sits at the
+            // top of it, so the travel day gets marked in the same pass that
+            // rebuilds the schedule. iOS also posts this on a DST rollover,
+            // where every step below is equally wanted and the 3h threshold
+            // correctly declines to call it travel.
+            .onReceive(NotificationCenter.default.publisher(
+                for: .NSSystemTimeZoneDidChange)) { _ in
+                state.refresh()
+                NotificationManager.shared.reschedule()
+                Task { await circles.handleForeground() }
+            }
             .onChange(of: scenePhase) { _, phase in
                 if phase == .active {
                     state.refresh()

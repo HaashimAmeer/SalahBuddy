@@ -161,9 +161,46 @@ struct CircleSnapshot: Codable, Equatable, Sendable {
         self.posts.filter { $0.dayKey == dayKey && $0.prayer == prayer }
     }
 
-    /// The unique `(user, day_key, prayer)` row, if it exists.
-    func post(userID: UUID, dayKey: String, prayer: Prayer) -> RemotePost? {
-        self.posts.first { $0.userID == userID && $0.dayKey == dayKey && $0.prayer == prayer }
+    /// Every post this member holds for one slot, EARLIEST PRAYER FIRST.
+    ///
+    /// v4: a slot can hold more than one row. `utc_offset` joined the `posts`
+    /// unique key in migration 20260822000300, because a long-haul flight makes
+    /// two genuinely different prayers share one `day_key` — Maghrib in London
+    /// and Maghrib in New York on the same local date. The mirror keeps both,
+    /// exactly as the server does.
+    ///
+    /// Ordered by `loggedAt`, then by id, so the order is a property of the
+    /// DATA. `self.posts` arrives in whatever order the last merge left it, and
+    /// `upserted` re-appends a touched row at the end — a lookup that took
+    /// `first` therefore silently swapped which of a traveller's two prayers a
+    /// cell was drawing whenever an unrelated edit bumped `updated_at`.
+    func posts(userID: UUID, dayKey: String, prayer: Prayer) -> [RemotePost] {
+        self.posts
+            .filter { $0.userID == userID && $0.dayKey == dayKey && $0.prayer == prayer }
+            .sorted { a, b in
+                a.loggedAt == b.loggedAt ? a.id.uuidString < b.id.uuidString
+                                         : a.loggedAt < b.loggedAt
+            }
+    }
+
+    /// The ONE post that represents this member's slot as of `now`.
+    ///
+    /// The rule, and it is a rule rather than an accident: the LATEST prayer
+    /// that has actually happened; if none has arrived yet, the earliest one
+    /// still to come (so the caller can hold the square rather than flashing
+    /// "missed"). A cell therefore only ever moves FORWARD in time, and never
+    /// because the array was reordered.
+    ///
+    /// SPEC-V4 §7 item 4 records the cross-timezone PRESENTATION question as
+    /// INTENDED rather than open — a shared grid's columns mean "each member's
+    /// own day", and aligning by absolute time would split somebody's day
+    /// across two of them. (It was §7.3 and "open" before the section was
+    /// renumbered; item 3 is now the push filter, and that one is fixed.) This
+    /// does not settle that; it settles the narrower one §7 item 2 created, which is
+    /// which of one member's two prayers occupies one member's one cell.
+    func post(userID: UUID, dayKey: String, prayer: Prayer, asOf now: Date) -> RemotePost? {
+        let slot: [RemotePost] = posts(userID: userID, dayKey: dayKey, prayer: prayer)
+        return slot.last { now >= $0.loggedAt } ?? slot.first
     }
 
     func postsBy(userID: UUID) -> [RemotePost] {

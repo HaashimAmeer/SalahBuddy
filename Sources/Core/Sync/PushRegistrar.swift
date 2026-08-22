@@ -36,9 +36,10 @@ enum APNsEnvironment {
 
 // MARK: - The devices row
 
-/// What this phone's `devices` row should say (SPEC-V4 §6) — and ONLY the four
-/// columns the grant names (`20260821000200_rls.sql`):
-/// `insert (user_id, apns_token, environment, notify_friend_activity)`.
+/// What this phone's `devices` row should say (SPEC-V4 §6) — and ONLY the
+/// columns the grants name (`20260821000200_rls.sql`, plus `utc_offset` from
+/// `20260822000500`): `insert (user_id, apns_token, environment,
+/// notify_friend_activity, utc_offset)`.
 ///
 /// `updated_at` is deliberately absent: it sits OUTSIDE that grant and is the
 /// server's. This type is not `Encodable` at all — the row is written through
@@ -54,6 +55,23 @@ struct RemoteDevice: Equatable, Sendable {
     var environment: String
     var notifyFriendActivity: Bool
 
+    /// v4: where this phone IS, in seconds east of UTC
+    /// (`20260822000500_device_utc_offset.sql`).
+    ///
+    /// `notify` fans a post out to the whole circle, and until this column
+    /// existed it did so with no idea what time it was where anyone was
+    /// standing: a 5am Fajr in Mumbai buzzed a friend in Seattle at 4:30pm,
+    /// half a day after their own Fajr. The function compares the post's
+    /// `day_key` against each recipient's local day, and this is the only thing
+    /// that tells it what that is.
+    ///
+    /// Non-optional HERE and nullable in the column, deliberately. A phone
+    /// always knows its own offset; a `devices` row written by a build older
+    /// than this genuinely does not, and 0 is a real answer (London in winter),
+    /// so the server can never let a default stand in for "unknown" — it reads
+    /// NULL as "cannot judge, send anyway".
+    var utcOffset: Int
+
     /// The arguments `register_device` takes.
     ///
     /// `user_id` is deliberately absent: the function reads `auth.uid()`, so a
@@ -61,7 +79,8 @@ struct RemoteDevice: Equatable, Sendable {
     var registerParams: RegisterDeviceParams {
         RegisterDeviceParams(token: apnsToken,
                              environment: environment,
-                             friendActivity: notifyFriendActivity)
+                             friendActivity: notifyFriendActivity,
+                             utcOffset: utcOffset)
     }
 
     /// Everything a write would put on the server, in one comparable line.
@@ -70,16 +89,26 @@ struct RemoteDevice: Equatable, Sendable {
     /// iOS hands the delegate the SAME token on every single launch, and a
     /// round trip per launch for a row that already says this is waste. A flag
     /// in memory could not tell the difference; this can, it survives
-    /// relaunching, and it changes the moment the user, the environment or the
-    /// friend-activity toggle does.
+    /// relaunching, and it changes the moment the user, the environment, the
+    /// friend-activity toggle OR THE ZONE does.
+    ///
+    /// The zone is in here for a concrete reason: it is the one field that
+    /// changes while nothing the person did changed. Landing in Mumbai and
+    /// foregrounding the app is the whole re-registration trigger — `refresh`
+    /// runs on every foreground and this is what makes it not a no-op — and a
+    /// traveller left holding their departure offset is filtered out of their
+    /// own circle's pushes by the server that trusted it.
     var fingerprint: String {
-        [userID.uuidString, apnsToken, environment, notifyFriendActivity ? "1" : "0"]
+        [userID.uuidString, apnsToken, environment,
+         notifyFriendActivity ? "1" : "0", String(utcOffset)]
             .joined(separator: "\u{1}")
     }
 }
 
-/// The params `public.register_device(p_token, p_environment, p_friend_activity)`
-/// is called with (`20260821000900_register_device.sql`).
+/// The params
+/// `public.register_device(p_token, p_environment, p_friend_activity, p_utc_offset)`
+/// is called with (`20260821000900_register_device.sql`, widened by
+/// `20260822000500_device_utc_offset.sql`).
 ///
 /// v4 Phase D FIX: this replaces `upsert(onConflict: "apns_token")`, which could
 /// not do the one job it was there for. `apns_token` is the primary key and one
@@ -95,11 +124,20 @@ struct RegisterDeviceParams: Encodable, Equatable, Sendable {
     var token: String
     var environment: String
     var friendActivity: Bool
+    /// Seconds east of UTC. Added in `20260822000500_device_utc_offset.sql`,
+    /// which DROPPED the three-argument function rather than leaving it beside
+    /// the four-argument one: two overloads differing only by a defaulted
+    /// trailing parameter make every existing call ambiguous. Sending the
+    /// parameter is therefore not optional for this build — and an out-of-range
+    /// value is stored as NULL by the RPC rather than refused, so a bad clock
+    /// costs push FILTERING and never push itself.
+    var utcOffset: Int
 
     enum CodingKeys: String, CodingKey {
         case token = "p_token"
         case environment = "p_environment"
         case friendActivity = "p_friend_activity"
+        case utcOffset = "p_utc_offset"
     }
 
     func encode(to encoder: Encoder) throws {
@@ -107,6 +145,7 @@ struct RegisterDeviceParams: Encodable, Equatable, Sendable {
         try c.encode(token, forKey: .token)
         try c.encode(environment, forKey: .environment)
         try c.encode(friendActivity, forKey: .friendActivity)
+        try c.encode(utcOffset, forKey: .utcOffset)
     }
 }
 
@@ -528,7 +567,17 @@ final class PushRegistrar {
         let device = RemoteDevice(userID: userID,
                                   apnsToken: token,
                                   environment: APNsEnvironment.current,
-                                  notifyFriendActivity: system.preferences().wantsFriendActivity)
+                                  notifyFriendActivity: system.preferences().wantsFriendActivity,
+                                  // Read here rather than cached: this method is
+                                  // the ONE place a `devices` row is written, and
+                                  // every door into it (launch, foreground, a
+                                  // settings flip, a token callback) is also a
+                                  // moment the phone may have moved. `AppClock`
+                                  // rather than `TimeZone.current` directly, per
+                                  // the house rule — and time travel is pinned to
+                                  // zero in a real circle, so this is the true
+                                  // offset wherever it is read from.
+                                  utcOffset: AppClock.utcOffsetSeconds)
         let fingerprint: String = device.fingerprint
         if fingerprint == system.lastRegistration() {
             isRegistered = true

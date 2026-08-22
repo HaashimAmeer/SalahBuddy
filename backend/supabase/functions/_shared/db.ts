@@ -128,7 +128,11 @@ export async function devicesFor(
   if (userIds.length === 0) return [];
   let query = admin
     .from("devices")
-    .select("user_id,apns_token,environment")
+    // `utc_offset` (20260822000500) is what lets `notify` decide whether a
+    // post's day_key is still the recipient's current local day — see
+    // `_shared/zones.ts`. Selected here for every caller because the filtering
+    // decision belongs to the caller, not to the lookup.
+    .select("user_id,apns_token,environment,utc_offset")
     .in("user_id", userIds as string[]);
   // §6's friend-activity push is opt-in and OFF by default. iOS cannot suppress
   // an alert it has already been handed, so the toggle has to be applied here.
@@ -238,6 +242,16 @@ export interface PostRow {
   tier: string;
   jamaat: boolean;
   place_label: string | null;
+  /// The POSTER's zone at the moment they logged (20260822000200). `day_key`
+  /// alone cannot say whether an alert is stale for a recipient: paired with
+  /// this it can. Nullable — rows written before that migration have no answer,
+  /// and `relevanceWindow` reads that as "do not filter".
+  utc_offset: number | null;
+  /// When the poster logged it, UTC. With `utc_offset` this gives the poster's
+  /// own LOCAL clock reading, which is the half of the relevance filter that
+  /// `day_key` cannot supply: a Seattle Fajr and a Mumbai evening share a
+  /// calendar date, and only the clock readings tell them apart.
+  logged_at: string;
 }
 
 export async function postById(
@@ -246,7 +260,9 @@ export async function postById(
 ): Promise<PostRow | null> {
   const { data, error } = await admin
     .from("posts")
-    .select("id,user_id,circle_id,day_key,prayer,tier,jamaat,place_label")
+    .select(
+      "id,user_id,circle_id,day_key,prayer,tier,jamaat,place_label,utc_offset,logged_at",
+    )
     .eq("id", postId)
     .maybeSingle();
   if (error) throw new HttpError(500, "post_lookup_failed", error.message);

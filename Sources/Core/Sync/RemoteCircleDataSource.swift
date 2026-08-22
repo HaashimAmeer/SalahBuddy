@@ -86,7 +86,7 @@ struct RemoteCircleDataSource: CircleDataSource {
     /// log and on excused first, so YOUR row and a buddy's row answer alike.
     private func visibility(userID: UUID, prayer: Prayer, dayKey: String,
                             window: PrayerWindow?, now: Date) -> Visibility {
-        if let post = snapshot.post(userID: userID, dayKey: dayKey, prayer: prayer) {
+        if let post = snapshot.post(userID: userID, dayKey: dayKey, prayer: prayer, asOf: now) {
             return now >= post.loggedAt ? .posted(post) : .pending
         }
         // A resting day is gentle and whole-day: the wire carries the bare flag
@@ -159,9 +159,16 @@ struct RemoteCircleDataSource: CircleDataSource {
     /// The Storage path behind one square's photo, when the post carries one.
     /// The path is already unique (`<circle>/<user>/<uuid>.jpg`), so it is all
     /// a disk cache needs to key on.
-    func photoPath(forMember id: String, prayer: Prayer, dayKey: String) -> String? {
+    ///
+    /// `now` is not decoration: a traveller's slot can hold two posts and the
+    /// square is already drawing ONE of them. Resolving the path by the same
+    /// rule at the same instant is what stops a tile showing London's tier
+    /// above New York's photograph.
+    func photoPath(forMember id: String, prayer: Prayer, dayKey: String,
+                   asOf now: Date) -> String? {
         guard let userID = userID(forMember: id),
-              let post = snapshot.post(userID: userID, dayKey: dayKey, prayer: prayer) else {
+              let post = snapshot.post(userID: userID, dayKey: dayKey, prayer: prayer,
+                                       asOf: now) else {
             return nil
         }
         return RemoteCircleDataSource.nonEmpty(post.photoPath)

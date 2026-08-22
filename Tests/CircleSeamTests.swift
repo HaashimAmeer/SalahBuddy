@@ -680,13 +680,17 @@ final class RemoteCircleSourceTests: XCTestCase {
                        "the stand-in is seeded, so the same post looks the same on every phone")
 
         // The real path travels alongside, for Phase C's buddy-photo cache.
-        XCTAssertEqual(src.photoPath(forMember: id, prayer: .fajr, dayKey: mondayKey),
+        XCTAssertEqual(src.photoPath(forMember: id, prayer: .fajr, dayKey: mondayKey,
+                                     asOf: .distantFuture),
                        amiraPhotoPath)
         // Retention cleared Isha's photo; Asr never had one; Tuesday's Asr has
         // no post at all.
-        XCTAssertNil(src.photoPath(forMember: id, prayer: .isha, dayKey: mondayKey))
-        XCTAssertNil(src.photoPath(forMember: id, prayer: .asr, dayKey: mondayKey))
-        XCTAssertNil(src.photoPath(forMember: id, prayer: .asr, dayKey: tuesdayKey))
+        XCTAssertNil(src.photoPath(forMember: id, prayer: .isha, dayKey: mondayKey,
+                                   asOf: .distantFuture))
+        XCTAssertNil(src.photoPath(forMember: id, prayer: .asr, dayKey: mondayKey,
+                                   asOf: .distantFuture))
+        XCTAssertNil(src.photoPath(forMember: id, prayer: .asr, dayKey: tuesdayKey,
+                                   asOf: .distantFuture))
     }
 
     // MARK: - Offline safety
@@ -708,7 +712,8 @@ final class RemoteCircleSourceTests: XCTestCase {
         XCTAssertEqual(src.weeklyXP(forMember: id, days: days, asOf: mondayStart), 0)
         XCTAssertEqual(src.recoveryXP(forMember: id, weekKeys: ["2026-W24"]), 0)
         XCTAssertNil(src.avatarPath(forMember: id))
-        XCTAssertNil(src.photoPath(forMember: id, prayer: .fajr, dayKey: mondayKey))
+        XCTAssertNil(src.photoPath(forMember: id, prayer: .fajr, dayKey: mondayKey,
+                                   asOf: .distantFuture))
 
         // An ABSENT circle.json decodes to exactly that mirror, so a first
         // launch and a wiped one behave identically.

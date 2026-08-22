@@ -117,26 +117,30 @@ final class V2CoreTests: XCTestCase {
         let dayKey = AppClock.dayKey(for: dayStart)
         let sched = schedule(dayKey: dayKey, dayStart: dayStart)
         let evening = dayStart.addingTimeInterval(18 * 3600)   // fajr/dhuhr/asr windows passed
+        // Standing still: the logs below carry no offset (pre-v4 saves), which
+        // matches every zone, so the answers are the ones this test always gave.
+        let zone = -7 * 3600
 
         // Nothing logged: 3 fully-passed windows × 30 foregone.
         XCTAssertEqual(GameEngine.missedOutXP(logs: [], schedule: sched, now: evening,
-                                              isExcused: false), 90)
+                                              isExcused: false, currentOffset: zone), 90)
         // Qada recovers 5 of one window's 30.
         let qadaLog = [log(.fajr, .qada, dayKey: dayKey)]
         XCTAssertEqual(GameEngine.missedOutXP(logs: qadaLog, schedule: sched, now: evening,
-                                              isExcused: false), 85)
+                                              isExcused: false, currentOffset: zone), 85)
         // An in-window log forgoes nothing, even at lastCall.
         let lastCall = [log(.fajr, .lastCall, dayKey: dayKey),
                         log(.dhuhr, .onTime, dayKey: dayKey),
                         log(.asr, .onTime, dayKey: dayKey)]
         XCTAssertEqual(GameEngine.missedOutXP(logs: lastCall, schedule: sched, now: evening,
-                                              isExcused: false), 0)
+                                              isExcused: false, currentOffset: zone), 0)
         // Excused day forgoes nothing.
         XCTAssertEqual(GameEngine.missedOutXP(logs: [], schedule: sched, now: evening,
-                                              isExcused: true), 0)
+                                              isExcused: true, currentOffset: zone), 0)
         // Omitting joinedAt keeps every pre-v4 call site's answer identical.
         XCTAssertEqual(GameEngine.missedOutXP(logs: [], schedule: sched, now: evening,
-                                              isExcused: false, joinedAt: .distantPast), 90)
+                                              isExcused: false, joinedAt: .distantPast,
+                                              currentOffset: zone), 90)
     }
 
     /// v4: XP foregone before the account existed was never on offer.
@@ -145,29 +149,34 @@ final class V2CoreTests: XCTestCase {
         let dayKey = AppClock.dayKey(for: dayStart)
         let sched = schedule(dayKey: dayKey, dayStart: dayStart)
         let evening = dayStart.addingTimeInterval(18 * 3600)   // fajr/dhuhr/asr passed
+        let zone = -7 * 3600
 
         // Installed this evening: all three closed windows predate the account,
         // so the screen must not open with a bill for a day nobody was here for.
         XCTAssertEqual(GameEngine.missedOutXP(logs: [], schedule: sched, now: evening,
-                                              isExcused: false, joinedAt: evening), 0)
+                                              isExcused: false, joinedAt: evening,
+                                              currentOffset: zone), 0)
 
         // Installed mid-afternoon, after fajr and dhuhr closed but before asr
         // did: exactly one window is chargeable.
         let afterDhuhr = sched.window(for: .asr)!.start.addingTimeInterval(-1)
         XCTAssertEqual(GameEngine.missedOutXP(logs: [], schedule: sched, now: evening,
-                                              isExcused: false, joinedAt: afterDhuhr), 30)
+                                              isExcused: false, joinedAt: afterDhuhr,
+                                              currentOffset: zone), 30)
 
         // A long-standing account is unaffected — the whole day counts.
         XCTAssertEqual(GameEngine.missedOutXP(logs: [], schedule: sched, now: evening,
                                               isExcused: false,
-                                              joinedAt: dayStart.addingTimeInterval(-86400)), 90)
+                                              joinedAt: dayStart.addingTimeInterval(-86400),
+                                              currentOffset: zone), 90)
 
         // The boundary is exclusive on the join side: a window closing at the
         // exact instant of joining is not charged, because `window.end > joinedAt`
         // is what separates "was I here for any of it" from "did it just end".
         let fajrEnd = sched.window(for: .fajr)!.end
         XCTAssertEqual(GameEngine.missedOutXP(logs: [], schedule: sched, now: evening,
-                                              isExcused: false, joinedAt: fajrEnd), 60)
+                                              isExcused: false, joinedAt: fajrEnd,
+                                              currentOffset: zone), 60)
     }
 
     // MARK: - BuddySimulator

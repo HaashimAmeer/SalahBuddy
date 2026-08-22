@@ -475,7 +475,7 @@ final class CircleRecapTests: XCTestCase {
 
         let before = RemoteCircleDataSource(snapshot: mirror(posts: [reported]))
         XCTAssertEqual(before.photoPath(forMember: amina.uuidString, prayer: .fajr,
-                                        dayKey: week[0]), path)
+                                        dayKey: week[0], asOf: .distantFuture), path)
         XCTAssertEqual(reports.visiblePath(path), path)
 
         reports.hide(reported)
@@ -485,7 +485,7 @@ final class CircleRecapTests: XCTestCase {
         // A fresh sync: a brand-new snapshot value, same row, same path.
         let after = RemoteCircleDataSource(snapshot: mirror(posts: [photoPost(path)]))
         XCTAssertEqual(after.photoPath(forMember: amina.uuidString, prayer: .fajr,
-                                       dayKey: week[0]), path,
+                                       dayKey: week[0], asOf: .distantFuture), path,
                        "the mirror is untouched — the hide is not an edit to it")
         XCTAssertNil(reports.visiblePath(path), "and the photo is still not drawn")
     }

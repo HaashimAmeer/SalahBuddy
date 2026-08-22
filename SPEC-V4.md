@@ -78,7 +78,9 @@ photo_path?, travel_combined?)`
 - The client computes tier/XP with `GameEngine` before posting; `day_key`
   is the client-computed schedule day (the Isha-after-midnight rule travels
   with the post — the server never re-derives it).
-- Unique per `(user, day_key, prayer)`; **undo deletes the post**.
+- Unique per `(user, day_key, prayer, utc_offset)`, with a NULL offset reading
+  as "any zone" — the zone is part of a prayer's identity since Phase 1, see
+  §7.2; **undo deletes the post**.
 - **Excused days** sync as a bare flag (circle sees the gentle "resting"
   state). The *reason* never leaves the device — period privacy is absolute.
 - **Offline queue**: posts created offline upload on reconnect, in order,
@@ -127,6 +129,34 @@ photo_path?, travel_combined?)`
   - invite accepted / member joined
   - ✅ nudges ship in Phase D — "Nudge your friends" sends a real push,
     rate-limited to one nudge per sender per recipient per prayer window
+- **A post's push is scoped to the day it is about (Phase 2).** "X posted
+  first for Fajr" used to go to every member of the circle regardless of where
+  they were standing: a 5am Fajr in Mumbai woke a friend in Seattle at 4:30pm,
+  twelve hours after their own Fajr, about a window that closed before their
+  lunch. `devices.utc_offset` (migration `20260822000500`, written by
+  `register_device` and refreshed on every foreground via `RemoteDevice`'s
+  fingerprint) lets `notify` compare each recipient's local day against the
+  post's `day_key` and drop the ones it has already gone stale for. Four rules
+  hold it up:
+  - **the window is anchored on the POSTER**, spanning `day_key` to the
+    poster's own current local day — so nobody standing in the poster's zone is
+    ever filtered, and an Isha logged after midnight (which carries yesterday's
+    `day_key`) still reaches the same city.
+  - **the recipient is judged on their SCHEDULE day, not their calendar day.**
+    Before dawn those are different dates, so the window's top is stretched by
+    one day for a recipient who is still in the night (`PRE_DAWN_SECONDS`, a
+    flat four hours, since the function has no coordinates to compute a real
+    Fajr from). Without it the poster's own allowance is an asymmetry: London
+    posting Isha at 23:30 reaches everyone in London at 23:30 and nobody in
+    Berlin at 00:30, the same open Isha window either side. The stretch can
+    only add recipients, never remove one.
+  - **unknown never means silence.** A NULL offset — every `devices` row
+    written before the migration — is always notified, and a post with no
+    `utc_offset` of its own filters nobody at all. 0 is a real offset (London
+    in winter), so it can never stand in for "we don't know".
+  - **nudges and joins are never filtered.** A nudge is aimed at one named
+    person a human just picked out of a grid, and "X joined your circle" is not
+    about a day. Only the post fan-out carries the rule.
 - Prayer-time reminders remain **local** notifications — no server needed.
 
 ## 7. Data model (Postgres)
@@ -136,17 +166,18 @@ photo_path?, travel_combined?)`
 | `profiles` | id = auth uid, name, avatar, member_kind | RLS: readable by circle-mates |
 | `circles` | id, code (unique), created_by, created_at | code is the invite |
 | `circle_members` | circle_id, user_id (unique), joined_at | trigger enforces ≤ 12 and one-circle-per-user |
-| `posts` | id (client uuid), user_id, circle_id, day_key, prayer, tier, logged_at, jamaat, place_label, photo_path, travel_combined | unique (user_id, day_key, prayer) |
+| `posts` | id (client uuid), user_id, circle_id, day_key, prayer, tier, logged_at, jamaat, place_label, photo_path, travel_combined, utc_offset | unique nulls not distinct (user_id, circle_id, day_key, prayer, utc_offset), + `posts_zone_wildcard` trigger (a NULL offset excludes a real one) |
 | `excused_days` | user_id, circle_id, day_key | no reason column, ever |
 | `recovery_weeks` | user_id, circle_id, week_key, xp | opaque total (see §3) |
 | `custom_challenges` | id, circle_id, creator, emoji, title, target, week_key | |
-| `devices` | user_id, apns_token, updated_at | |
+| `devices` | user_id, apns_token, environment, notify_friend_activity, utc_offset, updated_at | `utc_offset` nullable forever (§6 — 0 is a real place); written by `register_device` |
 
 RLS everywhere: membership in the row's circle is the read predicate; you
 write only your own rows.
 
 **Timezones.** `logged_at` is UTC; `day_key`/`week_key` are client-local
-strings. Three consequences, and they are not equally bad:
+strings. Three consequences followed, and the third turned out to be two
+questions wearing one label — only one of which was ever a defect:
 
 1. **Your streak breaks when you fly east — FIXED.** Prayers logged in Seattle
    carry a PDT `day_key`; land in Mumbai and that day can never reach five,
@@ -157,22 +188,104 @@ strings. Three consequences, and they are not equally bad:
    above any neighbouring zone, both of which must never trigger it). Both the
    departure and arrival day are marked. This only ever removes a penalty: a
    complete day still increments at log time.
-2. **A `day_key` can be re-lived flying west — OPEN.** India → Seattle makes
-   "2026-08-22" last ~36 hours, so a genuinely-prayed second Fajr is refused by
-   `unique (user_id, circle_id, day_key, prayer)`. Rare, and the loss is one
-   log rather than a streak.
-3. **Cross-timezone circles render each member by their own day_key — OPEN,
-   and still the accepted soft spot.** A shared grid where your column and a
-   Seattle friend's are 12½ hours apart makes "who posted first for Fajr"
-   meaningless.
+2. **A `day_key` can be re-lived flying west — FIXED (Phase 1, prayer
+   identity).** India → Seattle makes "2026-08-22" last ~36 hours, and the
+   second Fajr is a real prayer that used to be refused. Fixed by separating a
+   prayer's IDENTITY from a day's GROUPING KEY, which was the one thing
+   `day_key` was quietly doing twice.
+   - **Grouping did not change, and that is the point.** `day_key` alone still
+     drives `isDayComplete`, `isPerfectDay`, `xp(forDay:)`, `weeklyXP`, the
+     streak walk and every grid column. Only IDENTITY gained the zone, and
+     identity is asked in exactly two places: "have I already prayed this
+     one?" (`loggedInstance`, and the same lookup behind undo) and "which log
+     does this square draw?" (`cellLog`, live day only). Anybody who does not
+     change zone sees byte-for-byte what v3.9 gave them — no migration, no
+     setting, nothing to opt into.
+   - **Identity is `(prayer, day_key, zone)`, compared with a TOLERANCE.**
+     `GameEngine.isSamePrayerInstance` asks whether a log's stored `utcOffset`
+     is within `travelOffsetThreshold` (3h) of the device's current one — the
+     same three hours `isTravelShift` uses, because it is the same question
+     asked twice. Exact equality is the obvious rule and it is wrong: DST moves
+     the offset by exactly one hour with nobody going anywhere, and under
+     equality every prayer already logged that day would come back offering to
+     be prayed again.
+   - **Window start was the other candidate identity, and it is worse.**
+     Switching Asr madhab moves Asr's window by about an hour while the device
+     sits still, and every Asr ever logged would stop matching the window now
+     computed for it — the whole history rendering as unlogged. Anything built
+     out of a one-hour-scale quantity breaks on the two things that routinely
+     move an hour. Three hours is above both and below any crossing worth
+     calling travel.
+   - a ZONELESS log is a WILDCARD, not a third zone. It matches everything, so
+     it can never be joined by a second log for the same prayer — on the client
+     (`isSamePrayerInstance`), in the mirror (`CircleSync.upserted`) and on the
+     server. Getting this wrong is not cosmetic: a v3.9 backfill writes the
+     zoneless row and the same account's second device writes the zoned one,
+     and the pair scores that prayer twice on every circle-mate's device.
+   - the server key follows: `unique nulls not distinct (user_id, circle_id,
+     day_key, prayer, utc_offset)` (migration 20260822000300) plus the
+     `posts_zone_wildcard` trigger (20260822000400) for the pair no unique index
+     can see — a NULL beside a real offset. It raises 23505 so the client's
+     existing slot repair handles it, and it stays silent on the pairs the
+     constraint already refuses, because `on conflict do nothing` can swallow a
+     constraint violation and cannot swallow a trigger's exception. Mirrored by
+     `CircleSync.slotKey` / `slotBucket`. On real offsets the server rule is
+     deliberately LOOSER than the client's — a unique index cannot say "within
+     three hours" — and it is a BACKSTOP, not the primary mechanism: the device
+     decides what is a second prayer, and the constraint only catches the pairs
+     no honest client would send. Looser is the safe direction, and it must not
+     be tightened. An admitted duplicate is one wrong square; a server stricter
+     than the client would REFUSE a real second prayer, and a refusal strands
+     the outbox on a row it will retry forever.
+   - one member's cell can only hold one of their two prayers, so the rule is
+     written down rather than left to array order: the LATEST prayer that has
+     actually happened, else the earliest one still to come
+     (`CircleSnapshot.post(userID:dayKey:prayer:asOf:)`). Your own row answers
+     the same question by identity on the day you are standing in and by
+     grouping on any past day (`GameEngine.cellLog`) — the zone you are in today
+     says nothing about the zone Monday was lived in.
+3. **Push announced a post to people whose day had already moved on — FIXED
+   (Phase 2, notification relevance).** This was the half of the old
+   cross-timezone entry that reached out and touched people: a Seattle friend's
+   Fajr arriving in Mumbai at 4:30pm, on a date Mumbai finished yesterday.
+   `notify` now drops a post announcement for any recipient whose own local day
+   has moved past the post's `day_key`, reading `devices.utc_offset` alongside
+   `posts.utc_offset` (§6 has the exact rule, its ±1 day stretch, and why
+   unknown never means silence). Silence is opt-out-shaped and permanent — a
+   person who mutes the app after one 4:30pm Fajr alert is not coming back — so
+   this half had to close first, and it closed without the grid needing a day
+   model at all.
+4. **The shared week grid shows each member their own day — INTENDED, not a
+   defect.** The other half of that entry was filed as a bug and, examined, is
+   the semantic the screen wants. A column means "this member's own
+   2026-08-22", not a slice of absolute time, because the question the Circle
+   screen asks is whether each of you kept your five on YOUR OWN day — not who
+   reached Fajr first in UTC. Aligning columns by absolute time would split a
+   traveller's day across two of them and draw one complete day as two broken
+   ones, which is worse than the thing it fixes. The residual cost is real and
+   named: an empty cell is drawn `missed` or `waiting` against the VIEWER's
+   window for that prayer, not the poster's, so a friend several zones east can
+   read as missed for a few hours before their own window has closed. It
+   resolves itself the moment they post, and nothing scores off ordering — the
+   weekly scoreboard ranks by XP, not by who logged earlier.
 
-2 and 3 both need the same thing: an explicit day model rather than an implicit
-one, which cascades into `isDayComplete`, `isPerfectDay`, `xp(forDay:)`, the
-streak walk, `weeklyXP` and the unique constraint above. That is a project, and
-it is better designed against real data than guessed at. So `posts.utc_offset`
-and `PrayerLog.utcOffset` are **captured now and read by nothing** — the field
-is cheap to record and impossible to backfill, and every month without it is a
-month of history the eventual fix cannot use.
+**Two product answers, and neither needed new logic.** Phase 1 raised two
+questions that sound like they need a rule, and the existing code already
+answered both:
+
+- **A calendar date holding six prayers is ONE complete day.** `isDayComplete`
+  counts DISTINCT prayers on the `day_key` (`Set(...).map(\.prayer)`), so the
+  second Fajr earns its own XP and changes nothing about completeness — five
+  distinct prayers is five distinct prayers whether the day held five logs or
+  seven. `isPerfectDay` counts the same way.
+- **A 36-hour day increments the streak ONCE.** `applyStreakIncrement` returns
+  the profile untouched when `lastStreakDayKey == dayKey`, so a day already
+  banked cannot be banked again by a prayer arriving on the far side of a
+  flight.
+
+Both were true before Phase 1 was written; they are recorded here because the
+next person tempted to fold the zone into the GROUPING key needs to know they
+were checked rather than assumed.
 
 ## 8. Client architecture
 

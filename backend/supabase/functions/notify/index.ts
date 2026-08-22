@@ -59,6 +59,11 @@ import {
   parseNotifyRequest,
   type PrayerKind,
 } from "../_shared/validate.ts";
+import {
+  type DayWindow,
+  partitionByRelevance,
+  relevanceWindow,
+} from "../_shared/zones.ts";
 
 Deno.serve(async (req: Request): Promise<Response> => {
   const preflight = handleOptions(req);
@@ -170,7 +175,23 @@ async function notifyPost(
     jamaat: post.jamaat,
     placeLabel: post.place_label,
   });
+  // ONE clock read for both halves of the relevance decision. The poster's
+  // window and every recipient's local day have to be judged at the same
+  // instant: two `Date.now()` calls milliseconds apart can straddle a midnight
+  // somewhere, and the invariant that nobody in the poster's own zone is ever
+  // filtered would break for exactly the people awake at that moment.
+  const now = Date.now();
   return await fanOut(admin, caller, alert, {
+    // The one filter that is about WHERE the recipient is rather than what
+    // they asked for. See `relevance` in PushOptions.
+    // logged_at supplies the poster's own clock reading, which is what makes
+    // the time-of-day half of the filter possible — without it the window
+    // degrades to date-only and a Mumbai member is buzzed at 17:30 about a
+    // Seattle Fajr. Date.parse of a null/absent column yields NaN, and
+    // relevanceWindow reads a non-finite value as "unknown, do not filter".
+    relevance: relevanceWindow(post.day_key, post.utc_offset, now,
+                               Date.parse(post.logged_at)),
+    relevanceAt: now,
     threadId: `circle-${caller.circleId}`,
     category: "CIRCLE_POST",
     // One notification per prayer per friend: a burst of posts for the same
@@ -313,10 +334,27 @@ interface PushOptions {
   expiration?: number;
   friendActivityOnly?: boolean;
   countsPrivate?: boolean;
+  /// The span of local days this alert is still current news on
+  /// (`_shared/zones.ts`). Set for POSTS only: a post is about one prayer
+  /// window on one schedule day, so a circle-mate whose own day has already
+  /// moved past it is being told about something that is over.
+  ///
+  /// Deliberately absent for JOIN — "Yusuf joined your circle" is not about a
+  /// day at all — and unreachable from NUDGE, which never goes through
+  /// `fanOut`: a nudge is aimed at ONE named person who was just picked out of
+  /// a grid, and silently dropping it would break the one push in §6 a human
+  /// deliberately sent.
+  ///
+  /// `null` means "do not filter" and is the honest answer when the poster's
+  /// own zone is unknown.
+  relevance?: DayWindow | null;
+  /// The instant `relevance` was computed at, reused for every recipient.
+  relevanceAt?: number;
   data?: Record<string, unknown>;
 }
 
-/// Everyone in the circle except the caller.
+/// Everyone in the circle except the caller — minus anyone the alert has
+/// already gone stale for.
 async function fanOut(
   admin: Client,
   caller: Caller,
@@ -331,9 +369,19 @@ async function fanOut(
   const devices = await devicesFor(admin, recipients, {
     friendActivityOnly: opts.friendActivityOnly,
   });
-  return await push(admin, devices, alert, {
+  // Per DEVICE, not per user: the phone in a traveller's pocket re-registers
+  // with its new offset on the next foreground, while the iPad left at home
+  // still says the old one, and each is judged where it actually is. A device
+  // with no recorded offset is always kept — unknown never means silence.
+  const { current, stale } = partitionByRelevance(
+    devices,
+    opts.relevance ?? null,
+    opts.relevanceAt ?? Date.now(),
+  );
+  return await push(admin, current, alert, {
     ...opts,
     kind: opts.kind ?? String(opts.data?.kind ?? "post"),
+    outOfZone: stale.length,
   });
 }
 
@@ -341,7 +389,7 @@ async function push(
   admin: Client,
   devices: DeviceRow[],
   alert: Alert,
-  opts: PushOptions,
+  opts: PushOptions & { outOfZone?: number },
 ): Promise<Response> {
   const payload = buildAPNsPayload({
     alert,
@@ -369,5 +417,9 @@ async function push(
     delivered: summary.delivered,
     skipped: summary.skipped,
     dropped: summary.unregistered.length,
+    // Devices whose local day had already moved past this post. Reported so a
+    // "why did nobody get it" question has an answer that is not a guess;
+    // `NotifyReply` on the Swift side decodes unknown fields tolerantly.
+    outOfZone: opts.outOfZone ?? 0,
   });
 }

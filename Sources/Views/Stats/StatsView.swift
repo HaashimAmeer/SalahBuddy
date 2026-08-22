@@ -1039,8 +1039,15 @@ private struct DayPhotoSheet: View {
                 .foregroundStyle(Theme.inkDeep)
 
             ForEach(Prayer.allCases) { prayer in
+                // latestLog, not `first`: a travel day can hold TWO logs for
+                // one prayer, and the week grid draws the later one. `first`
+                // drew the other, so the same date showed a different tier and
+                // time depending on which screen you were looking at — and any
+                // future reordering of `logs` would have changed the answer
+                // silently.
                 prayerRow(prayer: prayer,
-                          log: dayLogs.first { $0.prayer == prayer },
+                          log: GameEngine.latestLog(prayer: prayer,
+                                                    dayKey: summary.id, in: dayLogs),
                           excused: state.isExcused(prayer: prayer, dayKey: summary.id))
             }
 

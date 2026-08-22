@@ -355,6 +355,7 @@ final class CircleSync: ObservableObject {
         // The SLOT travels with the op, not just the row id — see
         // `CircleOp.uploadPhoto` for the orphaned-object bug that fixes.
         enqueue(.uploadPhoto(postID: log.id, dayKey: log.dayKey, prayer: log.prayer,
+                             utcOffset: log.utcOffset,
                              filename: filename, path: path))
     }
 
@@ -1018,28 +1019,84 @@ final class CircleSync: ObservableObject {
         return next
     }
 
-    /// `(user, day, prayer)` — the server's uniqueness key for a post, minus
-    /// the circle, which is fixed for everything in one mirror.
+    /// `(user, day, prayer, zone)` — the server's uniqueness key for a post,
+    /// minus the circle, which is fixed for everything in one mirror.
+    ///
+    /// v4: the zone joined the key in 20260822000300, and it has to join it
+    /// here in lockstep or the mirror stops modelling the table it mirrors.
+    /// Two same-date fajrs from opposite sides of a flight are two rows on the
+    /// server and must be two entries here; an undo-and-relog of the same
+    /// prayer in the same zone is one row there and must collapse to one here.
+    ///
+    /// A missing offset renders as a single fixed token rather than something
+    /// unique per row, which is this key's spelling of the constraint's NULLS
+    /// NOT DISTINCT: legacy rows keep colliding with each other. It can never
+    /// be mistaken for a real offset — those are always digits.
+    ///
+    /// This is EXACT-match only. A zoneless row is also a wildcard against
+    /// every real zone in its bucket, which no string key can express — see
+    /// `slotBucket` and `upserted`, which carry that half.
     static func slotKey(_ post: RemotePost) -> String {
+        let zone: String = post.utcOffset.map(String.init) ?? "nozone"
+        return "\(CircleSync.slotBucket(post))|\(zone)"
+    }
+
+    /// The same slot with the ZONE TAKEN OFF — `(user, day, prayer)`, the thing
+    /// a prayer happens in at most twice.
+    ///
+    /// A zoneless row is a WILDCARD, not a third zone. That is the client's
+    /// rule (`GameEngine.isSamePrayerInstance`: a nil offset matches anything)
+    /// and, since 20260822000400, the server's too: a row with no offset and a
+    /// row with one can never both exist for one prayer. The bucket is how this
+    /// mirror says the same thing — see `upserted`.
+    static func slotBucket(_ post: RemotePost) -> String {
         "\(post.userID.uuidString)|\(post.dayKey)|\(post.prayer.rawValue)"
     }
 
+    /// Fold a page of server rows into the mirrored ones. INCOMING ALWAYS WINS:
+    /// it came from the table this is a mirror of, and anything here that names
+    /// the same prayer is by definition the stale copy.
+    ///
+    /// "The same prayer" is the wildcard rule, in three parts:
+    ///   * the same row id;
+    ///   * the same slot INCLUDING the zone — someone undid and re-logged that
+    ///     prayer where they stood, so the mirrored row is a ghost;
+    ///   * the same `(user, day, prayer)` where one of the two rows has NO
+    ///     zone. A zoneless row (every post written before 20260822000200)
+    ///     matches anything, so the pair cannot both be real. Without this
+    ///     clause an undo-and-relog that crossed the v4 upgrade left a legacy
+    ///     row and a zoned row side by side in the mirror FOREVER — no later
+    ///     delta could ever displace either, `prayerLogs` fed both into
+    ///     `GameEngine`, and that member's weekly score read a whole prayer
+    ///     high on every other device in the circle.
+    ///
+    /// Two rows with two DIFFERENT real zones are the case this all exists for
+    /// and are both kept: they are two genuinely different prayers (§7.2).
     static func upserted(posts base: [RemotePost], with incoming: [RemotePost]) -> [RemotePost] {
         guard !incoming.isEmpty else { return base }
         var incomingIDs: Set<UUID> = []
         var incomingSlots: Set<String> = []
+        var zonelessBuckets: Set<String> = []
+        var zonedBuckets: Set<String> = []
         for post in incoming {
             incomingIDs.insert(post.id)
             incomingSlots.insert(CircleSync.slotKey(post))
+            if post.utcOffset == nil {
+                zonelessBuckets.insert(CircleSync.slotBucket(post))
+            } else {
+                zonedBuckets.insert(CircleSync.slotBucket(post))
+            }
         }
         var result: [RemotePost] = []
         result.reserveCapacity(base.count + incoming.count)
         for post in base {
             if incomingIDs.contains(post.id) { continue }
-            // Same slot, different row id: someone undid and re-logged that
-            // prayer, so the mirrored row is the stale one. Keeping both would
-            // put two posts in a cell that can only hold one.
             if incomingSlots.contains(CircleSync.slotKey(post)) { continue }
+            let bucket: String = CircleSync.slotBucket(post)
+            // An incoming zoneless row matches every zone in its bucket...
+            if zonelessBuckets.contains(bucket) { continue }
+            // ...and a mirrored zoneless row is matched by any incoming zone.
+            if post.utcOffset == nil, zonedBuckets.contains(bucket) { continue }
             result.append(post)
         }
         result.append(contentsOf: incoming)
@@ -1296,9 +1353,10 @@ final class SupabaseCircleTransport: CircleSyncTransport {
             try await upsertChallenge(challenge, circleID: circleID, userID: userID)
         case .deleteChallenge(let challengeID):
             try await deleteChallenge(challengeID)
-        case .uploadPhoto(_, let dayKey, let prayer, let filename, let path):
-            try await uploadPhoto(dayKey: dayKey, prayer: prayer, filename: filename,
-                                  path: path, circleID: circleID, userID: userID)
+        case .uploadPhoto(_, let dayKey, let prayer, let utcOffset, let filename, let path):
+            try await uploadPhoto(dayKey: dayKey, prayer: prayer, utcOffset: utcOffset,
+                                  filename: filename, path: path,
+                                  circleID: circleID, userID: userID)
         case .deletePhoto(let path):
             try await deletePhoto(path)
         }
@@ -1319,9 +1377,9 @@ final class SupabaseCircleTransport: CircleSyncTransport {
         } catch {
             guard SupabaseCircleTransport.isUniqueViolation(error) else { throw error }
             // Not our row id, but our SLOT: `(user_id, circle_id, day_key,
-            // prayer)` is unique, so this prayer is already posted — from
-            // another device, or from a create whose acknowledgement we lost.
-            // Correcting it in place is both idempotent and grant-shaped.
+            // prayer, utc_offset)` is unique, so this prayer is already posted
+            // — from another device, or from a create whose acknowledgement we
+            // lost. Correcting it in place is both idempotent and grant-shaped.
             try await updatePostSlot(row)
         }
     }
@@ -1329,14 +1387,63 @@ final class SupabaseCircleTransport: CircleSyncTransport {
     private func updatePostSlot(_ row: RemotePost) async throws {
         let patch = PostSlotPatch(tier: row.tier, loggedAt: row.loggedAt, jamaat: row.jamaat,
                                   placeLabel: row.placeLabel, travelCombined: row.travelCombined)
-        let _: PostgrestResponse<Void> = try await Supa.client
+        let query = try Supa.client
             .from("posts")
             .update(patch, returning: .minimal)
-            .eq("user_id", value: row.userID)
-            .eq("circle_id", value: row.circleID)
-            .eq("day_key", value: row.dayKey)
-            .eq("prayer", value: row.prayer.rawValue)
+        let _: PostgrestResponse<Void> = try await SupabaseCircleTransport
+            .scopedToSlot(query, userID: row.userID, circleID: row.circleID,
+                          dayKey: row.dayKey, prayer: row.prayer, utcOffset: row.utcOffset)
             .execute()
+    }
+
+    /// Narrow a `posts` write to ONE row: the slot, zone included.
+    ///
+    /// v4 (migration 20260822000300): `utc_offset` joined the posts unique key,
+    /// because a long-haul flight makes two genuinely different prayers share
+    /// one `day_key`. A filter that stops at `(user, circle, day, prayer)`
+    /// therefore matches BOTH of a traveller's fajrs and writes the same value
+    /// over each — which for the photo patch below means the second prayer's
+    /// JPEG is advertised on the first one's row, and the trigger tombstones
+    /// the first one's real photo out from under it.
+    ///
+    /// THE FILTER IS THE WILDCARD RULE, not plain equality, and the two ways it
+    /// could have been written are both wrong:
+    ///
+    ///   * `eq("utc_offset", x)` alone never matches a NULL row, so when the
+    ///     row blocking the insert is a legacy zoneless one — a v3.9 log this
+    ///     account backfilled from another device — the repair matched zero
+    ///     rows and quietly did nothing. For `uploadPhoto` that is the exact
+    ///     orphan this method was written to prevent: the JPEG reaches Storage,
+    ///     no row points at it, and the retention sweep can never collect it.
+    ///   * dropping the filter entirely matches BOTH of a traveller's fajrs and
+    ///     writes the same value over each, stamping one prayer's photo onto
+    ///     the other.
+    ///
+    /// So: a real offset matches its own zone OR a zoneless row, and a zoneless
+    /// write (a pre-v4 log, or an upload queued by a build that predates the
+    /// column) matches the whole slot — nil means "no zone to narrow by", which
+    /// is exactly what that build did. Since 20260822000400 the server refuses
+    /// to hold a zoneless row and a zoned row for one prayer, so the first form
+    /// lands on exactly one row.
+    private static func scopedToSlot(_ query: PostgrestFilterBuilder,
+                                     userID: UUID, circleID: UUID,
+                                     dayKey: String, prayer: Prayer,
+                                     utcOffset: Int?) -> PostgrestFilterBuilder {
+        let scoped: PostgrestFilterBuilder = query
+            .eq("user_id", value: userID)
+            .eq("circle_id", value: circleID)
+            .eq("day_key", value: dayKey)
+            .eq("prayer", value: prayer.rawValue)
+        guard let utcOffset: Int = utcOffset else { return scoped }
+        return scoped.or(SupabaseCircleTransport.zoneOrLegacyFilter(utcOffset))
+    }
+
+    /// `utc_offset.eq.<n>,utc_offset.is.null` — PostgREST's spelling of "this
+    /// zone, or the legacy row that has none". Pure and `static` so the string
+    /// itself is testable; getting it wrong fails silently as a write that
+    /// matches nothing.
+    nonisolated static func zoneOrLegacyFilter(_ utcOffset: Int) -> String {
+        "utc_offset.eq.\(utcOffset),utc_offset.is.null"
     }
 
     private func deletePost(_ postID: UUID) async throws {
@@ -1410,20 +1517,23 @@ final class SupabaseCircleTransport: CircleSyncTransport {
     /// id. See `CircleOp.uploadPhoto` — an `id`-keyed patch silently matched
     /// zero rows whenever `upsertPost` had repaired a slot collision in place,
     /// stranding the JPEG in Storage with nothing pointing at it and nothing
-    /// able to collect it. `(user_id, circle_id, day_key, prayer)` is the same
-    /// key `updatePostSlot` uses, so it lands on whichever row won the slot;
-    /// `posts_tombstone_photo` records whatever path it displaces.
-    private func uploadPhoto(dayKey: String, prayer: Prayer, filename: String,
-                             path: String, circleID: UUID, userID: UUID) async throws {
+    /// able to collect it. `(user_id, circle_id, day_key, prayer, utc_offset)`
+    /// is the same key `updatePostSlot` uses, so it lands on whichever row won
+    /// the slot; `posts_tombstone_photo` records whatever path it displaces.
+    ///
+    /// v4: the zone is part of that key now — see `scopedToSlot`. Without it a
+    /// traveller's second fajr would stamp its photo onto the first one too.
+    private func uploadPhoto(dayKey: String, prayer: Prayer, utcOffset: Int?,
+                             filename: String, path: String,
+                             circleID: UUID, userID: UUID) async throws {
         try await PhotoSync.upload(filename: filename, to: path)
         let patch: [String: String] = ["photo_path": path]
-        let _: PostgrestResponse<Void> = try await Supa.client
+        let query = try Supa.client
             .from("posts")
             .update(patch, returning: .minimal)
-            .eq("user_id", value: userID)
-            .eq("circle_id", value: circleID)
-            .eq("day_key", value: dayKey)
-            .eq("prayer", value: prayer.rawValue)
+        let _: PostgrestResponse<Void> = try await SupabaseCircleTransport
+            .scopedToSlot(query, userID: userID, circleID: circleID,
+                          dayKey: dayKey, prayer: prayer, utcOffset: utcOffset)
             .execute()
     }
 
