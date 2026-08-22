@@ -38,6 +38,20 @@ targets:
         # TestFlight.
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        # Export compliance, answered once here instead of by hand on every
+        # single build. App Store Connect will not release a build to testers
+        # until this question is settled, so a missing key showed up TWICE in
+        # the TestFlight list: "Missing Compliance", and — because an
+        # unreleased build cannot be distributed — no tester group assigned
+        # either. One key fixes both.
+        #
+        # false is the accurate answer, not a shortcut: it declares no
+        # NON-EXEMPT encryption. Everything here is exempt — HTTPS/TLS to
+        # Supabase, Apple and Google sign-in over the same, and the SHA-256 in
+        # AuthService's nonce, which is a hash rather than encryption and is
+        # used for authentication regardless. Revisit only if the app ever
+        # ships its own cryptography.
+        ITSAppUsesNonExemptEncryption: false
         NSLocationWhenInUseUsageDescription: "SalahBuddy uses your location to calculate accurate prayer times."
         NSCameraUsageDescription: "SalahBuddy uses the camera so you can snap a quick photo when you pray and share it with your circle."
         NSPhotoLibraryUsageDescription: "SalahBuddy lets you pick a photo from your library for your prayer post."

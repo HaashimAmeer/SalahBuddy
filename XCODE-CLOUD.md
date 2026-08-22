@@ -82,6 +82,27 @@ the file.
 the functions; it does not touch the live project, which is why a v4 session can
 iterate on SQL all day without a Supabase account.
 
+## Export compliance is answered in `project.yml`, not by hand
+
+`ITSAppUsesNonExemptEncryption: false` lives in the target's `info.properties`.
+Without it every upload landed in TestFlight as **"Missing Compliance"** needing
+a manual *Manage* click, and — this is the part that looks like a separate bug —
+**no tester group was assigned either**. App Store Connect will not release a
+build to testers until the export question is settled, so an unanswered build
+simply never reaches the internal group the workflow's post-action points at.
+One key fixes both symptoms.
+
+`false` is the accurate answer rather than a shortcut: it declares no
+*non-exempt* encryption. Everything the app does is exempt — HTTPS/TLS to
+Supabase, Apple and Google sign-in over the same, and the SHA-256 in
+`AuthService`'s nonce, which is a hash rather than encryption and serves
+authentication regardless. Revisit only if the app ever ships its own
+cryptography.
+
+Builds uploaded BEFORE this key was added keep their warning — the plist only
+travels with new builds. Clear them from the TestFlight list by hand, or leave
+them to expire.
+
 ## Current state (2026-08-21)
 
 - Workflow **"Staging"** is active: Branch Changes on `staging`, auto-cancel,
