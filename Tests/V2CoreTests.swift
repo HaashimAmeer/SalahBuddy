@@ -161,11 +161,11 @@ final class V2CoreTests: XCTestCase {
 
     func testBuddyRoster() {
         // v3.3: bigger demo circle (8 buddies + you = 9).
-        XCTAssertEqual(BuddySimulator.buddies.count, 8)
+        XCTAssertEqual(BuddySimulator.buddies.count, 11)
         XCTAssertEqual(BuddySimulator.buddies.first?.name, "Mina")
         // All distinct names + emojis, consistency in a plausible range.
-        XCTAssertEqual(Set(BuddySimulator.buddies.map(\.name)).count, 8)
-        XCTAssertEqual(Set(BuddySimulator.buddies.map(\.emoji)).count, 8)
+        XCTAssertEqual(Set(BuddySimulator.buddies.map(\.name)).count, 11)
+        XCTAssertEqual(Set(BuddySimulator.buddies.map(\.emoji)).count, 11)
         XCTAssertTrue(BuddySimulator.buddies.allSatisfy { $0.consistency > 0.5 && $0.consistency <= 1.0 })
     }
 

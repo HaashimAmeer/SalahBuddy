@@ -177,7 +177,7 @@ struct RechargeBody: View {
             Text("Good deeds for today")
                 .font(Theme.sans(16, .bold))
                 .foregroundStyle(Theme.inkDeep)
-            Text("A fresh set each day — tap when you've done one.")
+            Text("A fresh set each day — tap when you've done one, tap again to undo.")
                 .font(Theme.sans(12, .semibold))
                 .foregroundStyle(Theme.inkMuted)
 
@@ -188,12 +188,18 @@ struct RechargeBody: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    /// Tapping toggles. A deed is a claim about your own day, not a
+    /// transaction, so an accidental tap has to be takeable-back — and the
+    /// row is a 66pt target in a scrolling sheet, which is exactly the shape
+    /// of thing people brush past. `uncompleteDeed` returns the XP by the same
+    /// rules that granted it.
     private func deedRow(_ deed: GoodDeed) -> some View {
         let done = state.deedsDoneToday.contains(deed.id)
         return Button {
-            guard !done else { return }
-            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-            withAnimation(Theme.spring) { state.completeDeed(deed.id) }
+            UIImpactFeedbackGenerator(style: done ? .soft : .light).impactOccurred()
+            withAnimation(Theme.spring) {
+                if done { state.uncompleteDeed(deed.id) } else { state.completeDeed(deed.id) }
+            }
         } label: {
             HStack(spacing: 12) {
                 Text(deed.emoji).font(.system(size: 22))
@@ -222,7 +228,8 @@ struct RechargeBody: View {
             )
         }
         .buttonStyle(.plain)
-        .disabled(done)
+        .accessibilityAddTraits(done ? [.isButton, .isSelected] : .isButton)
+        .accessibilityHint(done ? "Double tap to undo" : "Double tap to mark done")
     }
 }
 

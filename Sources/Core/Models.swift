@@ -374,6 +374,11 @@ struct AppSettings: Codable {
     /// which is byte-for-byte v3.9 behaviour (a solo account's empty circle
     /// included), so every existing install keeps exactly what it had.
     var circleMode: CircleMode = .demo
+    /// v4: the Circle screen's "turn notifications on" hint, once dismissed.
+    /// Someone who declined at onboarding is never re-prompted by iOS, so the
+    /// hint is the only thing telling them why nudges do nothing — but it is
+    /// a suggestion, and a suggestion you cannot silence is an advert.
+    var circlePushHintDismissed: Bool = false
 
     init() {}
 
@@ -399,6 +404,8 @@ struct AppSettings: Codable {
         hasSeenTutorial = (try? c.decode(Bool.self, forKey: .hasSeenTutorial)) ?? false
         // v4: absent → .demo, so a pre-v4 save keeps the simulated circle.
         circleMode = (try? c.decode(CircleMode.self, forKey: .circleMode)) ?? .demo
+        circlePushHintDismissed =
+            (try? c.decode(Bool.self, forKey: .circlePushHintDismissed)) ?? false
     }
 }
 

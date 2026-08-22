@@ -87,6 +87,11 @@ struct CircleView: View {
                         CircleSyncStatusRow(sync: sync)
                     }
 
+                    // v4 §5: notifications are off, so nudges from this circle
+                    // go nowhere. Says so once, here, where the nudge button
+                    // is — and never again once dismissed. Silent in demo.
+                    CirclePushHint()
+
                     if state.isSoloMode {
                         // v3.9: no circle yet — the whole tab is the pitch.
                         // Still a tour target, so step 4 spotlights something

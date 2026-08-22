@@ -9,6 +9,17 @@
 -- embeds dayKey, so they do not even stack on the lock screen.
 --
 -- Both limits below read now(), never the body.
+--
+-- Every day_key here is anchored to `now() at time zone 'utc'`, because that is
+-- what record_nudge's ±1-day staleness guard compares against. Anchoring on
+-- plain now() (the session's local zone) used to make this file fail for a
+-- reason that had nothing to do with rate limiting: run it in the evening in
+-- PDT and local-yesterday is two days back in UTC, so a key the test intends as
+-- "just inside the window" lands outside it and raises SB400. It passed in CI
+-- and failed on a Mac after 5pm, which is the worst way for a test to be wrong.
+-- Real clients are unaffected -- they send a local TODAY key, and ±1 day
+-- absorbs any timezone offset. It is only this file's deliberate probing of the
+-- boundary that needs to use the same clock the guard does.
 \set ON_ERROR_STOP on
 begin;
 
@@ -44,13 +55,13 @@ begin
 
   -- ±1 day is allowed: a circle-mate west or east of you can legitimately be on
   -- yesterday's or tomorrow's schedule day (§7's same-city assumption is soft).
-  if public.record_nudge(v_recv, to_char(now() - interval '1 day', 'YYYY-MM-DD'), 'fajr') is not true then
+  if public.record_nudge(v_recv, to_char((now() at time zone 'utc') - interval '1 day', 'YYYY-MM-DD'), 'fajr') is not true then
     raise exception 'yesterday''s day_key was refused';
   end if;
 
   -- ...anything further out is not a prayer window, it is a fresh rate-limit token
   foreach v_day in array array['1000-01-02', '2020-01-01', '2999-12-31',
-                                to_char(now() + interval '5 days', 'YYYY-MM-DD')]
+                                to_char((now() at time zone 'utc') + interval '5 days', 'YYYY-MM-DD')]
   loop
     begin
       perform public.record_nudge(v_recv, v_day, 'dhuhr');
@@ -65,7 +76,7 @@ begin
   for i in 1..20 loop
     if public.record_nudge(
          v_recv,
-         to_char(now() + make_interval(days => (i % 3) - 1), 'YYYY-MM-DD'),
+         to_char((now() at time zone 'utc') + make_interval(days => (i % 3) - 1), 'YYYY-MM-DD'),
          (array['fajr','dhuhr','asr','maghrib','isha'])[(i % 5) + 1]::public.prayer_kind
        ) then
       v_sent := v_sent + 1;

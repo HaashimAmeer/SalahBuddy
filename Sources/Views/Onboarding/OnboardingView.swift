@@ -16,6 +16,9 @@ struct OnboardingView: View {
     @State private var pickedGoal = false
     @State private var notifGranted = false
     @State private var mascotIn = false
+    /// Step 0 owns a TextField, so the keyboard is up when Continue is tapped.
+    /// Advancing has to put it away FIRST — see `advance()`.
+    @FocusState private var nameFocused: Bool
 
     var body: some View {
         ZStack {
@@ -35,6 +38,14 @@ struct OnboardingView: View {
                         default: permissionsStep
                         }
                     }
+                    // One identity per step + an explicit crossfade. The switch
+                    // already changed identity implicitly, which left SwiftUI
+                    // diffing two structurally unrelated trees and animating
+                    // the difference as a layout change. Saying "these are
+                    // different views, fade between them" is both cheaper and
+                    // what it looked like it was meant to do.
+                    .id(step)
+                    .transition(.opacity)
                     .padding(.horizontal, 24)
                     .padding(.bottom, 24)
                 }
@@ -44,7 +55,15 @@ struct OnboardingView: View {
                     .padding(.bottom, 24)
             }
         }
-        .animation(Theme.spring, value: step)
+        // NO implicit .animation(_:value: step) here. Every mutation of `step`
+        // already goes through withAnimation(Theme.spring), so a container-wide
+        // implicit animation animated each step change TWICE. Worse, an
+        // implicit animation on the whole ZStack also captures layout changes
+        // this view did not cause — including the keyboard's own safe-area
+        // resize — and re-times the system's dismissal curve to our spring.
+        // That is why the jank only ever showed on a device: the Simulator
+        // defaults to a connected hardware keyboard, so the software keyboard
+        // never appears and never joins the transition.
         .onAppear {
             withAnimation(.spring(response: 0.6, dampingFraction: 0.55)) { mascotIn = true }
             refreshNotificationStatus()
@@ -108,6 +127,12 @@ struct OnboardingView: View {
     }
 
     private func advance() {
+        // Drop the keyboard before the step animation rather than alongside it.
+        // Two concurrent animations over the same layout is the whole bug: the
+        // keyboard's dismissal resizes the safe area while the step transition
+        // is mid-flight, and the ScrollView re-resolves its content offset
+        // against a height that is still moving.
+        nameFocused = false
         if step < 3 {
             withAnimation(Theme.spring) { step += 1 }
         } else {
@@ -146,6 +171,9 @@ struct OnboardingView: View {
                 .font(Theme.sans(15, .semibold))
                 .foregroundStyle(Theme.inkDeep)
             TextField("Your name", text: $name)
+                .focused($nameFocused)
+                .submitLabel(.done)
+                .onSubmit { nameFocused = false }
                 .font(Theme.sans(18, .semibold))
                 .foregroundStyle(Theme.inkDeep)
                 .textInputAutocapitalization(.words)

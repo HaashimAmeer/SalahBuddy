@@ -91,9 +91,15 @@ struct RemoteCircle: Codable, Equatable, Sendable {
     var createdBy: UUID?        // nullable: `on delete set null` when the creator leaves
     var createdAt: Date?
 
-    /// 8 MEMBERS TOTAL, not 8 friends + you. Mirrors `public.circle_max_members()`;
-    /// the server trigger is the real enforcement, this is only for the invite UI.
-    static let maxMembers = 8
+    /// 12 MEMBERS TOTAL, not 12 friends + you. Mirrors
+    /// `public.circle_max_members()`; the server trigger is the real
+    /// enforcement, this is only for the invite UI.
+    ///
+    /// Was 8 through the v4 beta — a number inherited from the demo simulator
+    /// and never re-derived for real circles. 12 seats a family or a masjid
+    /// friend group and still sits inside what the 35-day reconciling pull was
+    /// built for. See `20260822000100_circle_cap_12.sql`.
+    static let maxMembers = 12
 
     /// The same cap counted the way `CircleDataSource.maxMembers` counts it —
     /// FRIENDS, with you excluded. Spelled out because the off-by-one between

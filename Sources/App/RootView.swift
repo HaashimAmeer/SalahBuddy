@@ -8,80 +8,81 @@ struct RootView: View {
     @EnvironmentObject private var circles: CircleStack
     @Environment(\.scenePhase) private var scenePhase
 
-    /// 1-second heartbeat: drives countdowns and detects day rollover.
-    @State private var now = AppClock.now
+    /// Day-rollover bookkeeping. The 1-second heartbeat itself lives in
+    /// `AppClockProvider` — deliberately NOT here; see the type's comment.
     @State private var lastDayKey = AppClock.dayKey(for: AppClock.now)
 
     /// v3.7: selection is programmatic so the guided tour can walk the tabs.
     @State private var selectedTab = 0
     @State private var tourFrames: [String: CGRect] = [:]
 
-    private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
-
     var body: some View {
-        ZStack {
-            if state.settings.hasOnboarded {
-                tabShell
-            } else {
-                OnboardingView()
-            }
+        AppClockProvider(onTick: handleTick) {
+            ZStack {
+                if state.settings.hasOnboarded {
+                    tabShell
+                } else {
+                    OnboardingView()
+                }
 
-            // v3.6: "X just joined!" celebration — shown once, whatever tab
-            // is up, the first time the app opens after someone accepts.
-            if state.settings.hasOnboarded,
-               let newName = state.profile.pendingNewMemberName {
-                NewMemberCelebration(name: newName)
-                    .zIndex(20)
-            }
+                // v3.6: "X just joined!" celebration — shown once, whatever tab
+                // is up, the first time the app opens after someone accepts.
+                if state.settings.hasOnboarded,
+                   let newName = state.profile.pendingNewMemberName {
+                    NewMemberCelebration(name: newName)
+                        .zIndex(20)
+                }
 
-            // v3.7: guided first-run tour — spotlights real UI across the
-            // tabs and ends back on Today.
-            if let step = state.tutorialStep, state.settings.hasOnboarded {
-                TutorialOverlay(stepIndex: step,
-                                frames: tourFrames,
-                                solo: state.isSoloMode,
-                                onNext: { advanceTour(from: step) },
-                                onSkip: { withAnimation(Theme.spring) { state.endTutorial() } })
-                    .zIndex(30)
-                    .transition(.opacity)
+                // v3.7: guided first-run tour — spotlights real UI across the
+                // tabs and ends back on Today.
+                if let step = state.tutorialStep, state.settings.hasOnboarded {
+                    TutorialOverlay(stepIndex: step,
+                                    frames: tourFrames,
+                                    solo: state.isSoloMode,
+                                    onNext: { advanceTour(from: step) },
+                                    onSkip: { withAnimation(Theme.spring) { state.endTutorial() } })
+                        .zIndex(30)
+                        .transition(.opacity)
+                }
+            }
+            .animation(Theme.spring, value: state.profile.pendingNewMemberName)
+            .animation(Theme.spring, value: state.tutorialStep)
+            // v4 §4: the synced mirror, so a grid tile can resolve a buddy's
+            // Storage photo path without every intermediate view having to thread
+            // one through. `.empty` in demo mode, which costs a tile nothing.
+            .environment(\.circleMirror, state.circleSnapshot)
+            .onPreferenceChange(TutorialFramesKey.self) { tourFrames = $0 }
+            .onAppear { maybeStartTour() }
+            .onChange(of: state.settings.hasOnboarded) { _, onboarded in
+                if onboarded { maybeStartTour() }
+            }
+            .onChange(of: state.tutorialStep) { _, step in
+                guard let step, Tour.steps.indices.contains(step) else { return }
+                withAnimation(Theme.spring) { selectedTab = Tour.steps[step].tab }
+            }
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .active {
+                    state.refresh()
+                    NotificationManager.shared.reschedule()
+                    Task { await foregroundCircleSync() }
+                } else if phase == .background {
+                    Task { await backgroundCircleSync() }
+                }
             }
         }
-        .animation(Theme.spring, value: state.profile.pendingNewMemberName)
-        .animation(Theme.spring, value: state.tutorialStep)
-        .environment(\.appNow, now)
-        // v4 §4: the synced mirror, so a grid tile can resolve a buddy's
-        // Storage photo path without every intermediate view having to thread
-        // one through. `.empty` in demo mode, which costs a tile nothing.
-        .environment(\.circleMirror, state.circleSnapshot)
-        .onPreferenceChange(TutorialFramesKey.self) { tourFrames = $0 }
-        .onAppear { maybeStartTour() }
-        .onChange(of: state.settings.hasOnboarded) { _, onboarded in
-            if onboarded { maybeStartTour() }
-        }
-        .onChange(of: state.tutorialStep) { _, step in
-            guard let step, Tour.steps.indices.contains(step) else { return }
-            withAnimation(Theme.spring) { selectedTab = Tour.steps[step].tab }
-        }
-        .onReceive(ticker) { _ in
-            now = AppClock.now
-            let key = AppClock.dayKey(for: now)
-            if key != lastDayKey {
-                lastDayKey = key
-                state.refresh()      // new schedule + streak reconcile
-                // v4 Phase C: yesterday's grid is finished and today's is
-                // empty — the circle's day rolled over too.
-                Task { await dayChangedCircleSync() }
-            }
-        }
-        .onChange(of: scenePhase) { _, phase in
-            if phase == .active {
-                state.refresh()
-                NotificationManager.shared.reschedule()
-                Task { await foregroundCircleSync() }
-            } else if phase == .background {
-                Task { await backgroundCircleSync() }
-            }
-        }
+    }
+
+    /// Once a second, off `AppClockProvider`'s heartbeat. Touches `@State`
+    /// only at midnight, so on every other tick it costs a comparison and
+    /// invalidates nothing.
+    private func handleTick(_ now: Date) {
+        let key = AppClock.dayKey(for: now)
+        guard key != lastDayKey else { return }
+        lastDayKey = key
+        state.refresh()      // new schedule + streak reconcile
+        // v4 Phase C: yesterday's grid is finished and today's is empty —
+        // the circle's day rolled over too.
+        Task { await dayChangedCircleSync() }
     }
 
     // MARK: - The circle's lifecycle (v4 Phase C)
@@ -473,5 +474,41 @@ struct TutorialOverlay: View {
                 .shadow(color: .black.opacity(0.20), radius: 22, x: 0, y: 8)
         )
         .padding(.horizontal, 24)
+    }
+}
+
+// MARK: - The heartbeat
+
+/// Publishes `AppClock.now` into the environment once a second, and — the
+/// whole point — does it WITHOUT making its parent's body depend on the clock.
+///
+/// This used to be a `@State var now` on `RootView` itself, which meant every
+/// tick invalidated `RootView.body`: the 5-tab `TabView`, the celebration and
+/// the tutorial overlay were all re-evaluated once a second, forever, whether
+/// or not anything on screen showed a countdown. Only a handful of Today
+/// screens actually read `\.appNow`.
+///
+/// Here `content` is a stored value, built by the parent exactly once per
+/// parent update. When `now` changes only THIS body re-runs; `content` is
+/// handed back unchanged, so SwiftUI invalidates just the views that read the
+/// environment value. The parent's body is not re-executed at all.
+///
+/// `onTick` exists so there is one timer rather than two — the day-rollover
+/// check needs the same heartbeat and has no business owning its own.
+private struct AppClockProvider<Content: View>: View {
+    let onTick: (Date) -> Void
+    @ViewBuilder let content: Content
+
+    @State private var now = AppClock.now
+    private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        content
+            .environment(\.appNow, now)
+            .onReceive(ticker) { _ in
+                let tick = AppClock.now
+                now = tick
+                onTick(tick)
+            }
     }
 }

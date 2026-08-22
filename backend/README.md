@@ -288,25 +288,37 @@ dashboard first.
 
 ---
 
-## Cap 8 means eight people, total
+## Cap 12 means twelve people, total
 
-A v4 circle holds **8 members in total, including you** — not 8 friends plus
-you. The simulator's `maxFriends = 8` counts *friends* excluding you, so a demo
-circle looks like 9 faces and a real one looks like 8. That difference is
-deliberate and load-bearing for anyone comparing the two side by side.
+A v4 circle holds **12 members in total, including you** — not 12 friends plus
+you. The simulator's `maxFriends = 11` counts *friends* excluding you, so both
+modes seat twelve.
+
+It was 8 through the beta, and the demo/real pair showed 9 faces against 8. That
+was not a decision anybody made: the 8 came from a v2/v3 comment about the
+SIMULATED circle ("sharing five photos a day is an intimate thing; past ~8 it
+stops feeling like a circle"), real circles inherited the number without
+re-deriving it, and the two modes then counted it differently. 12 was picked on
+purpose — it seats a family or a masjid friend group, and it stays inside what
+the sync path was built for. The reconciling pull reads the whole 35-day window
+for every member and every device re-runs `GameEngine` over all of it, so the
+payload is ~1,400 posts at 8 seats and ~2,100 at 12. That is why it is 12 and
+not 50.
 
 The number lives in exactly one place, `public.circle_max_members()` (immutable,
-returns 8), so SQL, tests and any future client check agree by construction.
+returns 12), so SQL, tests and any future client check agree by construction.
+`CircleSeamTests` asserts the client's two constants match it and each other.
 
 Enforcement is two mechanisms, not one:
 
 - **One circle per user** is `unique (user_id)` on `circle_members`. Not a
   trigger — a constraint, so it holds under any concurrency.
-- **The ≤8 cap** is a `BEFORE INSERT` trigger that first takes
+- **The ≤12 cap** is a `BEFORE INSERT` trigger that first takes
   `pg_advisory_xact_lock(hashtext(circle_id))` and then counts. Without the
-  lock, two simultaneous joins both see 7 and both succeed; with it, the ninth
-  member gets `SQLSTATE SB409`. Test 01 asserts the 8th succeeds and the 9th
-  does not.
+  lock, two simultaneous joins both see 11 and both succeed; with it, the
+  thirteenth member gets `SQLSTATE SB409`. Test 01 asserts the 12th succeeds and
+  the 13th does not, deriving both from `circle_max_members()` so it follows the
+  cap instead of failing for the wrong reason when it next moves.
 
 `join_circle` surfaces failures as SQLSTATEs the client can branch on:
 `SB404` unknown code · `SB409` circle full · `SB410` already in a circle ·
@@ -377,7 +389,7 @@ preferences.
   **false**; the fan-out filters on it, because iOS cannot suppress an alert it
   has already been handed. `notify` announces a post only when no earlier post
   exists for that `(circle, day, prayer)` and claims `posts.notified_at` as a
-  one-shot lease, so a circle of 8 produces one alert per window rather than 7
+  one-shot lease, so a circle of 12 produces one alert per window rather than 11
   — and the same `postId` can never be re-announced. `{kind:"join"}` claims
   `circle_members.announced_at` the same way.
 - **Realtime publishes `posts` and `custom_challenges` — and deliberately not

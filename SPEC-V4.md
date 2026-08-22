@@ -18,7 +18,7 @@ picture at the social boundary.
 - ✅ **Stack: Supabase** — Postgres + Auth + Storage + Realtime + Edge
   Functions. Two projects mapped to the branch model: `staging` branch →
   staging project, `production` → prod project.
-- ✅ **One shared circle, cap 8** — a circle is a single shared group; every
+- ✅ **One shared circle, cap 12** — a circle is a single shared group; every
   member sees the same roster, week grid, and leaderboard. A user belongs to
   **at most one** circle (multi-circle is a v5 conversation).
 - ✅ **Auth: Sign in with Apple + Google** (Supabase Auth providers).
@@ -55,7 +55,7 @@ picture at the social boundary.
   path. Any member can invite. The v3.9 invite sheet becomes this share
   flow; the roster list remains only in demo mode.
 - **Join**: opening the link (or typing the code) with the app installed →
-  sign in → join if a slot is free (cap 8, enforced server-side). Joining
+  sign in → join if a slot is free (cap 12, enforced server-side). Joining
   mid-week shows your week-so-far posts to the circle (client uploads the
   current week's logs on join — mirrors v3.9's backfill decision).
 - **Leave**: anyone can leave anytime; the app returns to solo mode with all
@@ -135,7 +135,7 @@ photo_path?, travel_combined?)`
 |---|---|---|
 | `profiles` | id = auth uid, name, avatar, member_kind | RLS: readable by circle-mates |
 | `circles` | id, code (unique), created_by, created_at | code is the invite |
-| `circle_members` | circle_id, user_id (unique), joined_at | trigger enforces ≤ 8 and one-circle-per-user |
+| `circle_members` | circle_id, user_id (unique), joined_at | trigger enforces ≤ 12 and one-circle-per-user |
 | `posts` | id (client uuid), user_id, circle_id, day_key, prayer, tier, logged_at, jamaat, place_label, photo_path, travel_combined | unique (user_id, day_key, prayer) |
 | `excused_days` | user_id, circle_id, day_key | no reason column, ever |
 | `recovery_weeks` | user_id, circle_id, week_key, xp | opaque total (see §3) |

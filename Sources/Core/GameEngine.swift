@@ -64,6 +64,31 @@ enum GameEngine {
         return max(0, min(amount, cap - earnedToday))
     }
 
+    /// What the day's recovery XP becomes when one dhikr/deed action is undone.
+    /// Pure.
+    ///
+    /// A naive `earned -= deedXP` is wrong in both directions. Grants clamp to
+    /// a daily cap, so an action performed once the cap was already spent
+    /// earned NOTHING and undoing it must take nothing back — subtracting 10
+    /// there invents a debt. And it cannot simply be recomputed against the
+    /// cap either, because the cap SHRINKS as prayer XP arrives: someone who
+    /// earned 150 from dhikr in the morning and then prayed all five has a
+    /// current cap of 0 and 150 legitimately banked, so a recompute would
+    /// strip XP they properly hold.
+    ///
+    /// What is true in every case is that a day's recovery XP never exceeds
+    /// the raw worth of the actions still standing. Clamping to that is exact
+    /// whenever the cap held steady, and refuses to strip banked XP when it
+    /// did not.
+    ///
+    /// - Parameters:
+    ///   - earnedToday: recovery XP actually granted so far today.
+    ///   - remainingRawTotal: uncapped worth of the actions that REMAIN
+    ///     (dhikr taps x dhikrXP + deeds x deedXP), the undone one excluded.
+    static func recoveryEarnedAfterUndo(earnedToday: Int, remainingRawTotal: Int) -> Int {
+        max(0, min(earnedToday, remainingRawTotal))
+    }
+
     /// XP a logged prayer is worth given its tier and whether it was in jamaat
     /// (the floor). The single source of truth for prayer XP.
     static func prayerXP(tier: LogTier, jamaat: Bool) -> Int {

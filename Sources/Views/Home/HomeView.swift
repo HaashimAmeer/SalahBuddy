@@ -13,7 +13,13 @@ struct HomeView: View {
     @State private var enlarged: EnlargedPost?
 
     var body: some View {
-        ZStack {
+        // ONE call, not three. This body re-runs every second — it reads
+        // `appNow` — and `currentTodayBlock` is not free: it filters and
+        // maxes over the day's windows, and takes `Calendar.current` on the
+        // pre-fajr path. Asking the same question three times per tick was
+        // pure waste, and the three answers were always identical anyway.
+        let block = state.currentTodayBlock(now: now)
+        return ZStack {
             Theme.bg.ignoresSafeArea()
 
             ScrollViewReader { proxy in
@@ -21,12 +27,12 @@ struct HomeView: View {
                     VStack(spacing: 16) {
                         TodayHeader()
                             .id("tour-home-top")
-                        PrayerTimesStrip(currentPrayer: state.currentTodayBlock(now: now)?
-                            .isYesterdayIsha == false ? state.currentTodayBlock(now: now)?.prayer : nil)
+                        PrayerTimesStrip(currentPrayer: block?.isYesterdayIsha == false
+                                         ? block?.prayer : nil)
 
                         TravelSuggestionBanner(dismissed: $travelSuggestionDismissed)
 
-                        if let block = state.currentTodayBlock(now: now) {
+                        if let block {
                             CurrentPrayerBlock(
                                 block: block,
                                 onPost: {

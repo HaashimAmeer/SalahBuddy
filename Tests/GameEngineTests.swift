@@ -280,4 +280,58 @@ final class GameEngineTests: XCTestCase {
         logs += [log(.fajr, .onTime, dayKey: beforeWeekKey)]         // outside week, ignored
         XCTAssertEqual(GameEngine.weeklyXP(logs: logs, weekStart: weekStart), 175)
     }
+
+    // MARK: - Undoing a recovery action (v4: un-tick a good deed)
+
+    func testUndoingADeedTakesBackExactlyWhatItGranted() {
+        // Nothing near the cap: 3 deeds = 30 earned, drop one and 20 stands.
+        XCTAssertEqual(GameEngine.recoveryEarnedAfterUndo(earnedToday: 30,
+                                                          remainingRawTotal: 20), 20)
+    }
+
+    func testUndoingADeedThatEarnedNothingTakesBackNothing() {
+        // The cap was already spent when this one was ticked, so it granted 0.
+        // Subtracting deedXP here would invent a debt: 4 deeds are worth 40
+        // raw but only 25 was ever granted, and 3 deeds are still worth more
+        // than 25, so the total must not move.
+        XCTAssertEqual(GameEngine.recoveryEarnedAfterUndo(earnedToday: 25,
+                                                          remainingRawTotal: 30), 25)
+    }
+
+    func testUndoNeverStripsXPBankedBeforeTheCapShrank() {
+        // The pathological case, and the reason this is not a recompute:
+        // 150 earned from dhikr in the morning (cap was 150, no prayer XP),
+        // then all five prayers land and the cap drops to 0. The 150 is
+        // legitimately banked. Undoing one deed may take back that deed and
+        // nothing more.
+        XCTAssertEqual(GameEngine.recoveryEarnedAfterUndo(earnedToday: 150,
+                                                          remainingRawTotal: 140), 140)
+    }
+
+    func testUndoingTheOnlyActionClearsTheDay() {
+        XCTAssertEqual(GameEngine.recoveryEarnedAfterUndo(earnedToday: 10,
+                                                          remainingRawTotal: 0), 0)
+    }
+
+    func testUndoNeverReturnsANegative() {
+        XCTAssertEqual(GameEngine.recoveryEarnedAfterUndo(earnedToday: 0,
+                                                          remainingRawTotal: 0), 0)
+        XCTAssertEqual(GameEngine.recoveryEarnedAfterUndo(earnedToday: -5,
+                                                          remainingRawTotal: 20), 0)
+    }
+
+    func testCompleteThenUndoIsAClosedLoop() {
+        // Grant and reverse with the SAME pure pieces the app uses, so the
+        // pair cannot drift apart: 2 deeds granted under a roomy cap, then
+        // one taken back, must land exactly on one deed's worth.
+        let first = GameEngine.recoveryGrant(amount: GameEngine.deedXP, earnedToday: 0,
+                                             onBreak: true, prayerXPToday: 0)
+        let second = GameEngine.recoveryGrant(amount: GameEngine.deedXP, earnedToday: first,
+                                              onBreak: true, prayerXPToday: 0)
+        let earned = first + second
+        XCTAssertEqual(earned, 2 * GameEngine.deedXP)
+        XCTAssertEqual(GameEngine.recoveryEarnedAfterUndo(earnedToday: earned,
+                                                          remainingRawTotal: GameEngine.deedXP),
+                       GameEngine.deedXP)
+    }
 }

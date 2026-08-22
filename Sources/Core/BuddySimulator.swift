@@ -35,9 +35,14 @@ enum BuddySimulator {
         let consistency: Double
     }
 
-    /// v3.3: bigger demo circle (8 buddies + you = 9) so the grid, scoreboard
-    /// and week view are exercised at realistic size. Varied consistency
-    /// spreads the leaderboard out.
+    /// v3.3: bigger demo circle so the grid, scoreboard and week view are
+    /// exercised at realistic size. Varied consistency spreads the leaderboard
+    /// out.
+    ///
+    /// v4: 11 buddies + you = 12, matching `RemoteCircle.maxMembers` exactly.
+    /// Demo used to seat 8 friends + you against a real circle's 8 TOTAL, so
+    /// the two modes showed 9 faces and 8 — an off-by-one that existed only
+    /// because both inherited the same number and counted it differently.
     static let buddies: [Buddy] = [
         Buddy(name: "Mina", emoji: "🌸", consistency: 0.92),
         Buddy(name: "Harun", emoji: "🧢", consistency: 0.75),
@@ -47,6 +52,9 @@ enum BuddySimulator {
         Buddy(name: "Bilal", emoji: "🚴", consistency: 0.79),
         Buddy(name: "Layla", emoji: "🌷", consistency: 0.95),
         Buddy(name: "Omar", emoji: "🎧", consistency: 0.62),
+        Buddy(name: "Nadia", emoji: "🌙", consistency: 0.81),
+        Buddy(name: "Tariq", emoji: "🧭", consistency: 0.66),
+        Buddy(name: "Salma", emoji: "🫖", consistency: 0.87),
     ]
 
     /// v3.6: extra demo friends an invite can "add" (the invite flow needs a
@@ -57,11 +65,14 @@ enum BuddySimulator {
         Buddy(name: "Idris", emoji: "🪶", consistency: 0.83),
     ]
 
-    /// The circle's max FRIEND count (you don't count) — sharing five photos
-    /// a day is an intimate thing; past ~8 it stops feeling like a circle.
-    static let maxFriends = 8
+    /// The circle's max FRIEND count (you don't count), kept equal to
+    /// `RemoteCircle.maxFriends` so a demo circle and a real one hold the same
+    /// number of people. Not a hard reference: Core has no dependency
+    /// direction problem here, but `Tests/CircleSeamTests` asserts the two
+    /// agree, which is what actually keeps them together.
+    static let maxFriends = 11
 
-    /// v3.9: every demo friend that can ever be in a circle — the base 8 plus
+    /// v3.9: every demo friend that can ever be in a circle — the base 11 plus
     /// the invitable extras. Solo accounts build their circle out of this whole
     /// roster, one invite at a time.
     static let roster: [Buddy] = buddies + invitablePool

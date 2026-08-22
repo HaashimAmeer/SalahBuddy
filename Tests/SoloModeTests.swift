@@ -54,7 +54,11 @@ final class SoloModeTests: XCTestCase {
 
     func testV38ProfileWithoutStartedSoloKeepsItsCircle() throws {
         // A v3.8 profile has the circle fields but no startedSolo → false, and
-        // the 8-buddy demo circle it's been living with is untouched.
+        // the base demo circle it's been living with is untouched. The base
+        // grew from 8 to 11 in v4 (matching a real circle's 12 seats), so a
+        // legacy save gains the new buddies — which is the intended shape:
+        // `activeBuddies` derives the circle from the CURRENT roster minus
+        // removals, and nothing about that save says "only these eight".
         let json = """
         {"name":"H","totalXP":900,"streak":3,"longestStreak":5,"streakFreezes":1,
          "earnedBadges":{},"perfectDayCount":2,"joinedAt":"2026-05-01T12:00:00Z",
@@ -70,7 +74,7 @@ final class SoloModeTests: XCTestCase {
         let circle = BuddySimulator.activeBuddies(removed: profile.removedBuddyNames,
                                                   invited: profile.invitedBuddyNames,
                                                   startedSolo: profile.startedSolo)
-        XCTAssertEqual(circle.count, 9, "the base 8 plus the accepted invite")
+        XCTAssertEqual(circle.count, 12, "the base 11 plus the accepted invite")
         XCTAssertTrue(circle.contains { $0.name == "Amira" })
     }
 
@@ -115,11 +119,11 @@ final class SoloModeTests: XCTestCase {
         XCTAssertEqual(BuddySimulator.activeBuddies(removed: ["Mina"], invited: ["Idris", "Mina"],
                                                     startedSolo: true).map(\.name), ["Idris"])
 
-        // Same inputs, legacy account: base 8 (minus removals) plus pool invites.
+        // Same inputs, legacy account: base 11 (minus removals) plus pool invites.
         XCTAssertEqual(BuddySimulator.activeBuddies(removed: [], invited: ["Idris", "Mina"],
-                                                    startedSolo: false).count, 9)
+                                                    startedSolo: false).count, 12)
         XCTAssertEqual(BuddySimulator.activeBuddies(removed: ["Mina"], invited: [],
-                                                    startedSolo: false).count, 7)
+                                                    startedSolo: false).count, 10)
     }
 
     func testRosterCoversEveryInvitableFriend() {
@@ -132,18 +136,18 @@ final class SoloModeTests: XCTestCase {
         XCTAssertNil(BuddySimulator.buddy(named: "Nobody"))
         // Deeper than one circle can hold — maxFriends still caps at the
         // invite site (AppState.acceptInvite).
-        XCTAssertEqual(BuddySimulator.maxFriends, 8)
+        XCTAssertEqual(BuddySimulator.maxFriends, 11)
         XCTAssertGreaterThan(BuddySimulator.roster.count, BuddySimulator.maxFriends)
     }
 
     func testARemovedBaseBuddyCanBeInvitedBackIntoALegacyCircle() {
-        // A legacy user who removes all 8 lands in solo mode, so
+        // A legacy user who removes all 11 lands in solo mode, so
         // AppState.invitableBuddies offers the WHOLE roster back (it keys off
         // the derived isSoloMode, not the persisted startedSolo flag).
         let allRemoved = BuddySimulator.buddies.map(\.name)
         XCTAssertTrue(BuddySimulator.activeBuddies(removed: allRemoved, invited: [],
                                                    startedSolo: false).isEmpty)
-        XCTAssertEqual(BuddySimulator.roster.count, 11, "everyone is offerable again")
+        XCTAssertEqual(BuddySimulator.roster.count, 14, "everyone is offerable again")
 
         // acceptInvite clears the name from removedBuddyNames as it records the
         // invite; the legacy branch then yields them again — exactly once (a

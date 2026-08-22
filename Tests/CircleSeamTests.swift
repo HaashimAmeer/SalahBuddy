@@ -78,6 +78,15 @@ final class CircleSeamTests: XCTestCase {
                        "the source answers for OTHER members; AppState appends you")
         XCTAssertEqual(source.maxMembers, BuddySimulator.maxFriends)
 
+        // v4: demo and real seat the SAME number of people. These were 9 and 8
+        // through the beta, because both modes inherited one number and counted
+        // it differently (friends-excluding-you vs. seats). This assertion is
+        // what stops them drifting apart again — the two constants are declared
+        // in different files and nothing else forces them to agree.
+        XCTAssertEqual(BuddySimulator.maxFriends, RemoteCircle.maxFriends,
+                       "a demo circle and a real one must hold the same headcount")
+        XCTAssertEqual(RemoteCircle.maxMembers, 12, "mirrors public.circle_max_members()")
+
         // A solo account's circle is an empty source — that's what isSoloMode reads.
         XCTAssertTrue(SimulatedCircleDataSource(buddies: []).members.isEmpty)
     }

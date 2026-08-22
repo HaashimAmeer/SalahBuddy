@@ -737,6 +737,38 @@ final class AppState: ObservableObject {
         mirrorRecoveryWeek()
     }
 
+    /// Un-tick a good deed — the mis-tap escape hatch.
+    ///
+    /// The XP has to come back off by the same rules it went on by, which is
+    /// NOT `totalXP -= deedXP`: a deed ticked once the daily cap was already
+    /// spent earned nothing, and taking 10 back there would invent a debt.
+    /// `GameEngine.recoveryEarnedAfterUndo` does that reasoning; this method
+    /// only supplies what remains and banks the difference.
+    ///
+    /// Deliberately today-only. `deedsDoneToday` reads the current dayKey, and
+    /// yesterday's deeds are history rather than a pending choice.
+    func uncompleteDeed(_ id: String) {
+        guard deedsDoneToday.contains(id) else { return }
+
+        var remaining = profile.deedsByDay[todayKey] ?? []
+        remaining.removeAll { $0 == id }
+        profile.deedsByDay[todayKey] = remaining.isEmpty ? nil : remaining
+
+        let rawRemaining = dhikrToday * GameEngine.dhikrXP
+            + remaining.count * GameEngine.deedXP
+        let earned = recoveryXPToday
+        let settled = GameEngine.recoveryEarnedAfterUndo(earnedToday: earned,
+                                                         remainingRawTotal: rawRemaining)
+        let refund = earned - settled
+        if refund > 0 {
+            profile.totalXP = max(0, profile.totalXP - refund)
+            profile.recoveryXPByDay[todayKey] = settled == 0 ? nil : settled
+        }
+
+        persistProfile()
+        mirrorRecoveryWeek()
+    }
+
     /// Grant up to `amount` XP, never exceeding today's state-aware cap.
     private func awardRecoveryXP(_ amount: Int) {
         let granted = GameEngine.recoveryGrant(amount: amount, earnedToday: recoveryXPToday,
@@ -792,7 +824,7 @@ final class AppState: ObservableObject {
 
     /// v3.9: the single source of truth for solo presentation everywhere.
     /// DERIVED from the live circle, so it also covers the legacy path where
-    /// someone removes all 8 members.
+    /// someone removes all 11 members.
     var isSoloMode: Bool { circleSource.members.isEmpty }
 
     /// Friends who can still accept an invite. An EMPTY circle (`isSoloMode` —
