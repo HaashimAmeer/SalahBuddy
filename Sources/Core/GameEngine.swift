@@ -212,11 +212,15 @@ enum GameEngine {
     /// XP the user missed out on today: for every window that fully passed
     /// without an in-window log, the onTime XP was foregone (minus whatever a
     /// qada recovered). Positive-tone copy; excused days forgo nothing.
+    ///
+    /// `joinedAt` windows are skipped entirely: XP that was foregone before
+    /// the account existed was never on offer, so counting it would greet a
+    /// brand-new user with a bill for a day they were not present for.
     static func missedOutXP(logs: [PrayerLog], schedule: DaySchedule, now: Date,
-                            isExcused: Bool) -> Int {
+                            isExcused: Bool, joinedAt: Date = .distantPast) -> Int {
         guard !isExcused else { return 0 }
         var total = 0
-        for window in schedule.windows where now >= window.end {
+        for window in schedule.windows where now >= window.end && window.end > joinedAt {
             let log = logs.first { $0.dayKey == schedule.dayKey && $0.prayer == window.prayer }
             if let log {
                 if !log.tier.isInWindow {

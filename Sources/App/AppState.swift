@@ -137,7 +137,8 @@ final class AppState: ObservableObject {
     var missedOutXPToday: Int {
         guard let schedule = todaySchedule else { return 0 }
         return GameEngine.missedOutXP(logs: logs, schedule: schedule,
-                                      now: AppClock.now, isExcused: isTodayExcused)
+                                      now: AppClock.now, isExcused: isTodayExcused,
+                                      joinedAt: profile.joinedAt)
     }
 
     /// Coordinates currently in use (device fix or fixed fallback).
@@ -178,6 +179,11 @@ final class AppState: ObservableObject {
         }
         if now < window.start { return .upcoming(opensAt: window.start) }
         if now < window.end { return .open(closesAt: window.end) }
+        // Closed before the account existed → not a miss. Mirrors the rule
+        // already applied to OTHER people in `gridEntries` (a circle member's
+        // days before they joined don't count against them); it was only ever
+        // missing for you, on your own first day.
+        if window.end <= profile.joinedAt { return .beforeJoining }
         return .missedWindow
     }
 

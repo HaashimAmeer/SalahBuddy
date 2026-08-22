@@ -511,6 +511,12 @@ enum PrayerStatus: Equatable {
     case open(closesAt: Date)
     case logged(LogTier)
     case missedWindow            // window passed today, qada still possible
+    /// v4: the window closed BEFORE this account existed. Not a miss — the
+    /// person simply was not here yet, and telling someone they failed at
+    /// four prayers within a minute of installing is the wrong first
+    /// impression for an app about building a gentle habit. Distinct from
+    /// `missedWindow` so nothing has to infer it from a date comparison.
+    case beforeJoining
 }
 
 struct LogResult: Equatable {

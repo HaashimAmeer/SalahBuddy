@@ -134,6 +134,40 @@ final class V2CoreTests: XCTestCase {
         // Excused day forgoes nothing.
         XCTAssertEqual(GameEngine.missedOutXP(logs: [], schedule: sched, now: evening,
                                               isExcused: true), 0)
+        // Omitting joinedAt keeps every pre-v4 call site's answer identical.
+        XCTAssertEqual(GameEngine.missedOutXP(logs: [], schedule: sched, now: evening,
+                                              isExcused: false, joinedAt: .distantPast), 90)
+    }
+
+    /// v4: XP foregone before the account existed was never on offer.
+    func testMissedOutXPIgnoresWindowsThatClosedBeforeJoining() {
+        let dayStart = cal.startOfDay(for: date(2026, 6, 10))
+        let dayKey = AppClock.dayKey(for: dayStart)
+        let sched = schedule(dayKey: dayKey, dayStart: dayStart)
+        let evening = dayStart.addingTimeInterval(18 * 3600)   // fajr/dhuhr/asr passed
+
+        // Installed this evening: all three closed windows predate the account,
+        // so the screen must not open with a bill for a day nobody was here for.
+        XCTAssertEqual(GameEngine.missedOutXP(logs: [], schedule: sched, now: evening,
+                                              isExcused: false, joinedAt: evening), 0)
+
+        // Installed mid-afternoon, after fajr and dhuhr closed but before asr
+        // did: exactly one window is chargeable.
+        let afterDhuhr = sched.window(for: .asr)!.start.addingTimeInterval(-1)
+        XCTAssertEqual(GameEngine.missedOutXP(logs: [], schedule: sched, now: evening,
+                                              isExcused: false, joinedAt: afterDhuhr), 30)
+
+        // A long-standing account is unaffected — the whole day counts.
+        XCTAssertEqual(GameEngine.missedOutXP(logs: [], schedule: sched, now: evening,
+                                              isExcused: false,
+                                              joinedAt: dayStart.addingTimeInterval(-86400)), 90)
+
+        // The boundary is exclusive on the join side: a window closing at the
+        // exact instant of joining is not charged, because `window.end > joinedAt`
+        // is what separates "was I here for any of it" from "did it just end".
+        let fajrEnd = sched.window(for: .fajr)!.end
+        XCTAssertEqual(GameEngine.missedOutXP(logs: [], schedule: sched, now: evening,
+                                              isExcused: false, joinedAt: fajrEnd), 60)
     }
 
     // MARK: - BuddySimulator

@@ -273,14 +273,21 @@ enum Tour {
     static let postPhotoIndex = 1
     static let earlierTodayIndex = 2
     static let leaderboardIndex = 3
-    static let challengesIndex = 4
-    static let journeyIndex = 5
 
+    /// v4: four steps, down from seven.
+    ///
+    /// Two of the removed ones explained circle features — group challenges,
+    /// and a closing "post your first prayer" card — to somebody who had just
+    /// installed the app and had no circle. A tour is a tax paid before any
+    /// value has been received, so it should cover only what is not
+    /// self-evident from the screen itself. Challenges surface on their own the
+    /// moment a circle exists, the Journey tab explains itself (it owns "How
+    /// scoring works"), and the old closing card restated the step before it.
     static let steps: [TourStep] = [
         TourStep(tab: 0, target: nil,
                  title: "Welcome to SalahBuddy 🌙",
-                 message: "You and your circle, keeping all five prayers together — one photo at a time. Here's a quick tour of how it works.",
-                 soloMessage: "All five prayers, one photo at a time — and friends to keep them with, whenever you're ready. Here's a quick tour of how it works."),
+                 message: "You and your circle, keeping all five prayers together — one photo at a time. Here's the quick version.",
+                 soloMessage: "All five prayers, one photo at a time — and friends to keep them with, whenever you're ready. Here's the quick version."),
         TourStep(tab: 0, target: .postPhoto,
                  title: "Post your prayer 📸",
                  message: "When a prayer comes in, log it by snapping a quick photo — your square fills in here, next to your circle's photos as they come in live.",
@@ -295,21 +302,9 @@ enum Tour {
                  soloEmptyMessage: "As the day goes on, finished prayers gather in an \"Earlier today\" list — tap any of them to see when you prayed, or to make one up."),
         TourStep(tab: 1, target: .leaderboard,
                  title: "Your circle 🏆",
-                 message: "Every prayer earns XP — the earlier in its window, the more. The leaderboard shows where everyone stands this week (it resets every Monday).",
+                 message: "Every prayer earns XP — the earlier in its window, the more — and the leaderboard resets every Monday. Your levels, badges and photo memories live over in Journey.",
                  soloTitle: "Start your circle 🤝",
-                 soloMessage: "Every prayer earns XP — the earlier in its window, the more. Invite a friend from this tab and you'll both land on a weekly leaderboard that resets every Monday."),
-        TourStep(tab: 1, target: .challenges,
-                 title: "Group challenges 🤝",
-                 message: "Take these on together — like everyone logging Fajr three days straight — and the whole circle earns bonus XP. You can create your own, too.",
-                 emptyMessage: "Further down, group challenges live — take them on together for bonus XP, or create your own.",
-                 soloTitle: "Challenges 🤝",
-                 soloMessage: "The moment someone joins you, group challenges open up — like everyone logging Fajr three days straight — and you all earn bonus XP together."),
-        TourStep(tab: 2, target: .journey,
-                 title: "Your Journey 🗺️",
-                 message: "Your levels, badges, and photo memories live here — and \"How scoring works\" explains the point system whenever you want it."),
-        TourStep(tab: 0, target: nil,
-                 title: "That's the tour!",
-                 message: "Time to post your first prayer — we'll nudge you when the next one comes in 🤲"),
+                 soloMessage: "Every prayer earns XP — the earlier in its window, the more. Invite a friend and you'll both land on a weekly leaderboard. Your levels, badges and memories live over in Journey."),
     ]
 }
 

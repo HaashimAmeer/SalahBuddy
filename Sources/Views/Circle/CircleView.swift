@@ -112,11 +112,6 @@ struct CircleView: View {
                 guard let step else { return }
                 withAnimation(Theme.spring) {
                     if step == Tour.leaderboardIndex { proxy.scrollTo("tour-circle-top", anchor: .top) }
-                    // v3.9: solo has no challenges section — the tour step
-                    // falls back to its centered card, so don't chase the id.
-                    if step == Tour.challengesIndex, !state.isSoloMode {
-                        proxy.scrollTo("tour-challenges", anchor: .center)
-                    }
                 }
             }
         }

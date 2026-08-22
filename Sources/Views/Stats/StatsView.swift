@@ -47,10 +47,6 @@ struct StatsView: View {
                     .padding(.horizontal, 16)
                     .padding(.bottom, 24)
                 }
-                .onChange(of: state.tutorialStep) { _, step in
-                    guard step == Tour.journeyIndex else { return }
-                    withAnimation(Theme.spring) { proxy.scrollTo("tour-journey-top", anchor: .top) }
-                }
             }
 
             // v3.6: centered modals (design session) — nicer than a bottom

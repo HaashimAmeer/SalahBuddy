@@ -18,6 +18,10 @@ struct CurrentPrayerBlock: View {
     @State private var showRecharge = false
     @State private var showResume = false
 
+    /// Nothing has ever been logged on this device — so this really is the
+    /// first prayer, not merely the first of today.
+    private var isFirstEver: Bool { state.logs.isEmpty }
+
     var body: some View {
         let entries = state.gridEntries(for: block.prayer, dayKey: block.dayKey)
 
@@ -28,6 +32,17 @@ struct CurrentPrayerBlock: View {
                 Text("🧳 Traveling — pray them together and log once.")
                     .font(Theme.sans(12, .semibold))
                     .foregroundStyle(Theme.qadaBlue)
+            }
+
+            // First ever visit: the camera CTA is the biggest thing on screen
+            // and nothing has said why a prayer app wants a photo, or who ends
+            // up seeing it. That is the question people actually have, so
+            // answer it once, here, and never again.
+            if isFirstEver, isWindowOpen, !excusedForBlockDay {
+                Text("Your first one 🌙 The photo is just your marker — it stays on this phone unless you start a circle.")
+                    .font(Theme.sans(12.5, .semibold))
+                    .foregroundStyle(Theme.inkMuted)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             if isWindowOpen, !excusedForBlockDay, let tier = activeTier, tier.isInWindow {
@@ -730,6 +745,10 @@ struct EarlierTodayBlock: View {
             Text(excused ? "Excused" : "Missed")
                 .font(Theme.sans(12, .bold))
                 .foregroundStyle(excused ? Theme.lilac : Theme.inkMuted)
+        case .beforeJoining:
+            Text("Before you started")
+                .font(Theme.sans(12, .semibold))
+                .foregroundStyle(Theme.inkMuted)
         default:
             EmptyView()
         }

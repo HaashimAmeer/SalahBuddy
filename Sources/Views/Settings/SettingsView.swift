@@ -694,6 +694,18 @@ struct SettingsView: View {
 
             Divider()
 
+            // v4: no account is required to track on your own, which means the
+            // journey lives on this phone and nowhere else. That is worth
+            // stating plainly rather than leaving people to discover it the
+            // hard way — an invisible risk becomes an informed one, and it is
+            // also the honest version of "we don't make you sign up".
+            Text("Your prayers, streak and photos are stored on this phone — no account needed. They're included in your iCloud device backup, so a restore brings them with it.")
+                .font(Theme.sans(12, .semibold))
+                .foregroundStyle(Theme.inkMuted)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Divider()
+
             // v3.7: the guided first-run tour, replayable any time.
             Button {
                 state.startTutorial()
