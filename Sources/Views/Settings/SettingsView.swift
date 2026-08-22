@@ -295,11 +295,9 @@ struct SettingsView: View {
                 Text("Asr madhab")
                     .font(Theme.sans(15, .semibold))
                     .foregroundStyle(Theme.inkDeep)
-                Picker("Asr madhab", selection: $state.settings.madhab) {
-                    Text("Shafi (standard)").tag(AsrMadhab.shafi)
-                    Text("Hanafi (later)").tag(AsrMadhab.hanafi)
-                }
-                .pickerStyle(.segmented)
+                SegmentedChoice(options: [.init(AsrMadhab.shafi, "Shafi (standard)"),
+                                          .init(AsrMadhab.hanafi, "Hanafi (later)")],
+                                selection: $state.settings.madhab)
                 Text("Madhab only moves Asr — Hanafi puts it about an hour later. Check \"Today's times\" below to see changes apply.")
                     .font(Theme.sans(11.5, .semibold))
                     .foregroundStyle(Theme.inkMuted)

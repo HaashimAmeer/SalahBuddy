@@ -46,7 +46,13 @@ struct RootView: View {
                 }
             }
             .animation(Theme.spring, value: state.profile.pendingNewMemberName)
-            .animation(Theme.spring, value: state.tutorialStep)
+            // NOT .animation(_:value: state.tutorialStep). `advanceTour`
+            // already wraps the step change in withAnimation(Theme.spring),
+            // and `onChange(of:tutorialStep)` fires a THIRD withAnimation for
+            // the tab switch — so one tap on Next ran three animations over
+            // two values, two of them on the same one. The overlay's own
+            // .transition(.opacity) is driven by the explicit withAnimation,
+            // which is where the intent actually lives.
             // v4 §4: the synced mirror, so a grid tile can resolve a buddy's
             // Storage photo path without every intermediate view having to thread
             // one through. `.empty` in demo mode, which costs a tile nothing.
@@ -324,15 +330,26 @@ struct TutorialOverlay: View {
     var body: some View {
         GeometryReader { geo in
             let cutout = cutoutRect(in: geo.size)
+            // A target taller than most of the screen cannot be "spotlit" in
+            // any useful sense — dimming everything except 80% of the page
+            // says nothing, and it guarantees the card lands on top of the
+            // thing it is describing (the "Start your circle" step did exactly
+            // that). Drop the ring and centre the card instead. Deliberately
+            // NOT folded into cutoutRect: that answers "is the target on
+            // screen", which is what picks the fallback copy, and an oversized
+            // target is very much on screen.
+            let spotlight: CGRect? = cutout.flatMap {
+                $0.height > geo.size.height * 0.62 ? nil : $0
+            }
             ZStack(alignment: .topLeading) {
-                dim(cutout: cutout, size: geo.size)
-                if let cutout {
+                dim(cutout: spotlight, size: geo.size)
+                if let spotlight {
                     RoundedRectangle(cornerRadius: 24, style: .continuous)
                         .strokeBorder(Theme.green, lineWidth: 2.5)
-                        .frame(width: cutout.width, height: cutout.height)
-                        .offset(x: cutout.minX, y: cutout.minY)
+                        .frame(width: spotlight.width, height: spotlight.height)
+                        .offset(x: spotlight.minX, y: spotlight.minY)
                 }
-                cardColumn(cutout: cutout, size: geo.size)
+                cardColumn(cutout: spotlight, size: geo.size)
             }
             .contentShape(Rectangle())
             .onTapGesture { onNext() }
@@ -372,21 +389,46 @@ struct TutorialOverlay: View {
     /// centered when there's no spotlight. When the spotlight sits high on
     /// screen the card drops low, and vice-versa, to avoid covering it.
     @ViewBuilder
+    /// Put the card NEXT TO what it is describing.
+    ///
+    /// This used to be a binary choice — flush to the top edge or flush to the
+    /// bottom edge, picked by which half of the screen the target sat in — so
+    /// a target low on the page sent the card to the very top and left most of
+    /// a phone's height as dead space between the explanation and the thing
+    /// explained. The two were never visually connected.
+    ///
+    /// Now the card sits just below the spotlight when there is room, just
+    /// above it when there is not, and centres only when neither side can hold
+    /// it. Every offset is clamped, so an unusual target cannot push the card
+    /// off screen, under the notch or behind the tab bar.
     private func cardColumn(cutout: CGRect?, size: CGSize) -> some View {
         let insets = Self.safeInsets
-        let cardLow = cutout.map { $0.midY < size.height * 0.42 } ?? false
-        VStack(spacing: 0) {
-            if cutout == nil {
-                Spacer(minLength: 0)
+        let gap: CGFloat = 16
+        let topLimit = insets.top + 10                  // clear the notch
+        let bottomLimit = size.height - insets.bottom - 74   // clear the tab bar
+
+        // A deliberate estimate rather than a measured height. Measuring costs
+        // a layout pass to discover the size and a second to act on it, which
+        // reads as the card twitching into place on every step — the exact
+        // choppiness this screen is being fixed for. Both branches below
+        // absorb an underestimate by growing into a flexible Spacer.
+        let estimate: CGFloat = 230
+
+        return VStack(spacing: 0) {
+            if let cutout, cutout.maxY + gap + estimate <= bottomLimit {
+                // Room underneath: pin the card just below the spotlight.
+                Spacer().frame(height: max(topLimit, cutout.maxY + gap))
                 cardBody
                 Spacer(minLength: 0)
-            } else if cardLow {
+            } else if let cutout, cutout.minY - gap - estimate >= topLimit {
+                // Room above: pin it just above, measured from the bottom.
                 Spacer(minLength: 0)
                 cardBody
-                    .padding(.bottom, insets.bottom + 74)   // clear the tab bar
+                Spacer().frame(height: max(0, size.height - (cutout.minY - gap)))
             } else {
+                // No cutout, or nothing fits beside it — centre.
+                Spacer(minLength: 0)
                 cardBody
-                    .padding(.top, insets.top + 10)          // clear the notch
                 Spacer(minLength: 0)
             }
         }
