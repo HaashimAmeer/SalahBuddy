@@ -31,6 +31,14 @@ enum AppClock {
     /// The app's notion of "now".
     static var now: Date { Date().addingTimeInterval(offset) }
 
+    /// The device's current UTC offset, in seconds.
+    ///
+    /// Lives here rather than at call sites for the same reason `now` does:
+    /// every notion of "when and where" the app has should come from one
+    /// place. Read `for: now` so a time-travelled clock lands on the right
+    /// side of a DST boundary.
+    static var utcOffsetSeconds: Int { TimeZone.current.secondsFromGMT(for: now) }
+
     /// Local-calendar day key, "yyyy-MM-dd".
     static func dayKey(for date: Date) -> String {
         let c = Calendar.current.dateComponents([.year, .month, .day], from: date)

@@ -143,10 +143,36 @@ photo_path?, travel_combined?)`
 | `devices` | user_id, apns_token, updated_at | |
 
 RLS everywhere: membership in the row's circle is the read predicate; you
-write only your own rows. Timezone note: `logged_at` is UTC, `day_key`/
-`week_key` are client-local strings — v4 assumes same-city circles (true for
-the beta); cross-timezone circles render each member by their own day_key and
-are an accepted soft spot.
+write only your own rows.
+
+**Timezones.** `logged_at` is UTC; `day_key`/`week_key` are client-local
+strings. Three consequences, and they are not equally bad:
+
+1. **Your streak breaks when you fly east — FIXED.** Prayers logged in Seattle
+   carry a PDT `day_key`; land in Mumbai and that day can never reach five,
+   because its evening happened at 38,000 feet. `reconcile` used to read that
+   as an ordinary miss. It now skips `profile.travelDayKeys`, which
+   `AppState.noteTimeZoneIfChanged` fills whenever the device's UTC offset
+   moves by ≥ 3h (`GameEngine.travelOffsetThreshold` — above a DST jump and
+   above any neighbouring zone, both of which must never trigger it). Both the
+   departure and arrival day are marked. This only ever removes a penalty: a
+   complete day still increments at log time.
+2. **A `day_key` can be re-lived flying west — OPEN.** India → Seattle makes
+   "2026-08-22" last ~36 hours, so a genuinely-prayed second Fajr is refused by
+   `unique (user_id, circle_id, day_key, prayer)`. Rare, and the loss is one
+   log rather than a streak.
+3. **Cross-timezone circles render each member by their own day_key — OPEN,
+   and still the accepted soft spot.** A shared grid where your column and a
+   Seattle friend's are 12½ hours apart makes "who posted first for Fajr"
+   meaningless.
+
+2 and 3 both need the same thing: an explicit day model rather than an implicit
+one, which cascades into `isDayComplete`, `isPerfectDay`, `xp(forDay:)`, the
+streak walk, `weeklyXP` and the unique constraint above. That is a project, and
+it is better designed against real data than guessed at. So `posts.utc_offset`
+and `PrayerLog.utcOffset` are **captured now and read by nothing** — the field
+is cheap to record and impossible to backfill, and every month without it is a
+month of history the eventual fix cannot use.
 
 ## 8. Client architecture
 

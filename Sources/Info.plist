@@ -33,6 +33,8 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>GIDClientID</key>
 	<string>923951498597-445nb4q5o5k66imnbbul70h88s7bct72.apps.googleusercontent.com</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>NSCameraUsageDescription</key>
 	<string>SalahBuddy uses the camera so you can snap a quick photo when you pray and share it with your circle.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>

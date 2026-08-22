@@ -204,6 +204,11 @@ struct RemotePost: Codable, Equatable, Sendable, Identifiable {
     var placeLabel: String?     // the rendered pill ("🏠 Home"), not the raw tag
     var photoPath: String?      // Storage path; nil once retention ages the photo out
     var travelCombined: Bool
+    /// v4: the poster's UTC offset in seconds. See `PrayerLog.utcOffset` —
+    /// captured now so a future cross-timezone day model has history, read by
+    /// nothing today. Inside the INSERT grant, so it encodes unconditionally;
+    /// this is not one of the mirror-only columns.
+    var utcOffset: Int?
 
     /// The SERVER's `updated_at`, decoded and never encoded (rule 2).
     ///
@@ -221,7 +226,8 @@ struct RemotePost: Codable, Equatable, Sendable, Identifiable {
     init(id: UUID, userID: UUID, circleID: UUID, dayKey: String, prayer: Prayer,
          tier: LogTier, loggedAt: Date, jamaat: Bool = false,
          placeLabel: String? = nil, photoPath: String? = nil,
-         travelCombined: Bool = false, updatedAt: Date? = nil) {
+         travelCombined: Bool = false, utcOffset: Int? = nil,
+         updatedAt: Date? = nil) {
         self.id = id
         self.userID = userID
         self.circleID = circleID
@@ -233,6 +239,7 @@ struct RemotePost: Codable, Equatable, Sendable, Identifiable {
         self.placeLabel = placeLabel
         self.photoPath = photoPath
         self.travelCombined = travelCombined
+        self.utcOffset = utcOffset
         self.updatedAt = updatedAt
     }
 
@@ -248,6 +255,7 @@ struct RemotePost: Codable, Equatable, Sendable, Identifiable {
         case placeLabel = "place_label"
         case photoPath = "photo_path"
         case travelCombined = "travel_combined"
+        case utcOffset = "utc_offset"
         case updatedAt = "updated_at"
     }
 
@@ -264,6 +272,7 @@ struct RemotePost: Codable, Equatable, Sendable, Identifiable {
         placeLabel = try c.decodeIfPresent(String.self, forKey: .placeLabel)
         photoPath = try c.decodeIfPresent(String.self, forKey: .photoPath)
         travelCombined = (try? c.decodeIfPresent(Bool.self, forKey: .travelCombined)) ?? false
+        utcOffset = (try? c.decodeIfPresent(Int.self, forKey: .utcOffset)) ?? nil
         updatedAt = (try? c.decodeIfPresent(Date.self, forKey: .updatedAt)) ?? nil
     }
 
@@ -284,6 +293,7 @@ struct RemotePost: Codable, Equatable, Sendable, Identifiable {
         try c.encodeIfPresent(placeLabel, forKey: .placeLabel)
         try c.encodeIfPresent(photoPath, forKey: .photoPath)
         try c.encode(travelCombined, forKey: .travelCombined)
+        try c.encodeIfPresent(utcOffset, forKey: .utcOffset)
     }
 
     /// A synced post, as `GameEngine` sees it. This is the whole trick behind
@@ -298,7 +308,7 @@ struct RemotePost: Codable, Equatable, Sendable, Identifiable {
     func asPrayerLog() -> PrayerLog {
         return PrayerLog(id: id, prayer: prayer, dayKey: dayKey, loggedAt: loggedAt,
                          tier: tier, xp: postedXP, photoFilename: nil, jamaat: jamaat,
-                         placeTag: nil, placeName: nil)
+                         placeTag: nil, placeName: nil, utcOffset: utcOffset)
     }
 
     /// What `GameEngine` says this post is worth — run here so a buddy's row is
@@ -331,7 +341,7 @@ struct RemotePost: Codable, Equatable, Sendable, Identifiable {
         RemotePost(id: log.id, userID: userID, circleID: circleID, dayKey: log.dayKey,
                    prayer: log.prayer, tier: log.tier, loggedAt: log.loggedAt,
                    jamaat: log.jamaat, placeLabel: placeLabel, photoPath: photoPath,
-                   travelCombined: travelCombined)
+                   travelCombined: travelCombined, utcOffset: log.utcOffset)
     }
 }
 

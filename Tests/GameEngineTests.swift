@@ -334,4 +334,81 @@ final class GameEngineTests: XCTestCase {
                                                           remainingRawTotal: GameEngine.deedXP),
                        GameEngine.deedXP)
     }
+
+    // MARK: - Travel (v4: a day spent crossing timezones is not a whole day)
+
+    func testDSTNeverCountsAsTravel() {
+        // The single most important case here. A DST jump is exactly one hour
+        // and happens to EVERY user in a region on the same night; if it
+        // tripped the travel threshold, the entire user base would silently
+        // bank a free day twice a year.
+        XCTAssertFalse(GameEngine.isTravelShift(from: -8 * 3600, to: -7 * 3600))
+        XCTAssertFalse(GameEngine.isTravelShift(from: -7 * 3600, to: -8 * 3600))
+    }
+
+    func testANeighbouringTimezoneIsNotTravel() {
+        // A one-hour day is still a day you can pray five times in.
+        XCTAssertFalse(GameEngine.isTravelShift(from: 0, to: 3600))
+        // Two hours is still under the bar.
+        XCTAssertFalse(GameEngine.isTravelShift(from: 0, to: 2 * 3600))
+    }
+
+    func testLongHaulCountsAsTravel() {
+        // Seattle (-7) to Mumbai (+5:30) — the case that motivated all of this.
+        XCTAssertTrue(GameEngine.isTravelShift(from: -7 * 3600, to: 5 * 3600 + 1800))
+        // And back again.
+        XCTAssertTrue(GameEngine.isTravelShift(from: 5 * 3600 + 1800, to: -7 * 3600))
+        // The boundary is inclusive: exactly three hours counts.
+        XCTAssertTrue(GameEngine.isTravelShift(from: 0, to: GameEngine.travelOffsetThreshold))
+    }
+
+    func testFirstEverObservationIsNotAChange() {
+        // A device that has never looked has not moved.
+        XCTAssertFalse(GameEngine.isTravelShift(from: nil, to: 5 * 3600 + 1800))
+    }
+
+    func testReconcileSkipsTravelDaysWithoutSpendingAFreeze() {
+        var profile = UserProfile.fresh(now: Date(timeIntervalSince1970: 0))
+        profile.streak = 12
+        profile.streakFreezes = 2
+        profile.lastReconciledDayKey = "2026-08-20"
+
+        // An incomplete day spent in the air. The streak survives AND no
+        // freeze is spent — a freeze is for a day you could have prayed.
+        let reconciled = GameEngine.reconcile(
+            profile: profile,
+            elapsedDays: [("2026-08-21", false)],
+            travelDayKeys: ["2026-08-21"])
+
+        XCTAssertEqual(reconciled.streak, 12, "crossing timezones must not break a streak")
+        XCTAssertEqual(reconciled.streakFreezes, 2, "and must not cost a freeze either")
+        XCTAssertEqual(reconciled.lastReconciledDayKey, "2026-08-21", "the walk still advances")
+    }
+
+    func testAnOrdinaryIncompleteDayStillCostsAFreeze() {
+        // The control: without the travel mark, nothing about the above holds.
+        var profile = UserProfile.fresh(now: Date(timeIntervalSince1970: 0))
+        profile.streak = 12
+        profile.streakFreezes = 2
+        profile.lastReconciledDayKey = "2026-08-20"
+
+        let reconciled = GameEngine.reconcile(profile: profile,
+                                              elapsedDays: [("2026-08-21", false)])
+        XCTAssertEqual(reconciled.streak, 12)
+        XCTAssertEqual(reconciled.streakFreezes, 1, "an ordinary miss spends a freeze")
+    }
+
+    func testTravelAndExcusedAreIndependentReasonsToSkip() {
+        var profile = UserProfile.fresh(now: Date(timeIntervalSince1970: 0))
+        profile.streak = 5
+        profile.streakFreezes = 0     // nothing to absorb a real miss
+        profile.lastReconciledDayKey = "2026-08-19"
+
+        let reconciled = GameEngine.reconcile(
+            profile: profile,
+            elapsedDays: [("2026-08-20", false), ("2026-08-21", false)],
+            excusedDayKeys: ["2026-08-20"],
+            travelDayKeys: ["2026-08-21"])
+        XCTAssertEqual(reconciled.streak, 5, "one excused, one travelled, neither breaks it")
+    }
 }

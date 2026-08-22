@@ -268,12 +268,17 @@ enum GameEngine {
     /// freeze if available, else streak resets to 0.
     /// v2: excused days are SKIPPED entirely — streak preserved, no freeze
     /// consumed, no increment; the walk just advances past them.
+    /// v4: `travelDayKeys` are skipped on exactly the same terms as excused
+    /// days — a day the device crossed several timezones was not a whole day,
+    /// and a walk that cannot tell the difference will break a streak for
+    /// boarding a plane.
     static func reconcile(profile: UserProfile,
                           elapsedDays: [(dayKey: String, isComplete: Bool)],
-                          excusedDayKeys: Set<String> = []) -> UserProfile {
+                          excusedDayKeys: Set<String> = [],
+                          travelDayKeys: Set<String> = []) -> UserProfile {
         var p = profile
         for day in elapsedDays {
-            if excusedDayKeys.contains(day.dayKey) {
+            if excusedDayKeys.contains(day.dayKey) || travelDayKeys.contains(day.dayKey) {
                 p.lastReconciledDayKey = day.dayKey
                 continue
             }
@@ -287,6 +292,30 @@ enum GameEngine {
             p.lastReconciledDayKey = day.dayKey
         }
         return p
+    }
+
+    // MARK: - Travel
+
+    /// How far the device's UTC offset must move before a day stops counting
+    /// as a whole day. Three hours, and the number is doing real work at both
+    /// ends.
+    ///
+    /// Below it: a DST jump is exactly one hour and must NEVER trip this, or
+    /// twice a year every user in the country would silently bank a free day.
+    /// Nudging into a neighbouring zone is one hour too, and a one-hour day is
+    /// still a day you can pray five times in.
+    ///
+    /// At or above it: the shift is long-haul, the local day genuinely
+    /// compresses (Seattle → Mumbai loses about twelve hours of it), and
+    /// reaching five becomes a matter of geography rather than intent.
+    static let travelOffsetThreshold = 3 * 3600
+
+    /// Whether a change in UTC offset is big enough to call the day a travel
+    /// day. Pure; `nil` previous means this device has never looked, which is
+    /// not a change.
+    static func isTravelShift(from previous: Int?, to current: Int) -> Bool {
+        guard let previous else { return false }
+        return abs(current - previous) >= travelOffsetThreshold
     }
 
     // MARK: - Weekly XP (circle scoreboard)

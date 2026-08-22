@@ -1092,6 +1092,81 @@ struct UpcomingSection: View {
 // to Settings (design session) — they're occasional, not everyday actions.
 // Only the location-based auto-suggestion stays on Today.
 
+/// v4: the device crossed several timezones since it last looked.
+///
+/// Distinct from `TravelSuggestionBanner` below, which fires on DISTANCE from
+/// your saved home and only ever offers to combine prayers. This one fires on
+/// the clock moving, and its job is to say the two things a traveller actually
+/// wants to know on landing: the times you are looking at are the local ones
+/// now, and the day you spent in the air is not going to cost you a streak.
+/// HomeView shows one or the other, never both — two travel banners stacked
+/// would be noise at precisely the moment someone is tired and disoriented.
+struct TimeZoneChangeBanner: View {
+    @EnvironmentObject private var state: AppState
+    @ObservedObject private var location = LocationProvider.shared
+
+    var body: some View {
+        if let notice = state.pendingTravelNotice {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 10) {
+                    Image(systemName: "globe")
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundStyle(Theme.qadaBlue)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(headline)
+                            .font(Theme.sans(13, .bold))
+                            .foregroundStyle(Theme.inkDeep)
+                        Text("Your streak is safe for the days you were crossing.")
+                            .font(Theme.sans(11.5, .semibold))
+                            .foregroundStyle(Theme.inkMuted)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 8)
+                }
+
+                HStack(spacing: 14) {
+                    if !state.isTraveling {
+                        Button("Combine prayers") {
+                            withAnimation(Theme.spring) {
+                                state.setTraveling(true)
+                                state.pendingTravelNotice = nil
+                            }
+                        }
+                        .font(Theme.sans(13, .bold))
+                        .foregroundStyle(Theme.green)
+                        .buttonStyle(.plain)
+                    }
+                    Button("Got it") {
+                        withAnimation(Theme.spring) { state.pendingTravelNotice = nil }
+                    }
+                    .font(Theme.sans(13, .semibold))
+                    .foregroundStyle(Theme.inkMuted)
+                    .buttonStyle(.plain)
+                    Spacer(minLength: 0)
+                }
+                .id(notice.id)
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .cardStyle()
+        }
+    }
+
+    /// Name the place when CoreLocation knows it; otherwise say the true thing
+    /// without pretending to know where "here" is.
+    private var headline: String {
+        if let place = location.placeName ?? nonEmptyFallback {
+            return "Prayer times now follow \(place)"
+        }
+        return "Prayer times updated for your new timezone"
+    }
+
+    private var nonEmptyFallback: String? {
+        let name = state.settings.locationName
+        return name.isEmpty ? nil : name
+    }
+}
+
 /// Auto-suggestion banner: shows when you're far from your saved Home.
 struct TravelSuggestionBanner: View {
     @EnvironmentObject private var state: AppState

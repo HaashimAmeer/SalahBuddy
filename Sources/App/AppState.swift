@@ -27,6 +27,10 @@ final class AppState: ObservableObject {
     }
     @Published private(set) var todaySchedule: DaySchedule?
     @Published var celebration: LogResult?                 // set by log(); UI presents then nils it
+    /// v4: set once per timezone crossing, cleared when the Today banner is
+    /// dismissed. Deliberately NOT persisted — it is news, and news that
+    /// survives a relaunch becomes nagging.
+    @Published var pendingTravelNotice: TravelNotice?
 
     /// v4: the offline mirror of a real circle (SPEC-V4 §8). Held in memory
     /// rather than re-read per access, because `circleSource` is consulted
@@ -293,7 +297,8 @@ final class AppState: ObservableObject {
                          loggedAt: AppClock.now, tier: tier, xp: xp,
                          photoFilename: normalizedPhoto, jamaat: countsJamaat,
                          placeTag: countsPlace,
-                         placeName: countsPlace == .onTheGo ? placeName : nil)
+                         placeName: countsPlace == .onTheGo ? placeName : nil,
+                         utcOffset: AppClock.utcOffsetSeconds)
     }
 
     private struct PreLogSnapshot {
@@ -469,8 +474,12 @@ final class AppState: ObservableObject {
               !hasLog(prayer: prayer, dayKey: dayKey),
               !isExcused(prayer: prayer, dayKey: dayKey) else { return }
         let xp = GameEngine.lateEditXP(dayKey: dayKey, todayKey: todayKey)
+        // The offset of the EDIT, not of the day being edited — that day's
+        // zone is unknowable after the fact, and guessing it would be worse
+        // than leaving the record honest about when the claim was made.
         let entry = PrayerLog(id: UUID(), prayer: prayer, dayKey: dayKey,
-                              loggedAt: AppClock.now, tier: .qada, xp: xp)
+                              loggedAt: AppClock.now, tier: .qada, xp: xp,
+                              utcOffset: AppClock.utcOffsetSeconds)
         logs.append(entry)
         profile.totalXP += xp
         persist()
@@ -1632,10 +1641,47 @@ final class AppState: ObservableObject {
 
     // MARK: - Refresh (schedule + streak reconcile)
 
+    /// Notice that the device has crossed a meaningful number of timezones,
+    /// and protect the days either side of the crossing from the streak walk.
+    ///
+    /// Runs at the very top of `refresh()` — before the reconcile below it —
+    /// because a day has to be marked as travel BEFORE the walk decides
+    /// whether to punish it. Landing in Mumbai and opening the app is the
+    /// exact moment both facts are available.
+    ///
+    /// TWO days are marked, not one. The day you left is the truncated one:
+    /// its prayers carry the departure zone's dayKey and its evening never
+    /// arrived. The day you land is usually partial too, since you show up
+    /// mid-afternoon into windows that already opened without you. Marking the
+    /// arrival day cannot inflate anything — a complete day still increments
+    /// the streak at log time via `applyStreakIncrement`, and this only ever
+    /// removes a penalty, never grants a day.
+    private func noteTimeZoneIfChanged() {
+        let current = AppClock.utcOffsetSeconds
+        defer {
+            if profile.lastSeenUTCOffset != current {
+                profile.lastSeenUTCOffset = current
+                persistProfile()
+            }
+        }
+        guard GameEngine.isTravelShift(from: profile.lastSeenUTCOffset, to: current) else { return }
+
+        var marked = profile.travelDayKeys
+        marked.insert(todayKey)
+        if let yesterday = Calendar.current.date(byAdding: .day, value: -1, to: AppClock.now) {
+            marked.insert(AppClock.dayKey(for: yesterday))
+        }
+        guard marked != profile.travelDayKeys else { return }
+        profile.travelDayKeys = marked
+        // Surfaced by the Today banner, which is the only thing that reads it.
+        pendingTravelNotice = TravelNotice(offsetSeconds: current)
+    }
+
     /// Recompute today's schedule and reconcile the streak for elapsed days.
     /// Call on launch, foreground, day change, and settings change.
     func refresh() {
         AppState.applyTimeTravelPolicy(for: settings.circleMode)
+        noteTimeZoneIfChanged()
 
         let now = AppClock.now
         let coords = activeCoordinates
@@ -1776,7 +1822,8 @@ final class AppState: ObservableObject {
         }
         guard !elapsed.isEmpty else { return }
         profile = GameEngine.reconcile(profile: profile, elapsedDays: elapsed,
-                                       excusedDayKeys: profile.excusedDayKeys)
+                                       excusedDayKeys: profile.excusedDayKeys,
+                                       travelDayKeys: profile.travelDayKeys)
         persistProfile()
     }
 

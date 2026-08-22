@@ -619,6 +619,34 @@ final class V2CoreTests: XCTestCase {
         XCTAssertEqual(logs[0].photoFilename, "2026-06-09-fajr.jpg")
         XCTAssertTrue(logs[0].jamaat)
         XCTAssertNil(logs[0].placeTag)
+        XCTAssertNil(logs[0].utcOffset, "v4's offset is absent from a v2 log, and stays absent")
+    }
+
+    /// v4: the offset survives a round trip, and its absence is never invented.
+    func testLogUTCOffsetRoundTripsAndOldLogsStayNil() throws {
+        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+
+        // Mumbai: +5:30, the half-hour zone that catches an hours-only model.
+        let mumbai = PrayerLog(id: UUID(), prayer: .fajr, dayKey: "2026-08-22",
+                               loggedAt: Date(timeIntervalSince1970: 0), tier: .onTime,
+                               xp: 30, utcOffset: 5 * 3600 + 1800)
+        let restored = try decoder.decode(PrayerLog.self, from: encoder.encode(mumbai))
+        XCTAssertEqual(restored.utcOffset, 19800)
+
+        // Negative offsets survive too — the westmost zones are not a special case.
+        let seattle = PrayerLog(id: UUID(), prayer: .isha, dayKey: "2026-08-21",
+                                loggedAt: Date(timeIntervalSince1970: 0), tier: .prayed,
+                                xp: 20, utcOffset: -7 * 3600)
+        XCTAssertEqual(try decoder.decode(PrayerLog.self, from: encoder.encode(seattle)).utcOffset,
+                       -25200)
+
+        // The default is nil, not zero. Zero is a real place (London in winter),
+        // so it must never stand in for "we don't know".
+        let unknown = PrayerLog(id: UUID(), prayer: .asr, dayKey: "2026-08-21",
+                                loggedAt: Date(timeIntervalSince1970: 0), tier: .qada, xp: 5)
+        XCTAssertNil(unknown.utcOffset)
+        XCTAssertNil(try decoder.decode(PrayerLog.self, from: encoder.encode(unknown)).utcOffset)
     }
 
     func testBuddyPlaceTagIsDeterministicAndDistributed() {

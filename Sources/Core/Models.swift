@@ -126,10 +126,22 @@ struct PrayerLog: Codable, Identifiable, Equatable {
     var jamaat: Bool            // v2: prayed in congregation (+5 XP, tracked for challenges)
     var placeTag: PlaceTag?     // v3: optional "where I prayed" tag
     var placeName: String?      // v3: reverse-geocoded name when tagged .onTheGo
+    /// v4: the device's UTC offset in SECONDS when this was logged.
+    ///
+    /// `dayKey` is a local-time string, so "2026-08-22" means one thing in
+    /// Seattle and another in Mumbai and nothing on the log says which. This
+    /// is the missing half. Nothing scores off it yet — the day model that
+    /// would is a project of its own — but a log written without it can never
+    /// be told which zone it belonged to, and no amount of later work can
+    /// recover that. Cheap to capture, impossible to backfill.
+    ///
+    /// nil for every log written before v4, and honestly so.
+    var utcOffset: Int?
 
     init(id: UUID, prayer: Prayer, dayKey: String, loggedAt: Date, tier: LogTier, xp: Int,
          photoFilename: String? = nil, jamaat: Bool = false,
-         placeTag: PlaceTag? = nil, placeName: String? = nil) {
+         placeTag: PlaceTag? = nil, placeName: String? = nil,
+         utcOffset: Int? = nil) {
         self.id = id
         self.prayer = prayer
         self.dayKey = dayKey
@@ -140,11 +152,13 @@ struct PrayerLog: Codable, Identifiable, Equatable {
         self.jamaat = jamaat
         self.placeTag = placeTag
         self.placeName = placeName
+        self.utcOffset = utcOffset
     }
 
     // Migration-safe decoding: v1/v2 logs (missing newer fields) must keep decoding.
     private enum CodingKeys: String, CodingKey {
         case id, prayer, dayKey, loggedAt, tier, xp, photoFilename, jamaat, placeTag, placeName
+        case utcOffset
     }
 
     init(from decoder: Decoder) throws {
@@ -159,7 +173,17 @@ struct PrayerLog: Codable, Identifiable, Equatable {
         jamaat = try c.decodeIfPresent(Bool.self, forKey: .jamaat) ?? false
         placeTag = try c.decodeIfPresent(PlaceTag.self, forKey: .placeTag)
         placeName = try c.decodeIfPresent(String.self, forKey: .placeName)
+        utcOffset = try c.decodeIfPresent(Int.self, forKey: .utcOffset)
     }
+}
+
+/// v4: "you appear to have travelled" — raised once per crossing by
+/// `AppState.noteTimeZoneIfChanged`, rendered by the Today banner.
+struct TravelNotice: Equatable, Identifiable {
+    /// The device's new UTC offset in seconds. Carried so the banner can say
+    /// something concrete rather than gesturing at "somewhere else".
+    let offsetSeconds: Int
+    var id: Int { offsetSeconds }
 }
 
 // MARK: - Profile
@@ -198,6 +222,19 @@ struct UserProfile: Codable {
     /// circle makes every group target easier, and for solo accounts the removal
     /// is free to undo — so a removal costs this week's group challenges.
     var groupAwardsFrozenWeek: String?
+    /// v4: the UTC offset (seconds) this device last saw, so a change can be
+    /// noticed. nil until the first observation.
+    var lastSeenUTCOffset: Int?
+    /// v4: days during which the device crossed a significant number of
+    /// timezones. The streak walk skips them exactly as it skips excused days.
+    ///
+    /// Flying Seattle → Mumbai makes a local day roughly twelve hours shorter;
+    /// the prayers you logged before boarding carry the departure zone's
+    /// dayKey, and that day can never reach five. Breaking a streak for it
+    /// punishes someone for being on a plane. This is not an excuse in the §3
+    /// sense — nothing is disclosed and nothing syncs — it is the reconcile
+    /// walk declining to judge a day that was not a whole day.
+    var travelDayKeys: Set<String>
 
     init(name: String, totalXP: Int, streak: Int, longestStreak: Int, streakFreezes: Int,
          lastStreakDayKey: String?, lastReconciledDayKey: String?, earnedBadges: [String: Date],
@@ -209,7 +246,8 @@ struct UserProfile: Codable {
          avatarFilename: String? = nil, removedBuddyNames: [String] = [],
          invitedBuddyNames: [String] = [], pendingNewMemberName: String? = nil,
          partialExcuseStart: [String: Prayer] = [:], partialExcuseEnd: [String: Prayer] = [:],
-         startedSolo: Bool = false, groupAwardsFrozenWeek: String? = nil) {
+         startedSolo: Bool = false, groupAwardsFrozenWeek: String? = nil,
+         lastSeenUTCOffset: Int? = nil, travelDayKeys: Set<String> = []) {
         self.name = name
         self.totalXP = totalXP
         self.streak = streak
@@ -236,6 +274,8 @@ struct UserProfile: Codable {
         self.partialExcuseEnd = partialExcuseEnd
         self.startedSolo = startedSolo
         self.groupAwardsFrozenWeek = groupAwardsFrozenWeek
+        self.lastSeenUTCOffset = lastSeenUTCOffset
+        self.travelDayKeys = travelDayKeys
     }
 
     // Migration-safe decoding: v1 profiles lack the v2 fields.
@@ -248,6 +288,7 @@ struct UserProfile: Codable {
         case avatarFilename, removedBuddyNames, invitedBuddyNames, pendingNewMemberName
         case partialExcuseStart, partialExcuseEnd
         case startedSolo, groupAwardsFrozenWeek
+        case lastSeenUTCOffset, travelDayKeys
     }
 
     init(from decoder: Decoder) throws {
@@ -279,6 +320,8 @@ struct UserProfile: Codable {
         // v3.9: absent → false, so a pre-v3.9 save keeps its 8-buddy circle.
         startedSolo = (try? c.decodeIfPresent(Bool.self, forKey: .startedSolo)) ?? false
         groupAwardsFrozenWeek = (try? c.decodeIfPresent(String.self, forKey: .groupAwardsFrozenWeek)) ?? nil
+        lastSeenUTCOffset = (try? c.decodeIfPresent(Int.self, forKey: .lastSeenUTCOffset)) ?? nil
+        travelDayKeys = (try? c.decodeIfPresent(Set<String>.self, forKey: .travelDayKeys)) ?? []
     }
 
     /// A brand-new account. v3.9: everyone starts solo — onboarding also sets

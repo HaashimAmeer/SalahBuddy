@@ -30,7 +30,14 @@ struct HomeView: View {
                         PrayerTimesStrip(currentPrayer: block?.isYesterdayIsha == false
                                          ? block?.prayer : nil)
 
-                        TravelSuggestionBanner(dismissed: $travelSuggestionDismissed)
+                        // One travel banner at a time: a fresh crossing is
+                        // more specific and more urgent than "you look far
+                        // from home", so it wins while it stands.
+                        if state.pendingTravelNotice != nil {
+                            TimeZoneChangeBanner()
+                        } else {
+                            TravelSuggestionBanner(dismissed: $travelSuggestionDismissed)
+                        }
 
                         if let block {
                             CurrentPrayerBlock(
