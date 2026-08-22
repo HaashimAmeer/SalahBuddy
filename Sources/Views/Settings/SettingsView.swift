@@ -2,7 +2,6 @@ import SwiftUI
 import UserNotifications
 import UIKit
 import PhotosUI
-import CoreLocation
 
 /// Settings tab (v3.6 rehaul) — a proper profile section (photo + name) up
 /// top, then the occasional controls: breaks & travel (moved here from Today),
@@ -20,6 +19,10 @@ struct SettingsView: View {
     @State private var notificationStatus: UNAuthorizationStatus = .notDetermined
     @State private var showDeniedAlert = false
     @State private var showResetConfirm = false
+    /// Confirmation for "Fill 3-week demo history", which rewrites history on
+    /// screens you cannot see from here.
+    @State private var demoFillReceipt: String?
+    @State private var demoFillDismissTask: Task<Void, Never>?
     // v4 §1: account deletion. Separate from `showResetConfirm` on purpose —
     // one wipes this phone and leaves the server alone, the other does exactly
     // the opposite, and sharing a flag between them is how they get confused.
@@ -311,7 +314,12 @@ struct SettingsView: View {
 
     @State private var cityQuery = ""
     @State private var isGeocoding = false
-    @State private var geocodeError: String?
+    @State private var cityMatches: [CityMatch] = []
+    /// nil = nothing searched yet. Distinguishing that from "searched, found
+    /// nothing" is the difference between a silent empty box and an answer.
+    @State private var citySearchedQuery: String?
+    @State private var citySearchTask: Task<Void, Never>?
+    private let citySearch: CitySearching = MapKitCitySearch()
 
     private var locationCard: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -336,42 +344,85 @@ struct SettingsView: View {
             }
 
             // v3.6: the fixed location is finally editable (it was hard-coded).
+            // v4.1: and it is now PICKED rather than typed. Accepting free text
+            // and keeping the geocoder's first guess meant "Springfield" chose
+            // one of dozens without saying which — and a wrong fix here is
+            // wrong prayer times every day, with nothing on screen to notice.
             if !state.settings.useDeviceLocation {
-                HStack(spacing: 8) {
-                    TextField("City, e.g. Seattle", text: $cityQuery)
-                        .font(Theme.sans(15, .semibold))
-                        .foregroundStyle(Theme.inkDeep)
-                        .textInputAutocapitalization(.words)
-                        .autocorrectionDisabled()
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 9)
-                        .background(
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .fill(Theme.bg)
-                        )
-                        .onSubmit { searchCity() }
-                    Button {
-                        searchCity()
-                    } label: {
-                        Group {
-                            if isGeocoding {
-                                ProgressView().tint(.white)
-                            } else {
-                                Text("Set")
-                                    .font(Theme.sans(14, .bold))
-                                    .foregroundStyle(.white)
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "magnifyingglass")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(Theme.inkMuted)
+                        TextField("Search for a city", text: $cityQuery)
+                            .font(Theme.sans(15, .semibold))
+                            .foregroundStyle(Theme.inkDeep)
+                            .textInputAutocapitalization(.words)
+                            .autocorrectionDisabled()
+                            .submitLabel(.search)
+                        if isGeocoding {
+                            ProgressView().scaleEffect(0.7)
+                        } else if !cityQuery.isEmpty {
+                            Button {
+                                clearCitySearch()
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.system(size: 15))
+                                    .foregroundStyle(Theme.inkMuted.opacity(0.6))
                             }
+                            .buttonStyle(.plain)
                         }
-                        .frame(width: 52, height: 36)
-                        .background(Capsule().fill(Theme.green))
                     }
-                    .buttonStyle(.plain)
-                    .disabled(isGeocoding || cityQuery.trimmingCharacters(in: .whitespaces).isEmpty)
-                }
-                if let geocodeError {
-                    Text(geocodeError)
-                        .font(Theme.sans(12, .semibold))
-                        .foregroundStyle(Theme.amber)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 9)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(Theme.bg)
+                    )
+                    .onChange(of: cityQuery) { _, newValue in
+                        scheduleCitySearch(newValue)
+                    }
+
+                    ForEach(cityMatches) { match in
+                        Button {
+                            selectCity(match)
+                        } label: {
+                            HStack(spacing: 10) {
+                                Image(systemName: "mappin.circle.fill")
+                                    .font(.system(size: 16))
+                                    .foregroundStyle(Theme.amber)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(match.city)
+                                        .font(Theme.sans(15, .semibold))
+                                        .foregroundStyle(Theme.inkDeep)
+                                    if !match.subtitle.isEmpty {
+                                        Text(match.subtitle)
+                                            .font(Theme.sans(12, .semibold))
+                                            .foregroundStyle(Theme.inkMuted)
+                                    }
+                                }
+                                Spacer(minLength: 0)
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 9)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(
+                                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    .fill(Theme.bg.opacity(0.6))
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    // Only after a search has actually completed — otherwise an
+                    // empty box would read as "no such city" before anyone has
+                    // looked.
+                    if let searched = citySearchedQuery, cityMatches.isEmpty, !isGeocoding {
+                        Text("No city matched \"\(searched)\". Try a larger city nearby, or check your connection.")
+                            .font(Theme.sans(12, .semibold))
+                            .foregroundStyle(Theme.amber)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
 
@@ -448,29 +499,51 @@ struct SettingsView: View {
         )
     }
 
-    /// Forward-geocode the typed city into the fixed coordinates.
-    private func searchCity() {
-        let query = cityQuery.trimmingCharacters(in: .whitespaces)
-        guard !query.isEmpty, !isGeocoding else { return }
-        isGeocoding = true
-        geocodeError = nil
-        CLGeocoder().geocodeAddressString(query) { placemarks, _ in
-            Task { @MainActor in
-                isGeocoding = false
-                guard let placemark = placemarks?.first,
-                      let location = placemark.location else {
-                    geocodeError = "Couldn't find \"\(query)\" — try a bigger city nearby."
-                    return
-                }
-                var s = state.settings
-                s.fixedLatitude = location.coordinate.latitude
-                s.fixedLongitude = location.coordinate.longitude
-                s.locationName = placemark.locality ?? placemark.name ?? query
-                state.settings = s     // didSet persists + refreshes + reschedules
-                cityQuery = ""
-                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-            }
+    /// Debounced as-you-type city search.
+    ///
+    /// The previous keystroke's search is cancelled rather than left to race:
+    /// two in-flight lookups can finish out of order, and the loser landing
+    /// last would repaint the list with results for a prefix the person has
+    /// already typed past.
+    private func scheduleCitySearch(_ raw: String) {
+        citySearchTask?.cancel()
+        let query = raw.trimmingCharacters(in: .whitespaces)
+        guard query.count >= 2 else {
+            cityMatches = []
+            citySearchedQuery = nil
+            isGeocoding = false
+            return
         }
+        isGeocoding = true
+        citySearchTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard !Task.isCancelled else { return }
+            let results = await citySearch.search(query)
+            guard !Task.isCancelled else { return }
+            cityMatches = results
+            citySearchedQuery = query
+            isGeocoding = false
+        }
+    }
+
+    private func clearCitySearch() {
+        citySearchTask?.cancel()
+        cityQuery = ""
+        cityMatches = []
+        citySearchedQuery = nil
+        isGeocoding = false
+    }
+
+    /// Commit a CHOSEN city. Nothing reaches settings that the person did not
+    /// pick off the list.
+    private func selectCity(_ match: CityMatch) {
+        var s = state.settings
+        s.fixedLatitude = match.latitude
+        s.fixedLongitude = match.longitude
+        s.locationName = match.city
+        state.settings = s     // didSet persists + refreshes + reschedules
+        clearCitySearch()
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
     }
 
     // MARK: - Notifications
@@ -838,8 +911,18 @@ struct SettingsView: View {
             Divider()
 
             Button {
-                state.fillDemoHistory()
+                let fill = state.fillDemoHistory()
                 NotificationManager.shared.reschedule()
+                // The work happens on another screen entirely, so without this
+                // the button was indistinguishable from a dead one.
+                demoFillReceipt = fill.summary
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+                demoFillDismissTask?.cancel()
+                demoFillDismissTask = Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 6_000_000_000)
+                    guard !Task.isCancelled else { return }
+                    withAnimation(Theme.spring) { demoFillReceipt = nil }
+                }
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "wand.and.stars")
@@ -849,6 +932,26 @@ struct SettingsView: View {
                 .foregroundStyle(Theme.qadaBlue)
             }
             .buttonStyle(.plain)
+
+            if let demoFillReceipt {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(Theme.green)
+                    Text(demoFillReceipt)
+                        .font(Theme.sans(13, .semibold))
+                        .foregroundStyle(Theme.inkDeep)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Theme.green.opacity(0.12))
+                )
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
 
             Button {
                 showResetConfirm = true

@@ -1793,11 +1793,31 @@ final class AppState: ObservableObject {
 
     // MARK: - DEBUG helpers
 
+    /// What `fillDemoHistory()` actually produced, so the developer tools can
+    /// confirm the action instead of leaving you guessing.
+    struct DemoHistoryFill: Equatable {
+        var logCount: Int
+        var dayCount: Int
+        var totalXP: Int
+
+        /// Reads as a receipt, with real numbers — a generic "Done!" would not
+        /// distinguish a successful fill from one that generated nothing.
+        var summary: String {
+            "Filled \(dayCount) days — \(logCount) prayers, \(totalXP) XP"
+        }
+    }
+
     /// 21 days of plausible history ending yesterday; profile is rebuilt from
     /// the generated logs so XP/streak/badges/perfect days stay consistent.
     /// ~70% of in-window logs get demo photos (PhotoStore.demoImage, "demo-"
     /// prefixed). Buddy history needs no filling — BuddySimulator derives it.
-    func fillDemoHistory() {
+    ///
+    /// Returns what it generated so the caller can SAY so. The action rewrites
+    /// history behind the current screen and looked identical to a no-op —
+    /// there is no way to tell "it worked" from "the button is dead" without
+    /// leaving Settings and going to look.
+    @discardableResult
+    func fillDemoHistory() -> DemoHistoryFill {
         let calendar = Calendar.current
         let todayStart = calendar.startOfDay(for: AppClock.now)
         var rng = SplitMix64(seed: 0xDE_0B6B3A_7640_0042)
@@ -1876,6 +1896,9 @@ final class AppState: ObservableObject {
         profile = p
         persist()
         refresh()
+        return DemoHistoryFill(logCount: logs.count,
+                               dayCount: Set(logs.map(\.dayKey)).count,
+                               totalXP: p.totalXP)
     }
 
     func resetAllData() {
