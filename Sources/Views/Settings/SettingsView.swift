@@ -66,15 +66,14 @@ struct SettingsView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { refreshNotificationStatus() }
         }
-        .onChange(of: state.settings.calcMethod) { _, _ in
-            NotificationManager.shared.reschedule()
-        }
-        .onChange(of: state.settings.madhab) { _, _ in
-            NotificationManager.shared.reschedule()
-        }
-        .onChange(of: state.settings.useDeviceLocation) { _, _ in
-            NotificationManager.shared.reschedule()
-        }
+        // These three used to call NotificationManager.reschedule() again.
+        // `AppState.settings.didSet` already reschedules on EVERY settings
+        // write, so each of them ran the whole cancel-and-requeue twice — and
+        // it happens synchronously, on the main thread, inside whatever
+        // animation the control that changed the setting started. That is what
+        // made the Asr madhab toggle stutter: a JSON write, a full Adhan
+        // schedule recompute and two notification requeues landing between the
+        // spring's first and second frame.
         .alert("Notifications are off", isPresented: $showDeniedAlert) {
             Button("Open Settings") { openSystemSettings() }
             Button("Not now", role: .cancel) {}
@@ -602,6 +601,18 @@ struct SettingsView: View {
         .cardStyle()
     }
 
+    /// One notification sub-option, on its own surface.
+    ///
+    /// These used to be bare `Toggle`s stacked under a divider, and they did
+    /// not read as controls. "Use my location" looks identical in code and
+    /// reads fine only because it defaults ON, so its track is green;
+    /// "Friend activity" defaults OFF, and an off Toggle is a pale grey track
+    /// on a white card — indistinguishable from a disabled one, sitting below
+    /// a divider where it scans as secondary text rather than something you
+    /// can act on. SwiftUI gives no hook to tint the OFF track, so the row
+    /// itself carries the affordance: a filled, bordered surface, the same
+    /// treatment the good-deed rows use, which reads as interactive in either
+    /// state.
     private func notifOption(title: String, subtitle: String, isOn: Binding<Bool>) -> some View {
         Toggle(isOn: isOn) {
             VStack(alignment: .leading, spacing: 1) {
@@ -614,6 +625,16 @@ struct SettingsView: View {
             }
         }
         .tint(Theme.green)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(isOn.wrappedValue ? Theme.greenSoft.opacity(0.45) : Theme.bg,
+                    in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(isOn.wrappedValue ? Theme.green.opacity(0.35)
+                                                : Theme.mist.opacity(0.45),
+                              lineWidth: 1)
+        )
     }
 
     /// Binding into one of the notification sub-flags (didSet reschedules).

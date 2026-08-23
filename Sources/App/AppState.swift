@@ -9,9 +9,15 @@ final class AppState: ObservableObject {
     @Published var settings: AppSettings {
         didSet {
             Store.save(settings, to: Store.settingsFile)
-            refresh()
-            // Settings changes (calc method, location, notifications toggle,
-            // onboarding completion) all affect the notification schedule.
+            // Only when the windows actually move. `refresh()` runs Adhan over
+            // the whole day, drops the schedule cache and reconciles streaks —
+            // real work, synchronous, on the main thread, and it was happening
+            // for every settings write including ones that cannot possibly
+            // change a prayer time. `circleMode` is in the list because
+            // `refresh` also applies the time-travel policy.
+            if settings.affectsSchedule(comparedTo: oldValue) { refresh() }
+            // Reschedule stays unconditional: the notification TOGGLES are
+            // themselves a reason to requeue, and this only starts a Task.
             NotificationManager.shared.reschedule()
             // v4 Phase D FIX: and the REMOTE half of the same switches. The
             // device row was only ever written by `PushRegistrar.refresh`,

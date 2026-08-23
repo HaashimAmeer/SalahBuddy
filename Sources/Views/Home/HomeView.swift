@@ -63,7 +63,18 @@ struct HomeView: View {
                     .padding(.bottom, 28)
                 }
                 // v3.7: the guided tour scrolls its targets into view.
-                .onChange(of: state.tutorialStep) { _, step in
+                .onChange(of: state.tutorialStep) { previous, step in
+                    // Tour over: back to the top of Today. The last step
+                    // scrolled this view down to "Earlier today" and then the
+                    // tour walked off to another tab, so returning here landed
+                    // you mid-page looking at yesterday's leftovers rather than
+                    // at the prayer you are meant to log next.
+                    if step == nil, previous != nil {
+                        withAnimation(Theme.spring) {
+                            proxy.scrollTo("tour-home-top", anchor: .top)
+                        }
+                        return
+                    }
                     guard let step else { return }
                     withAnimation(Theme.spring) {
                         if step == Tour.postPhotoIndex { proxy.scrollTo("tour-home-top", anchor: .top) }

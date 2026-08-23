@@ -428,6 +428,29 @@ struct AppSettings: Codable {
 
     init() {}
 
+    /// Does moving from `previous` to self change what the prayer SCHEDULE is?
+    ///
+    /// Exists so `AppState.settings.didSet` can stop recomputing the day for
+    /// settings that have nothing to do with it. `refresh()` runs Adhan over
+    /// the whole day, clears the schedule cache and reconciles streaks, and it
+    /// was running synchronously on the main thread for every write — flipping
+    /// a notification sub-toggle, dismissing a hint, recording a travel day.
+    /// Inside whatever animation the control that made the change had started,
+    /// which is what a stutter looks like.
+    ///
+    /// Deliberately a WHITELIST of the fields that really move the windows. A
+    /// blacklist would silently stop refreshing the day the next field lands.
+    func affectsSchedule(comparedTo previous: AppSettings) -> Bool {
+        calcMethod != previous.calcMethod
+            || madhab != previous.madhab
+            || useDeviceLocation != previous.useDeviceLocation
+            || fixedLatitude != previous.fixedLatitude
+            || fixedLongitude != previous.fixedLongitude
+            || isTraveling != previous.isTraveling
+            || circleMode != previous.circleMode
+            || hasOnboarded != previous.hasOnboarded
+    }
+
     // Tolerant decoding: missing keys fall back to defaults (forward-compatible).
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)

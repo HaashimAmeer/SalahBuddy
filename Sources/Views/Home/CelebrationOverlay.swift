@@ -48,7 +48,13 @@ struct CelebrationOverlay: View {
         }
         .contentShape(Rectangle())
         .onTapGesture {
-            withAnimation(Theme.spring) { state.celebration = nil }
+            // Bare on purpose. HomeView carries
+            // `.animation(Theme.spring, value: state.celebration != nil)`,
+            // which has to stay because AppState.log sets `celebration`
+            // without an animation of its own — and scoring code should not be
+            // reaching for one. Wrapping here too just ran the spring twice on
+            // dismissal.
+            state.celebration = nil
         }
         .onAppear { fire() }
         .onChange(of: state.celebration) { _, newValue in

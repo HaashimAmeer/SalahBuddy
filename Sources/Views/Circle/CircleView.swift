@@ -41,18 +41,22 @@ struct CircleView: View {
             // v3.6: tap a leaderboard member → centered pop-up with their
             // week + the remove option.
             if let member = selectedMember {
-                CenteredModal(onClose: { selectedMember = nil }) {
+                CenteredModal(onClose: { withAnimation(Theme.spring) { selectedMember = nil } }) {
                     MemberDetailContent(member: member) {
                         withAnimation(Theme.spring) {
                             state.removeMember(name: member.name)
-                            selectedMember = nil
+                            withAnimation(Theme.spring) { selectedMember = nil }
                         }
                     }
                 }
                 .zIndex(5)
             }
         }
-        .animation(Theme.spring, value: selectedMember?.id)
+        // No implicit animation for selectedMember — every site that changes
+        // it now wraps its own withAnimation, and a root-level modifier here
+        // ran the spring twice while installing an animation context over the
+        // entire Circle page (scoreboard, week grid, challenge list) for what
+        // is one modal appearing.
         .sheet(isPresented: $creatingChallenge) {
             CreateChallengeSheet()
                 .environmentObject(state)
@@ -340,7 +344,8 @@ private struct ScoreboardCard: View {
         }
         .padding(14)
         .cardStyle()
-        .animation(Theme.spring, value: expanded)
+        // Removed: a clean double. The single site that sets `expanded`
+        // (below) already wraps it in withAnimation(Theme.spring).
     }
 
     private func row(index: Int, entry: (member: CircleMember, xp: Int), maxXP: Int) -> some View {

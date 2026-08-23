@@ -52,28 +52,36 @@ struct StatsView: View {
             // v3.6: centered modals (design session) — nicer than a bottom
             // sheet, X to dismiss.
             if showScoring {
-                CenteredModal(onClose: { showScoring = false }) {
+                CenteredModal(onClose: { withAnimation(Theme.spring) { showScoring = false } }) {
                     ScoringExplainerContent()
                 }
                 .zIndex(5)
             }
             if showTitleInfo {
-                CenteredModal(onClose: { showTitleInfo = false }) {
+                CenteredModal(onClose: { withAnimation(Theme.spring) { showTitleInfo = false } }) {
                     titleInfoContent
                 }
                 .zIndex(5)
             }
             // v3.6: tap a badge ("Kindling"?) to see what it takes to earn.
             if let badge = selectedBadge {
-                CenteredModal(onClose: { selectedBadge = nil }) {
+                CenteredModal(onClose: { withAnimation(Theme.spring) { selectedBadge = nil } }) {
                     badgeInfoContent(badge)
                 }
                 .zIndex(5)
             }
         }
-        .animation(Theme.spring, value: showScoring)
-        .animation(Theme.spring, value: showTitleInfo)
-        .animation(Theme.spring, value: selectedBadge?.id)
+        // NO implicit .animation(_:value:) here. All three of these were
+        // doubles: every site that sets showScoring / showTitleInfo /
+        // selectedBadge already wraps it in withAnimation(Theme.spring), so
+        // tapping "Seeker" ran the same spring twice. And an implicit
+        // animation at the ROOT of this view installs a context over the whole
+        // page — the scroll content, the badge wall, the calendar — so a modal
+        // appearing made SwiftUI reconsider all of it, which is what the
+        // stutter was. CenteredModal brings its own
+        // .scale+.opacity transition, driven by the withAnimation at each
+        // mutation site (open AND close, see above), which is where the intent
+        // actually lives.
         .sheet(item: $selectedSummary) { summary in
             DayPhotoSheet(summary: summary)
                 .environmentObject(state)

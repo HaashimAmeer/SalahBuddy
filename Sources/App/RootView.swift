@@ -62,7 +62,21 @@ struct RootView: View {
             .onChange(of: state.settings.hasOnboarded) { _, onboarded in
                 if onboarded { maybeStartTour() }
             }
-            .onChange(of: state.tutorialStep) { _, step in
+            .onChange(of: state.tutorialStep) { previous, step in
+                // The tour just ended — hand the person back to Today so they
+                // can actually start, instead of abandoning them on whichever
+                // tab the last step happened to spotlight.
+                //
+                // The old seven-step tour closed with a "post your first
+                // prayer" card that lived on tab 0, so this fell out for free.
+                // Trimming to four steps dropped that card and, with it, the
+                // only thing that returned you — the tour now finishes on the
+                // Circle tab and just stops. Making the return explicit is the
+                // fix; it should never have been a side effect of a step.
+                if step == nil, previous != nil {
+                    withAnimation(Theme.spring) { selectedTab = 0 }
+                    return
+                }
                 guard let step, Tour.steps.indices.contains(step) else { return }
                 withAnimation(Theme.spring) { selectedTab = Tour.steps[step].tab }
             }
