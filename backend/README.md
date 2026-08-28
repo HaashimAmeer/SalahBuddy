@@ -600,8 +600,8 @@ own immediately, photos included.
 
 `.github/workflows/maintenance.yml`, nightly at 09:17 UTC plus a manual
 `workflow_dispatch`. It POSTs `retention` and then `sweep-orphans`. Until this
-existed both functions were only ever called opportunistically by a client,
-which made the ~30-day photo promise depend on somebody opening the app.
+existed nothing called either one — `grep functions.invoke Sources/` finds only
+`notify` — so the ~30-day photo promise had no caller at all.
 
 **Why a workflow and not `pg_cron` + `pg_net`.** Neither extension exists in the
 sandbox, so that route can only be configured by hand against the live database
@@ -705,7 +705,7 @@ is always followed by another ask; only a short page proves every remaining id
 was considered. `tests/deno/sweep_test.ts` hammers that case offline.
 
 **The circles those users created need no separate sweep.** Once the last
-membership goes the circle is empty, and retention's step 5 drops empty circles
+membership goes the circle is empty, and retention's job 3b drops empty circles
 seven days later. Deleting the shell is also what finally anonymises anything
 they reported: `reports.reporter_id` is `ON DELETE SET NULL` precisely so the
 complaint survives the reporter.
@@ -849,8 +849,10 @@ itself, and dropping the pin fails "filed a report that named no member").
       realtime raises — one that asks for the reconciling read. A delta also
       promotes itself to that read whenever the roster is older than
       `CircleSyncTuning.reconcileInterval` (10 min), which is the floor under
-      the device that never got the push and the only thing that notices a
-      member who LEFT, since a departure raises no event and sends no push.
+      the device that never got the push. (A departure raises no event and
+      sends no push, so the floor is what notices one MID-SESSION;
+      `CircleService.pull()` also re-reads the roster at launch and on every
+      foreground.)
 - [ ] **Add `backend/supabase/.temp/` to `.gitignore`.** The Supabase CLI
       writes the linked project ref there; on a public repo that should never
       be committed by accident.

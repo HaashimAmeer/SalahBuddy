@@ -23,6 +23,12 @@ import XCTest
 /// That makes the persistence assertions real rather than a restatement of the
 /// in-memory value. The one thing disk cannot supply is a location fix, so
 /// `LocationProvider` grew a DEBUG-only `simulateDeviceFix`.
+///
+/// **Known tradeoff:** the seam is the test host's REAL Documents directory.
+/// `makeState` snapshots and restores `settings.json` and `profile.json` via
+/// `addTeardownBlock`, but a hard crash mid-test skips teardown and leaves the
+/// fixture as that simulator's live state. Accepted: `Store.directory` is not
+/// injectable, and a crash in here is already a failed run.
 @MainActor
 final class SavedPlacesTests: XCTestCase {
 

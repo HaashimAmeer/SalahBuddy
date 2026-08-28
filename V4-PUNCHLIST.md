@@ -61,8 +61,10 @@ never produce.
 
 ## 2. Dashboard settings to confirm
 
-- [ ] **Google provider → Authorized Client IDs** must list
+- [x] ~~**Google provider → Authorized Client IDs**~~ must list
       `923951498597-445nb4q5o5k66imnbbul70h88s7bct72.apps.googleusercontent.com`.
+      VERIFIED in the dashboard 2026-08-27 (buildorder session) — was already
+      configured; the box just never got ticked.
       GoTrue checks the ID token's `aud` against that list; a mismatch fails
       sign-in with a message that does not obviously say why.
 - [x] ~~**APNs secrets**~~ — VERIFIED 2026-08-21, by arithmetic rather than by
@@ -93,20 +95,26 @@ never produce.
       `app-store-connect` method produces an ipa whose `aps-environment` is
       **production** (rewritten from `development`) with `beta-reports-active`
       set. Push entitlements will be right in a TestFlight build.
-- [ ] Optional, saves compute hours: the Xcode Cloud **Test** action still uses
-      the multi-device "Recommended iPhones" alias. Switching it to a single
-      simulator is only possible from Xcode's Cloud tab (the ASC web dropdown
-      refuses). The tests are pure-logic units on an iPhone-only target.
+- [x] ~~Optional, saves compute hours: the Xcode Cloud **Test** action still
+      uses the multi-device "Recommended iPhones" alias.~~ DONE — verified
+      2026-08-27: SalahBuddyMock's Test action is a single destination, saved
+      Aug 21. (One nuance since: `SavedPlacesTests` is no longer "pure logic" —
+      it uses the test host's real Documents directory as its persistence seam,
+      snapshotting and restoring `settings.json`/`profile.json`.)
 
 ## 4. Device-only — cannot be exercised by any CI
 
 Sign-in, push and photo sync have no simulator path. In rough dependency order:
 
 > **`backend/tests/fake_buddy.sh` covers the two-phone items with one phone.**
-> It signs up a real throwaway account against staging, joins your circle with
-> the invite code, and posts prayers — so your phone sees a genuine second
-> member without a second device. `status` prints the XP total your leaderboard
-> must agree with, which is the Phase C check.
+> As of 2026-08-27 it leads with `new`: the throwaway account creates its OWN
+> circle and prints the invite code for your phone to join, so nothing test-ish
+> ever lands in your real circle by default. `join <CODE>` (your circle, the
+> sharpest §4 check) still exists but is eyes-open — it echoes what it is about
+> to do and makes you type the code back — and `leave`/`cleanup` are the undo.
+> `status` prints the XP total your leaderboard must agree with, which is the
+> Phase C check. Note the one-circle rule: to join the buddy's circle your
+> phone must first leave yours (gear ▸ Leave), and the script says so.
 >
 > It exercises the server contract and YOUR phone's half of the conversation.
 > It says nothing about how a second real iPhone renders things, so the items
@@ -176,14 +184,12 @@ Sign-in, push and photo sync have no simulator path. In rough dependency order:
   Wiring it is a copy of `deploy-staging` with the branch and secret names
   swapped — and leave the smoke job pointed at staging, since it signs up
   throwaway users and posts rows.
-- **`delete_account()` leaves the `auth.users` row.** Removing it needs the
-  service-role admin API. The app signs out immediately so the account is
-  unreachable, but an admin sweep should eventually clear the orphans — including
-  the ones CI creates on every staging push.
-- **Retention is not scheduled.** `purge_expired_photo_rows` + the `retention`
-  edge function work and are lease-guarded (`claim_retention_run`), and the
-  client triggers them opportunistically, but nothing runs them on a timer.
-  pg_cron + pg_net, or a scheduled workflow, is the upgrade.
+- ~~**`delete_account()` leaves the `auth.users` row.**~~ SHIPPED 2026-08-27:
+  the `sweep-orphans` edge function (service-role only, report-by-default,
+  conservative ANDed keep-rules) — see §8 for the two human steps that arm it.
+- ~~**Retention is not scheduled.**~~ SHIPPED 2026-08-27:
+  `.github/workflows/maintenance.yml`, nightly 09:17 UTC + `workflow_dispatch`,
+  drains retention then runs the orphan sweep. Blocked on one secret — §8.
 - **Universal links** (`…/join/<CODE>`) wait on a domain existing. Invites are
   code-first, as §2 specifies.
 
@@ -236,13 +242,63 @@ rendered grey-on-grey-on-grey against the mint.
   just dates. Migration `…000500`.
 - The shared-grid presentation question is recorded as INTENDED, not a defect.
 
-**Known gap:** "nudges and joins are never filtered" is enforced only by which
+~~**Known gap:** "nudges and joins are never filtered" is enforced only by which
 call sites pass `relevance`, and `notify/index.ts` exports nothing, so there is
-no test for the wiring. Guarding it needs the handlers exported and a fake
-Supabase client.
+no test for the wiring.~~ CLOSED 2026-08-27: handlers live in
+`notify/handlers.ts` (index.ts is `Deno.serve` and nothing else), and
+`tests/deno/notify_test.ts` drives all three kinds through a PostgREST-shaped
+fake (`fake_supabase.ts`, projection-aware) — the §6 fan-out table, the
+friend-activity toggle, and the local-clock rule all have failing mutations.
 
-**Local tooling:** `deno` is not installed on this Mac (`brew install deno`).
-`run_sql_tests.sh` needs `PGHOST=/tmp PGPORT=5432 PGUSER=haashimameer
-PGDATABASE=postgres`.
+**Local tooling:** `deno` is installed (brew, 2026-08-27). `run_sql_tests.sh`
+needs `PGHOST=/tmp PGPORT=5432 PGUSER=haashimameer PGDATABASE=postgres`.
 
-Current suites: **406 iOS, 30 SQL, 87 Deno, 0 failures.**
+Current suites (2026-08-27): **460 iOS, 30 SQL, 112 Deno, 0 failures.**
+
+---
+
+## 8. Shipped 2026-08-27 — the build-order batch, and what it needs from you
+
+One session cleared the remaining build-order items (each built by an agent,
+adversarially reviewed, and re-reviewed): the v4.1 saved-places model + the
+management sheet (verified rendering on the simulator), `AppState` saved-places
+tests, the race-XP single currency + the undo/freeze receipt, the
+orphaned-photo fix (the lapsed window silently ACCEPTS the log as qada and
+drops the photo — both leak paths closed by one pure rule,
+`GameEngine.isPhotoOrphaned`), push receipts (`AppDelegate.didReceive` existed
+for nothing before — a tapped push was never seen) + roster-refresh-on-join
+with a 10-minute reconcile floor, `fake_buddy.sh` circle hygiene, the notify
+wiring tests, and the scheduled maintenance above.
+
+**Human steps, in order:**
+
+- [ ] **Add the Actions secret `SUPABASE_STAGING_SERVICE_ROLE_KEY`** (staging
+      project ▸ Settings ▸ API ▸ service_role, verbatim). Until then the
+      nightly job skips green and photos are not aging out. First run after a
+      `backend/**` push deploys `sweep-orphans`; before that it 404s loudly.
+- [ ] **After a few nightly reports look right**, arm the account sweep: repo
+      variable `SUPABASE_STAGING_USER_SWEEP_APPLY=true` (or one
+      `workflow_dispatch` with `apply_user_sweep`). Report mode deletes nothing.
+- [ ] **Check your real circle for leftover Test Buddy members** from the old
+      `fake_buddy.sh join` days — their state files are gone, so only the app
+      or the dashboard can remove them now.
+- [ ] **Live-smoke `fake_buddy.sh new`** once: join its printed code from the
+      phone (you'd have to leave your real circle first — or just eyeball
+      `status`), `post fajr onTime`, `leave`.
+- [ ] **Two-phone join check** when convenient: phone open on Circle tab,
+      second device joins — the roster should gain them within seconds (APNs
+      secrets were verified §2, so the join push should really send).
+
+**Decisions parked for you (all working as shipped; none block anything):**
+
+- Excused days in the race: the crown now credits a perfect-day bonus on an
+  excused day; the recap standings beside it void it. Rare (an excused day
+  holding five in-window logs) but now inconsistent in the crown's favor.
+- Crown semantics: `raceCrossing` awards first-CROSSING; a later qada on a
+  perfect day can drop the bar back under the target while the crown stands.
+  Defensible as "crossed the line first" — but it is a choice, record it.
+- The lapsed-window camera flow still silently books a qada (5 XP, photo
+  dropped) with no warning before or after — file leak fixed, UX untouched.
+- Whether to sweep photos already orphaned on existing TestFlight installs
+  (a one-time launch sweep), and whether 10 min is the right
+  `CircleSyncTuning.reconcileInterval`.

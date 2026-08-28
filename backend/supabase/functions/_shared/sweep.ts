@@ -130,8 +130,11 @@ export interface SweepParams {
   maxDeletes: number;
 }
 
-/// `{ apply: true }` and nothing else arms the destructive half. Every other
-/// body — missing, malformed, `{apply:"yes"}`, `{apply:1}` — is a report.
+/// `{ apply: true }` — or its curl-friendly twin `{ apply: "true" }`, and
+/// nothing else — arms the destructive half. Every other body — missing,
+/// malformed, `{apply:"yes"}`, `{apply:1}` — is a report. (The string form is
+/// accepted deliberately, for shells and workflow inputs that can't type a
+/// JSON boolean; an auditor reasoning about what can arm this must count it.)
 ///
 /// The numbers are CLAMPED rather than rejected, the same bargain
 /// `parseRetentionDays` strikes: a cron config with a typo in it should run the

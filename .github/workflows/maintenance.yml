@@ -91,7 +91,7 @@ jobs:
           url="${STAGING_URL:-}"
           source="repo variable/secret"
           if [ -z "$url" ] && [ -f "$CONFIG" ]; then
-            url="$(grep -oE 'https://[a-z0-9]+\.supabase\.co' "$CONFIG" | head -1)"
+            url="$(grep -oE 'https://[a-z0-9]+\.supabase\.co' "$CONFIG" | head -1 || true)"
             source="$CONFIG (the config the app ships)"
           fi
 
