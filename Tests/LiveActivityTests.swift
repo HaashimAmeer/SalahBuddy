@@ -22,6 +22,12 @@ import XCTest
 ///   case has to fail towards the deep link.
 /// - `NudgeRequest` / `markingNudged` — the request the extension sends and the
 ///   optimistic state §4 requires it to write before returning.
+/// - `NudgeRoute` — whether a tap sends, nudges locally, or hands off to the
+///   app. Pulled out of `NudgeSender` precisely so it is on THIS side: the
+///   render decides it once and `perform()` decides it again, and a widget's
+///   render can be hours stale, so the two answering differently is the whole
+///   bug class. `NudgeSender.send` itself is in the extension target and is not
+///   linked here — what is pinned is every decision it composes.
 @MainActor
 final class LiveActivityTests: XCTestCase {
 
@@ -37,10 +43,11 @@ final class LiveActivityTests: XCTestCase {
                           youLogged: Bool = false,
                           posts: [WidgetSnapshot.Post] = [],
                           waiting: [WidgetSnapshot.Waiting] = [],
-                          window: Bool = true) -> WidgetSnapshot {
+                          window: Bool = true,
+                          mode: CircleMode = .real) -> WidgetSnapshot {
         WidgetSnapshot(
             writtenAt: opensAt,
-            mode: .real,
+            mode: mode,
             window: window ? WidgetSnapshot.Window(prayer: prayer, dayKey: dayKey,
                                                    opensAt: opensAt, endsAt: endsAt)
                            : nil,
@@ -409,6 +416,99 @@ final class LiveActivityTests: XCTestCase {
         XCTAssertFalse(WidgetFile.markNudged(
             memberID: "m1",
             at: url.deletingLastPathComponent().appendingPathComponent("absent.json")))
+    }
+
+    // MARK: - Where a nudge goes (§2 tooth #3, §9-03)
+
+    /// The render's Button-or-Link decision and `perform()`'s send-or-stop
+    /// decision are the SAME decision, made at two instants, and this is the
+    /// function both spend. Two surfaces answering it separately is two surfaces
+    /// that can disagree about whether a tap does anything.
+    func testARealCircleNeedsASessionThisProcessMaySpend() {
+        let now = Date(timeIntervalSince1970: 1_756_000_000)
+        let fresh = SharedSession.Token(accessToken: "t",
+                                        expiresAt: now.timeIntervalSince1970 + 3600)
+        let dead = SharedSession.Token(accessToken: "t",
+                                       expiresAt: now.timeIntervalSince1970 - 1)
+
+        XCTAssertEqual(NudgeRoute.decide(mode: .real, token: fresh, at: now), .remote)
+        XCTAssertEqual(NudgeRoute.decide(mode: .real, token: dead, at: now), .unavailable)
+        XCTAssertEqual(NudgeRoute.decide(mode: .real, token: nil, at: now), .unavailable)
+        // The tile draws a `Link` for the last two, and the intent must agree.
+        XCTAssertTrue(NudgeRoute.decide(mode: .real, token: fresh, at: now).canSend)
+        XCTAssertFalse(NudgeRoute.decide(mode: .real, token: nil, at: now).canSend)
+    }
+
+    /// §9-03 — "the widget renders the simulated circle too... the widget works
+    /// for every solo user from day one". `WidgetSnapshotBuilder` fills
+    /// `waiting[]` for a demo circle, so a demo user is OFFERED the pill; gating
+    /// it on a Supabase session would be gating it on a check a person with no
+    /// account can never pass, and every first-run tap would bounce them into
+    /// the app instead of nudging. `AppState.sendNudge` in demo is itself purely
+    /// local, and this is the same call on the other side of the fence.
+    func testDemoNudgesLocallyAndNeedsNoSessionAtAll() {
+        let now = Date(timeIntervalSince1970: 1_756_000_000)
+        let dead = SharedSession.Token(accessToken: "t",
+                                       expiresAt: now.timeIntervalSince1970 - 1)
+        XCTAssertEqual(NudgeRoute.decide(mode: .demo, token: nil, at: now), .local)
+        XCTAssertEqual(NudgeRoute.decide(mode: .demo, token: dead, at: now), .local)
+        XCTAssertTrue(NudgeRoute.decide(mode: .demo, token: nil, at: now).canSend)
+
+        // ...but "no `widget.json` at all" is NOT demo. It is the conservative
+        // direction, and the Control is why: it has no list to draw and one job
+        // left, which is to say "Sign in to nudge" rather than swallow the tap.
+        XCTAssertEqual(NudgeRoute.modeWithoutAFile, .real)
+        XCTAssertEqual(NudgeRoute.decide(mode: NudgeRoute.modeWithoutAFile,
+                                         token: nil, at: now), .unavailable)
+    }
+
+    // MARK: - Taking a tick back (§4)
+
+    /// The optimistic write is made before the request, so a reply of 401 or 500
+    /// has to be able to undo it. Without this the chip reads "Nudged" forever
+    /// for somebody who received nothing, and `nextNudgeTarget` skips past them
+    /// until the app publishes a CHANGED snapshot.
+    func testARetractionUndoesExactlyTheOneFlag() {
+        let file = snapshot(waiting: [waiting("m1", "Harun", nudged: true),
+                                      waiting("m2", "Sara", nudged: true)])
+        let back = file.markingNudged(memberID: "m1", nudged: false)
+        XCTAssertFalse(back.circle.waiting[0].nudgedThisWindow)
+        XCTAssertTrue(back.circle.waiting[1].nudgedThisWindow)
+        // ...and the button is offered again, which is the point.
+        XCTAssertEqual(back.nextNudgeTarget?.userID, "m1")
+        XCTAssertEqual(back.circle.prayedCount, file.circle.prayedCount)
+    }
+
+    func testAFileThatHasMovedOnIsNotOursToEdit() throws {
+        // The app republishes on every change, so between the tap and the reply
+        // the file may be about the NEXT prayer entirely. Retracting then would
+        // clear a flag in a window nothing was ever nudged in.
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("widget-retract-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let asr = snapshot(prayer: .asr, dayKey: "2026-08-24",
+                           waiting: [waiting("m1", "Harun", nudged: true)])
+        XCTAssertTrue(WidgetFile.write(asr, to: url))
+        XCTAssertTrue(asr.isAbout(dayKey: "2026-08-24", prayer: "asr"))
+        XCTAssertFalse(asr.isAbout(dayKey: "2026-08-24", prayer: "maghrib"))
+        XCTAssertFalse(asr.isAbout(dayKey: "2026-08-25", prayer: "asr"))
+        XCTAssertFalse(snapshot(window: false).isAbout(dayKey: "2026-08-24", prayer: "asr"))
+
+        // A retraction aimed at a window the file is no longer about is a no-op.
+        XCTAssertFalse(WidgetFile.retractNudge(memberID: "m1", dayKey: "2026-08-24",
+                                               prayer: "maghrib", at: url))
+        XCTAssertTrue(try XCTUnwrap(WidgetFile.read(at: url))
+            .circle.waiting[0].nudgedThisWindow)
+
+        // The right window, and it comes back out.
+        XCTAssertTrue(WidgetFile.retractNudge(memberID: "m1", dayKey: "2026-08-24",
+                                              prayer: "asr", at: url))
+        XCTAssertFalse(try XCTUnwrap(WidgetFile.read(at: url))
+            .circle.waiting[0].nudgedThisWindow)
+        // Idempotent, like the mark itself.
+        XCTAssertFalse(WidgetFile.retractNudge(memberID: "m1", dayKey: "2026-08-24",
+                                               prayer: "asr", at: url))
     }
 
     // MARK: - The deep link (§2 tooth #3)

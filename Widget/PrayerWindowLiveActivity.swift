@@ -181,8 +181,19 @@ private struct CountTrack: View {
 }
 
 /// The circle as a column of faces on the Lock Screen: emoji on a tier-coloured
-/// pill, newest first. Capped by `PrayerWindowAttributes.faceCap`, which the
-/// content state has already applied — this only lays out what arrived.
+/// pill, the name under it, newest first. Capped by
+/// `PrayerWindowAttributes.faceCap`, which the content state has already applied
+/// — this only lays out what arrived.
+///
+/// **The name is drawn HERE and only here, and that is the point.** `Face.name`
+/// crosses the wire and is counted against §6's 4 KB budget, so
+/// `buildLiveActivityPush` trims whole faces oldest-first to fit — emoji chips
+/// taken off somebody's Lock Screen to make room. A field that costs a face and
+/// then goes undrawn is a field that should not be sent, so either it appears on
+/// a surface or it leaves the content state. The Lock Screen is the surface with
+/// the room: the Dynamic Island's expanded bottom region is already a count, a
+/// track and this row inside a fixed height, and a second line of text per face
+/// is what makes it clip.
 private struct FaceStack: View {
     let faces: [PrayerWindowAttributes.Face]
     let youLogged: Bool
@@ -194,21 +205,22 @@ private struct FaceStack: View {
         } else {
             HStack(spacing: 4) {
                 ForEach(Array(faces.enumerated()), id: \.offset) { _, face in
-                    FaceBadge(face: face)
+                    FaceBadge(face: face, showsName: true)
                 }
             }
         }
     }
 }
 
-/// The same row, laid out for the Dynamic Island's bottom region.
+/// The same row, laid out for the Dynamic Island's bottom region — see
+/// `FaceStack` on why the name does not come with it.
 private struct FaceStrip: View {
     let faces: [PrayerWindowAttributes.Face]
 
     var body: some View {
         HStack(spacing: 4) {
             ForEach(Array(faces.enumerated()), id: \.offset) { _, face in
-                FaceBadge(face: face)
+                FaceBadge(face: face, showsName: false)
             }
             Spacer(minLength: 0)
         }
@@ -217,6 +229,7 @@ private struct FaceStrip: View {
 
 private struct FaceBadge: View {
     let face: PrayerWindowAttributes.Face
+    let showsName: Bool
 
     var body: some View {
         VStack(spacing: 2) {
@@ -231,6 +244,17 @@ private struct FaceBadge: View {
                 // crosses as a string.
                 .fill(face.logTier.map { WidgetTheme.tier($0) } ?? WidgetTheme.divider)
                 .frame(width: 16, height: 3)
+            if showsName {
+                // Scales rather than wraps, for the reason every other label on
+                // these two surfaces does: the badge is 26pt wide and a name is
+                // whatever somebody typed. A long one shrinks; it never widens
+                // the row or pushes a fourth friend off the card.
+                Text(face.name)
+                    .font(Theme.sans(9, .semibold))
+                    .foregroundStyle(WidgetTheme.inkMuted)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
+            }
         }
         .frame(width: 26)
     }

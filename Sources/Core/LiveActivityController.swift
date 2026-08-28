@@ -23,6 +23,21 @@ import Foundation
 /// **The push-to-start token is still registered.** It is the input that has to
 /// exist before that decision could ever be revisited, and it is the half that
 /// only a real device can prove works.
+///
+/// **The same gap closes the activity as opens it, and it is worth stating
+/// plainly because §6's wording ("ending itself when the window closes") reads
+/// like a promise this file cannot keep.** `end()` is reachable from `apply()`
+/// and from `endAll()`, and `apply()` runs from `AppState.publishWidgetSnapshot`
+/// — so the app has to be RUNNING. Nothing schedules an end: ActivityKit takes
+/// no dismissal date at request time, and `ActivityContent(state:staleDate:)`
+/// only tells iOS to dim the card. So Fajr closes at 06:40, the phone is not
+/// touched, nobody in the circle posts afterwards, and the Lock Screen sits on
+/// "Fajr · window closed" until iOS's own ~8h/12h limits retire it. Two things
+/// soften it and both are the same two that soften the START gap: the app runs
+/// on every §5 quiet reload push and on every foreground, and either one ends
+/// the activity through `apply()`. The server's `end` push covers the case where
+/// somebody else posts after the window closed. Written up at both ends in
+/// `backend/README.md` under "Who starts a Live Activity".
 @MainActor
 final class LiveActivityController {
 

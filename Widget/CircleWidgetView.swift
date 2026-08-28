@@ -58,10 +58,16 @@ struct CircleWidgetModel {
     /// makes the difference visible: the tile draws a link, and the tap goes
     /// somewhere that can actually sign you in.
     ///
+    /// **This render is a guess, and `NudgeSender` asks again.** A timeline
+    /// entry is drawn and archived when the timeline is produced, which can be
+    /// hours before anybody looks at it — so a Button here is a claim about a
+    /// token that may since have expired, and the intent re-decides before it
+    /// writes anything. `NudgeRoute` is the one function both spend.
+    ///
     /// A Keychain read per render, which is cheap and rare — a widget renders
     /// at window boundaries and on reloads, not continuously. It answers false
     /// on a device that has not been unlocked since boot, and false is the safe
-    /// answer there too.
+    /// answer there too — except in demo, which needs no session at all.
     let canNudge: Bool
 
     init(snapshot: WidgetSnapshot?, date: Date) {
@@ -77,8 +83,13 @@ struct CircleWidgetModel {
         // to tell somebody they have not prayed yet.
         isSolo = circle.memberCount <= 1
         nudgeTarget = snapshot?.nextNudgeTarget
+        // §9-03: `waiting[]` is populated for a demo circle too, so a demo user
+        // MUST get a working button — they have no account, so a session check
+        // is one that can never pass and the pill would bounce every first-run
+        // user into the app forever.
         canNudge = nudgeTarget != nil
-            && (SharedSession.load()?.isFresh(at: date) ?? false)
+            && NudgeRoute.decide(mode: snapshot?.mode ?? NudgeRoute.modeWithoutAFile,
+                                 token: SharedSession.load(), at: date).canSend
 
         guard let snapshot, let window = snapshot.window else {
             phase = .empty

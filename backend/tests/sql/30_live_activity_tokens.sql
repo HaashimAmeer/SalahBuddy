@@ -9,8 +9,10 @@
 --
 --       (a) a push address is private to its owner — invisible AND undeletable
 --           from another account, even though the token is the primary key;
---       (b) the RPC reclaims a token that changed hands, and never leaves two
---           activities registered for one person and one window;
+--       (b) the RPC reclaims a token that changed hands, and retires the stale
+--           address of an activity whose token ROTATED — without ever
+--           unsubscribing a second phone that has its own activity for the same
+--           window;
 --       (c) the shape holds from BOTH doors — the RPC and the direct grant —
 --           because a row that names no window is a row the fan-out cannot use;
 --       (d) the cleanup story is real: expiry is server-owned, the sweep
@@ -90,7 +92,13 @@ begin
   end if;
 end $$;
 
--- ...and one person has at most one activity per window. ----------------------
+-- ...one ADDRESS per activity — and one activity per phone, not per account. ---
+--
+-- The distinction this block exists for: the row is retired by ACTIVITY, never
+-- by (user, window). Scoping it to the window reads as tidier and silently
+-- breaks the second phone on an account — its activity keeps running, stops
+-- receiving every later fan-out, and freezes on whatever it last showed, with
+-- ActivityKit reporting nothing to anybody.
 do $$
 declare
   v_two uuid := '00000000-0000-0000-0000-000000003002';
@@ -99,44 +107,60 @@ declare
 begin
   perform set_config('request.jwt.claims',
     format('{"sub":"%s","role":"authenticated"}', v_two), true);
-  -- The phone starts an activity for Asr, is killed, and starts another. The
-  -- second registration mints a NEW token; the first row would otherwise sit
-  -- here until it expired, taking a push per post with it.
+  -- ActivityKit rotates a RUNNING activity's push token: same `Activity.id`, new
+  -- address. The old row is a dead address for a live activity and would take a
+  -- push per post with it until it expired.
   perform public.register_live_activity_token('act-asr-a', 'update', 'A1',
                                               '2026-08-28', 'asr',
                                               now() + interval '2 hours',
                                               'sandbox', -25200);
-  perform public.register_live_activity_token('act-asr-b', 'update', 'A2',
+  perform public.register_live_activity_token('act-asr-rotated', 'update', 'A1',
                                               '2026-08-28', 'asr',
                                               now() + interval '2 hours',
                                               'sandbox', -25200);
-  -- A DIFFERENT window is a different activity and must survive.
+
+  select count(*) into v_n from public.live_activity_tokens
+   where kind = 'update' and activity_id = 'A1';
+  if v_n <> 1 then
+    raise exception 'one activity kept % addresses after a token rotation', v_n;
+  end if;
+  select token into v_tok from public.live_activity_tokens
+   where kind = 'update' and activity_id = 'A1';
+  if v_tok <> 'act-asr-rotated' then
+    raise exception 'the surviving activity token is the stale one (%)', v_tok;
+  end if;
+
+  -- THE SECOND PHONE. Same account, same window, its own activity — and it must
+  -- still be there. `max_devices_per_user()` is ten and this table's cap is 24
+  -- precisely to allow it, so a registration that unsubscribed a sibling device
+  -- would be the schema contradicting itself.
+  perform public.register_live_activity_token('act-asr-phone2', 'update', 'A2',
+                                              '2026-08-28', 'asr',
+                                              now() + interval '2 hours',
+                                              'sandbox', -25200);
+  select count(*) into v_n from public.live_activity_tokens
+   where kind = 'update' and day_key = '2026-08-28' and prayer = 'asr';
+  if v_n <> 2 then
+    raise exception
+      'a second device''s activity for the same window did not survive (found %)', v_n;
+  end if;
+
+  -- A DIFFERENT window is a different activity and must survive too.
   perform public.register_live_activity_token('act-isha', 'update', 'B1',
                                               '2026-08-28', 'isha',
                                               now() + interval '6 hours',
                                               'sandbox', -25200);
-
-  select count(*) into v_n from public.live_activity_tokens
-   where kind = 'update' and day_key = '2026-08-28' and prayer = 'asr';
-  if v_n <> 1 then
-    raise exception 'two activities registered for one window (found %)', v_n;
-  end if;
-  select token into v_tok from public.live_activity_tokens
-   where kind = 'update' and day_key = '2026-08-28' and prayer = 'asr';
-  if v_tok <> 'act-asr-b' then
-    raise exception 'the surviving activity token is the stale one (%)', v_tok;
-  end if;
   select count(*) into v_n from public.live_activity_tokens
    where kind = 'update' and prayer = 'isha';
   if v_n <> 1 then
-    raise exception 'restarting one window''s activity took another window with it';
+    raise exception 'registering one window''s activity took another window with it';
   end if;
 
   -- The activity's own end is kept (it is what a correct `stale-date` and an
   -- `end` push are built from) and a push-to-start token never gets one — the
   -- server holds one running activity's boundary, never a schedule.
   select count(*) into v_n from public.live_activity_tokens
-   where token = 'act-asr-b' and ends_at is not null;
+   where token = 'act-asr-rotated' and ends_at is not null;
   if v_n <> 1 then
     raise exception 'an activity registered without keeping its window end';
   end if;

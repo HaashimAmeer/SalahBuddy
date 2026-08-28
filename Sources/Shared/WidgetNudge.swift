@@ -107,6 +107,68 @@ enum SharedSession {
     }
 }
 
+// MARK: - Where a nudge goes
+
+/// Whether this process can send a nudge itself, and if so how.
+///
+/// **It exists because the answer is decided TWICE and the two have to agree.**
+/// `CircleWidgetModel` asks it at render time to choose between a `Button` and a
+/// `Link`, and `NudgeSender` asks it again inside `perform()` before it writes
+/// anything, because a widget's render is not current: WidgetKit generates and
+/// archives entry views when the TIMELINE is produced, and the next entry may be
+/// parked at the window's end (`WidgetSnapshot.reloadDate`, up to eight hours
+/// out). A Supabase access token lives about one. So the Button on screen at
+/// 10:30 was drawn against a token that was fresh at 09:00 and is dead now, and
+/// the tap has to find that out before it ticks a chip.
+///
+/// PURE, so both call sites spend the same function rather than two hand-rolled
+/// conditions that drift.
+enum NudgeRoute: Equatable {
+    /// A real circle and a session this process may spend.
+    case remote
+    /// Demo or solo: the nudge is real to the person and never leaves the phone.
+    ///
+    /// §9-03 — "the widget renders the simulated circle too... the widget works
+    /// for every solo user from day one" — and `WidgetSnapshotBuilder` fills
+    /// `waiting[]` for a demo circle accordingly. A demo user has no account by
+    /// definition, so gating the button on a Supabase session would draw a
+    /// "Nudge Harun" pill that can only ever bounce a first-run user into the
+    /// app, forever. `AppState.sendNudge` in demo mode is itself purely local
+    /// (`nudgesSent` + republish, never the network), so the honest thing on
+    /// this side is the same: flip the flag and stop.
+    case local
+    /// Nothing to do here. A real circle whose session is expired, missing, or
+    /// unreadable — §2 tooth #3 forbids refreshing it, so this is the app's
+    /// business and the tile draws a deep link instead.
+    case unavailable
+
+    /// PURE. `token` is whatever `SharedSession.load()` answered — nil included.
+    ///
+    /// Every caller passes `snapshot?.mode ?? NudgeRoute.modeWithoutAFile`, so
+    /// the "there is no `widget.json`" case is decided in one place rather than
+    /// three.
+    static func decide(mode: CircleMode, token: SharedSession.Token?,
+                       at now: Date) -> NudgeRoute {
+        if mode == .demo { return .local }
+        guard let token, token.isFresh(at: now) else { return .unavailable }
+        return .remote
+    }
+
+    /// What to assume when `widget.json` is not there at all — a build with no
+    /// App Group, or an app that has never run.
+    ///
+    /// `.real`, which is the CONSERVATIVE direction rather than the likely one.
+    /// Two of the three call sites cannot act on it anyway (no file means no
+    /// `nudgeTarget` and no flag to write), and the third is the Control, which
+    /// has no list to draw and one job left: say "Sign in to nudge" rather than
+    /// swallow the tap. Assuming `.demo` there would turn the loudest surface in
+    /// the app into a button that does nothing.
+    static let modeWithoutAFile: CircleMode = .real
+
+    /// Whether a button (rather than a deep link) is the right thing to draw.
+    var canSend: Bool { self != .unavailable }
+}
+
 // MARK: - The request
 
 /// The one call the extension makes: `POST functions/v1/notify`, `kind:
@@ -159,6 +221,21 @@ enum NudgeRequest {
     /// "Nudged", and a second tap must not un-tick it. The reply is decoded
     /// loosely on purpose — the endpoint grows fields, and a field this build
     /// has never heard of is not a failure.
+    ///
+    /// **This is `NudgeSender`'s reconciliation predicate, not decoration.** The
+    /// optimistic tick goes into `widget.json` before the request (§4), so a
+    /// reply of 401 (a rotated refresh, a revoked session) or 500 would
+    /// otherwise leave a chip reading "Nudged" forever for somebody who received
+    /// nothing — and `nextNudgeTarget` would skip past them until the app
+    /// published a CHANGED snapshot. `false` here un-ticks it.
+    ///
+    /// One consequence, taken deliberately: a 2xx that says
+    /// `{"sent":false,"reason":"not_sent"}` — the recipient has no registered
+    /// device — reads as NOT landed and un-ticks too, even though the server
+    /// recorded the nudge. The second tap then answers `rate_limited` and ticks
+    /// for good. One extra tap in the rare case is the cheaper mistake: the
+    /// alternative is a widget that cannot tell "nobody was reached" from
+    /// "everything worked".
     static func landed(status: Int, body: Data?) -> Bool {
         guard (200 ..< 300).contains(status) else { return false }
         guard let body,
@@ -183,16 +260,33 @@ extension WidgetSnapshot {
     /// Only `waiting[].nudgedThisWindow` moves. Not the counts — nudging
     /// somebody is not praying for them — and not `posts`, which is the tile's
     /// picture of a window nothing here has changed.
-    func markingNudged(memberID: String) -> WidgetSnapshot {
+    ///
+    /// - Parameter nudged: false RETRACTS the tick. That direction exists
+    ///   because the write is optimistic and the reply can say it should not
+    ///   have been (`NudgeRequest.landed`); without it a 401 leaves a chip
+    ///   claiming a nudge that never went, and the button skipping the person it
+    ///   was aimed at.
+    func markingNudged(memberID: String, nudged: Bool = true) -> WidgetSnapshot {
         guard !memberID.isEmpty else { return self }
         var copy: WidgetSnapshot = self
         copy.circle.waiting = circle.waiting.map { person in
             guard person.userID == memberID else { return person }
             var marked: WidgetSnapshot.Waiting = person
-            marked.nudgedThisWindow = true
+            marked.nudgedThisWindow = nudged
             return marked
         }
         return copy
+    }
+
+    /// Whether this file is still about the window a nudge was aimed at.
+    ///
+    /// The app republishes `widget.json` on every change, so between the
+    /// optimistic write and the reply the file may have moved on to the next
+    /// prayer entirely. Retracting a tick then would edit a window nothing was
+    /// nudged in.
+    func isAbout(dayKey: String, prayer: String) -> Bool {
+        guard let window else { return false }
+        return window.dayKey == dayKey && window.prayer.rawValue == prayer
     }
 
     /// Who this window's nudge button should be aimed at: the first person in
@@ -227,12 +321,24 @@ extension WidgetFile {
     /// for a flag whose worst failure is a button that has to be looked at
     /// twice.
     @discardableResult
-    static func markNudged(memberID: String, at url: URL? = WidgetFile.url) -> Bool {
+    static func markNudged(memberID: String, nudged: Bool = true,
+                           at url: URL? = WidgetFile.url) -> Bool {
         guard let url, let snapshot: WidgetSnapshot = WidgetFile.read(at: url) else {
             return false
         }
-        let marked: WidgetSnapshot = snapshot.markingNudged(memberID: memberID)
+        let marked: WidgetSnapshot = snapshot.markingNudged(memberID: memberID,
+                                                            nudged: nudged)
         guard !marked.hasSameContent(as: snapshot) else { return false }
         return WidgetFile.write(marked, to: url)
+    }
+
+    /// Take a tick back, but only while the file is still about the window it
+    /// was put there for — see `WidgetSnapshot.isAbout(dayKey:prayer:)`.
+    @discardableResult
+    static func retractNudge(memberID: String, dayKey: String, prayer: String,
+                             at url: URL? = WidgetFile.url) -> Bool {
+        guard let url, let snapshot: WidgetSnapshot = WidgetFile.read(at: url),
+              snapshot.isAbout(dayKey: dayKey, prayer: prayer) else { return false }
+        return WidgetFile.markNudged(memberID: memberID, nudged: false, at: url)
     }
 }

@@ -18,11 +18,19 @@ import WidgetKit
 ///    a button they tapped on a home screen. There is no refresh path in
 ///    `SharedSession` and none here: an expired token means the widget renders
 ///    a deep link instead of a button (`CircleWidgetView`), and `perform()`
-///    re-checks in case the token died between the render and the tap.
+///    asks again — BEFORE it writes anything — in case the token died between
+///    the render and the tap, which for a widget is the ordinary case rather
+///    than the unlucky one. A timeline entry can be archived hours before it is
+///    looked at (`WidgetSnapshot.reloadDate`) and an access token lives about
+///    one, so the Button on screen is regularly older than the session behind
+///    it. `NudgeRoute` is that decision, spent by both call sites.
 /// 2. **The optimistic state is written into the container BEFORE returning**,
 ///    which is §4's own instruction: the intent runs headless, WidgetKit
 ///    reloads after it returns, and a tile that reloaded before the write would
-///    render the state the button was tapped to change.
+///    render the state the button was tapped to change. Before RETURNING, not
+///    before deciding — the tick goes in once there is something to tick it
+///    for, and comes back out if the reply says it should not have
+///    (`NudgeRequest.landed`).
 /// 3. **It spends `waiting[]` verbatim.** That list is already the NUDGE list
 ///    rather than "everyone who has not posted" — it carries the Today screen's
 ///    gate (`WidgetSnapshotBuilder.nudgesAllowed`: window open, thirty minutes
@@ -98,15 +106,17 @@ struct NudgeCircleIntent: AppIntent {
     init() {}
 
     func perform() async throws -> some IntentResult {
-        // Checked BEFORE the work, unlike `NudgeFriendIntent`'s (which has a
-        // rendered `Link` to fall back on): the alternative here is a control
-        // that marks four people nudged and sends nothing. NEVER refreshed,
-        // only read — an expired token is the app's business, not ours.
-        guard SharedSession.load()?.isFresh(at: Date()) == true else {
+        // Checked BEFORE the work — as `NudgeFriendIntent` now is too: the
+        // alternative is a control that marks four people nudged and sends
+        // nothing. NEVER refreshed, only read — an expired token is the app's
+        // business, not ours. A demo circle routes `.local` and is not signed
+        // out; it has no account to be signed out OF (§9-03).
+        let snapshot: WidgetSnapshot? = WidgetFile.read()
+        guard NudgeRoute.decide(mode: snapshot?.mode ?? NudgeRoute.modeWithoutAFile,
+                                token: SharedSession.load(), at: Date()).canSend else {
             throw NudgeUnavailable.signedOut
         }
-        guard let snapshot: WidgetSnapshot = WidgetFile.read(),
-              let window = snapshot.window else { return .result() }
+        guard let snapshot, let window = snapshot.window else { return .result() }
         // Newest state first, and one at a time: `NudgeSender` re-reads the
         // file for each write, and the server's rate limit is per recipient
         // anyway. A whole circle is at most seven people (SPEC-V4's cap is
@@ -159,28 +169,69 @@ enum NudgeSender {
                      reload: Bool = true) async {
         guard !memberID.isEmpty else { return }
 
+        // DECIDED BEFORE ANYTHING IS WRITTEN, and that order is the whole fix.
+        //
+        // The freshness that draws a Button rather than a `Link` is baked at
+        // TIMELINE-GENERATION time — WidgetKit renders and archives entry views
+        // when the timeline is produced, and `WidgetSnapshot.reloadDate` parks
+        // the next one at the window's end, up to eight hours out. A Supabase
+        // access token lives about one. So a Button drawn at 09:00 is still on
+        // screen at 10:30 with a dead token behind it, and marking first would
+        // tick the chip, skip the person in `nextNudgeTarget`, and send nothing
+        // — permanently, until the app published a CHANGED snapshot. Reading
+        // the keychain is synchronous, so there is no cost to asking first, and
+        // it is exactly what `NudgeCircleIntent.perform()` already does.
+        let token: SharedSession.Token? = SharedSession.load()
+        let outbound: URLRequest?
+        switch NudgeRoute.decide(mode: WidgetFile.read()?.mode ?? NudgeRoute.modeWithoutAFile,
+                                 token: token, at: Date()) {
+        case .unavailable:
+            // NEVER refreshed (§2 tooth #3): a dead session means no request and
+            // no tick, and the next render offers the deep link instead.
+            return
+        case .local:
+            outbound = nil
+        case .remote:
+            guard let token,
+                  let request = NudgeRequest.build(memberID: memberID,
+                                                   dayKey: dayKey,
+                                                   prayer: prayer,
+                                                   accessToken: token.accessToken)
+            else { return }
+            outbound = request
+        }
+
         // §4: the new state goes into the container BEFORE anything
         // asynchronous, exactly as `AppState.sendNudge` inserts into
         // `nudgesSent` before awaiting. The chip has to settle the instant it
-        // is tapped, whatever the network does next — and the server's
-        // one-per-window rate limit means a second tap is `rate_limited`, which
-        // is not an error and is not a reason to un-tick anything.
+        // is tapped, whatever the network does next.
         WidgetFile.markNudged(memberID: memberID)
         if reload { WidgetCenter.shared.reloadAllTimelines() }
 
-        // Re-checked here as well as at render time, because the token can die
-        // in between. NEVER refreshed (§2 tooth #3): a dead session simply
-        // means no request, and the next render offers the deep link instead.
-        guard let token = SharedSession.load(), token.isFresh(at: Date()),
-              let request = NudgeRequest.build(memberID: memberID,
-                                               dayKey: dayKey,
-                                               prayer: prayer,
-                                               accessToken: token.accessToken)
-        else { return }
+        // Demo and solo stop here — `AppState.sendNudge` does the same thing in
+        // demo mode (bump the local record, republish, never the wire), and
+        // §9-03 wants the widget working for a first-run user with no account.
+        guard let outbound else { return }
 
-        // Best-effort, and silent either way — the same contract
-        // `PushRegistrar.send` has. A push whose moment has passed is not worth
-        // a queue, and there is nowhere in a widget to show an error anyway.
-        _ = try? await URLSession.shared.data(for: request)
+        // Best-effort, but no longer blind. `landed` is what separates "the
+        // server has it" from a 401 on a rotated session or a 500 — the two
+        // replies that would otherwise leave a chip reading "Nudged" for
+        // somebody who received nothing. The server's one-per-window rate limit
+        // answers `rate_limited`, which `landed` counts as YES, so a second tap
+        // still cannot un-tick a nudge that really went.
+        var status: Int = 0
+        var payload: Data?
+        // A transport failure leaves status 0, which `landed` reads as NOT
+        // landed — correct, and the honest answer: nothing reached the server,
+        // so nothing was nudged.
+        if let (data, response) = try? await URLSession.shared.data(for: outbound) {
+            status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            payload = data
+        }
+        guard !NudgeRequest.landed(status: status, body: payload) else { return }
+        if WidgetFile.retractNudge(memberID: memberID, dayKey: dayKey, prayer: prayer),
+           reload {
+            WidgetCenter.shared.reloadAllTimelines()
+        }
     }
 }

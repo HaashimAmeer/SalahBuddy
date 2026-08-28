@@ -43,7 +43,12 @@ create table if not exists public.live_activity_tokens (
   -- 'update' — one running activity's own token.
   kind        text not null check (kind in ('start','update')),
   -- ActivityKit's `Activity.id`, so the app can delete precisely the row for an
-  -- activity it just ended. Opaque to the server; never matched on.
+  -- activity it just ended. Opaque to the server, which never INTERPRETS it —
+  -- but it is matched on, by exactly one statement: `register_live_activity_token`
+  -- retires the previous token of the SAME activity when ActivityKit rotates
+  -- one. That is the only identity available for "this activity, on this phone",
+  -- and it is what keeps a second phone on the same account from unsubscribing
+  -- the first (see the delete in that function).
   activity_id text,
   -- Which prayer window a running activity is ABOUT. This is what lets the
   -- fan-out skip a push-to-start for a device that already has one — the
@@ -228,13 +233,33 @@ begin
   -- Whoever holds the token owns the row.
   delete from public.live_activity_tokens where token = p_token;
 
-  -- One running activity per (person, window): a phone that restarts an
-  -- activity for the same prayer mints a NEW token, and the old row would
-  -- otherwise sit here until it expired, taking a push per post with it.
-  if v_kind = 'update' then
+  -- One row per ACTIVITY, not per (person, window). ActivityKit rotates a
+  -- running activity's push token, so the same `Activity.id` can arrive here
+  -- twice with two different addresses, and the older one is a dead address for
+  -- a live activity — a push per post, spent on nothing.
+  --
+  -- SCOPED TO THE ACTIVITY DELIBERATELY. The obvious statement is "delete every
+  -- update row this user holds for this window", and it is wrong the moment an
+  -- account is signed in on two phones, which this schema explicitly supports
+  -- (max_devices_per_user() = 10, and the cap here is 24 precisely to allow ten
+  -- devices' worth). Both phones open the app during Asr, both start their own
+  -- activity, and the second registration would delete the first's row: phone A
+  -- stops receiving every later fan-out for that window and its Lock Screen
+  -- freezes on whatever it last showed. ActivityKit reports nothing, the app
+  -- sees nothing, and the only symptom is a card that quietly stopped counting.
+  --
+  -- What that leaves uncollected is the RESTART case: an activity ended and a
+  -- new one started for the same window mints a new `Activity.id`, so the old
+  -- row is not matched here. The client deletes it (`LiveActivityController.end`
+  -- calls `forgetLiveActivityToken`), and a client that died before it could is
+  -- covered by `expires_at` within twelve hours. A stale row costs one wasted
+  -- push; a wrongly-deleted row costs somebody's Lock Screen.
+  if v_kind = 'update'
+     and nullif(btrim(coalesce(p_activity_id, '')), '') is not null then
     delete from public.live_activity_tokens
      where user_id = v_uid and kind = 'update'
-       and day_key = p_day_key and prayer = p_prayer;
+       and activity_id = btrim(p_activity_id)
+       and token <> p_token;
   end if;
 
   insert into public.live_activity_tokens

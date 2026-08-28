@@ -58,10 +58,13 @@ struct NudgeControlProvider: ControlValueProvider {
         let snapshot: WidgetSnapshot? = WidgetFile.read()
         let waiting: [WidgetSnapshot.Waiting] = snapshot?.circle.waiting ?? []
         let outstanding: [WidgetSnapshot.Waiting] = waiting.filter { !$0.nudgedThisWindow }
-        // NEVER refreshed, only read (§2 tooth #3).
-        let signedIn: Bool = SharedSession.load()?.isFresh(at: Date()) ?? false
+        // NEVER refreshed, only read (§2 tooth #3) — and demo needs no session
+        // at all, which is the same call `CircleWidgetModel.canNudge` makes.
+        let route: NudgeRoute = NudgeRoute.decide(
+            mode: snapshot?.mode ?? NudgeRoute.modeWithoutAFile,
+            token: SharedSession.load(), at: Date())
 
-        guard signedIn else {
+        guard route.canSend else {
             // The tap still does something — `NudgeCircleIntent` asks to
             // continue in the foreground — so the label says where it goes.
             return NudgeControlValue(canNudge: false, label: "Sign in to nudge")

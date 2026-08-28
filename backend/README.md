@@ -45,7 +45,8 @@ backend/
                                     #   messages.ts, sweep.ts, util.ts, validate.ts, zones.ts
       notify/index.ts               # Deno.serve, and nothing else
       notify/handlers.ts            # post / join / nudge push fan-out (APNs, signed in-function)
-      retention/index.ts            # the ~30-day photo sweep
+      retention/index.ts            # Deno.serve + auth, and nothing else
+      retention/handlers.ts         # the ~30-day photo sweep, then v5 §6's token backstop
       sweep-orphans/index.ts        # deletes the auth.users shells delete_account() cannot
   tests/
     shim/00_supabase_shim.sql       # fakes auth.*/storage.*/the API roles on vanilla Postgres
@@ -651,6 +652,20 @@ countdown, only the ordinary §5 alert. Two things soften it — the app runs on
 every §5 quiet reload push, i.e. every time a friend posts, and on every
 foreground — but it is a gap, not a rounding error, and it is the price of not
 holding everybody's prayer times on a server.
+
+**The gap at the OTHER end, which is the same gap.** §6 says the activity ends
+"itself when the window closes", and nothing schedules that either. `end()` is
+reachable only from `LiveActivityController.apply`, which runs from
+`AppState.publishWidgetSnapshot` — so the app has to be running — or from the
+server's `end` push, which only fires as a side effect of somebody else posting.
+ActivityKit offers no request-time dismissal date, and `ActivityContent`'s
+`staleDate` only tells iOS to dim the card, not to retire it. So: Fajr closes at
+06:40, the phone is not picked up, nobody in the circle posts afterwards, and the
+Lock Screen reads "Fajr · window closed" until iOS's own ~8h/12h limits collect
+it. Softened by the same two things as the start gap (the app runs on every quiet
+reload push and on every foreground, and either one ends it), and by the
+`ends_at` the fan-out holds — but it is the same shape of gap and it is here for
+the same reason: a window's boundaries are a device's fact, not the server's.
 
 **Push-to-start tokens are registered and stored anyway.** They are the one
 input a server-side start would need that cannot be reconstructed later, and the

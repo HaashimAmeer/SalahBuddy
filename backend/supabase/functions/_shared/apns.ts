@@ -283,9 +283,15 @@ export const APNS_LIVE_ACTIVITY_PRIORITY = 10;
 ///
 /// `start` creates one that is not there (push-to-start) and is the only event
 /// that carries `attributes`; `update` moves a running one; `end` retires it.
-/// The app ends its OWN activity at the window's close — see
-/// `LiveActivityController` on the Swift side — so `end` exists here for the
-/// case the client cannot cover: a phone that is asleep when its window closes.
+///
+/// The app ends its own activity WHEN IT IS RUNNING — `LiveActivityController`
+/// on the Swift side, from `publishWidgetSnapshot` — which is not the same as
+/// "at the window's close", and the difference is why `end` is here. Nothing
+/// schedules a client-side end: ActivityKit has no request-time dismissal date
+/// and `staleDate` only dims the card. So a phone that is asleep when its window
+/// closes keeps a "window closed" card until it is next picked up, unless one of
+/// these arrives first. See backend/README.md, "Who starts a Live Activity" —
+/// the gap is documented at both ends there.
 export type LiveActivityEvent = "start" | "update" | "end";
 
 /// Apple's ceiling on a Live Activity payload. §6 states it as the reason the
