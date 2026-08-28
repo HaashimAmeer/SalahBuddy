@@ -45,6 +45,7 @@ struct SettingsView: View {
                     calculationCard
                     locationCard
                     notificationsCard
+                    widgetCard
                     aboutCard
                     // v4 §1: an App Store build has no developer card, and
                     // "Delete account" has to be reachable without one. Renders
@@ -656,6 +657,68 @@ struct SettingsView: View {
             set: { newValue in
                 var s = state.settings
                 s[keyPath: keyPath] = newValue
+                state.settings = s
+            }
+        )
+    }
+
+    // MARK: - The home screen (v5 §7/§9-02)
+
+    /// What the widget may show of a friend's photo.
+    ///
+    /// §9-02 settled the default — photos ON — and settled that the choice
+    /// ships in the same phase the photos do, which is why this row is here
+    /// rather than owed. It is a CONSENT question, not a preference: a friend's
+    /// face inside the app is seen by the person who opened the app, and the
+    /// same face on a home screen is seen by whoever is standing next to them,
+    /// without anybody unlocking anything.
+    ///
+    /// The copy under it names the surface rather than the setting, because
+    /// "Blurred" means nothing until you know the tile is what is being talked
+    /// about — and somebody who has never added a widget should be able to read
+    /// this row and close it again.
+    private var widgetCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionTitle("Home screen", symbol: "square.grid.2x2.fill", color: Theme.green)
+
+            Text("What your widget shows of your circle's photos.")
+                .font(Theme.sans(13, .semibold))
+                .foregroundStyle(Theme.inkMuted)
+
+            SegmentedChoice(options: WidgetPhotoStyle.allCases.map { .init($0, $0.label) },
+                            selection: widgetPhotoStyleBinding)
+
+            Text(widgetPhotoStyleDetail)
+                .font(Theme.sans(12, .semibold))
+                .foregroundStyle(Theme.inkMuted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity)
+        .cardStyle()
+    }
+
+    private var widgetPhotoStyleDetail: String {
+        switch state.settings.widgetPhotoStyle {
+        case .photos:
+            return "Their photo, on the tile. The counts and names show either way."
+        case .blurred:
+            return "The photo is there but softened — colour and shape, no faces."
+        case .namesAndTier:
+            return "No pictures at all: emoji, names and how early they prayed."
+        }
+    }
+
+    /// Writing `settings` is enough: `didSet` persists it and republishes
+    /// `widget.json`, and the builder refuses to write a photo's name at all
+    /// under "Names only" — so the extension never learns the name of a picture
+    /// it may not draw, rather than being trusted not to draw it.
+    private var widgetPhotoStyleBinding: Binding<WidgetPhotoStyle> {
+        Binding(
+            get: { state.settings.widgetPhotoStyle },
+            set: { newValue in
+                var s = state.settings
+                s.widgetPhotoStyle = newValue
                 state.settings = s
             }
         )

@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import WidgetKit
 
 // MARK: - Presentation
@@ -36,9 +37,14 @@ struct CircleWidgetModel {
     let isSolo: Bool
     let youLogged: Bool
     let streak: Int
+    /// v5 §7/§9-02 — how much of a friend's photo this home screen may show.
+    /// The writer has already applied `.namesAndTier` (no post carries a
+    /// `thumb`); what is left for this side is `.blurred`.
+    let photoStyle: WidgetPhotoStyle
 
     init(snapshot: WidgetSnapshot?, date: Date) {
         let circle: WidgetSnapshot.Circle = snapshot?.circle ?? .empty
+        photoStyle = snapshot?.photoStyle ?? .photos
         posts = circle.posts
         waiting = circle.waiting
         prayedCount = circle.prayedCount
@@ -158,9 +164,8 @@ private struct SmallCircleView: View {
 
 // MARK: - Medium
 
-/// §3: the same window, plus this window's posts as a 4-up row. The photos and
-/// the nudge button that finish this family arrive in P3 and P4; what is here
-/// is names, tiers and counts, which is the whole of P2.
+/// §3: the same window, plus this window's posts as a 4-up row — the one family
+/// §3's table gives photos to. The nudge button that finishes it is P4's.
 ///
 /// **The width budget, because a widget cannot scroll and silently clips
 /// instead.** A systemMedium tile is 321pt wide on the narrowest phone iOS 18
@@ -213,7 +218,7 @@ private struct MediumCircleView: View {
                     // every chip gives up the same width.
                     HStack(alignment: .top, spacing: 6) {
                         ForEach(Array(model.posts.enumerated()), id: \.offset) { _, post in
-                            PostChip(post: post)
+                            PostChip(post: post, photoStyle: model.photoStyle)
                         }
                     }
                 }
@@ -337,8 +342,8 @@ private struct FaceRow: View {
     }
 }
 
-/// One post: emoji, name, and the grid's tier colour underneath it. The photo
-/// this chip will carry is P3's; the tier bar is what says "on time" today.
+/// One post: the photo if there is one, else the emoji — the name under it, and
+/// the grid's tier colour across the bottom.
 ///
 /// **Capped, never fixed.** A hard `.frame(width:)` here is what clipped the
 /// fourth friend off the medium tile: four of them plus the left column came to
@@ -346,30 +351,73 @@ private struct FaceRow: View {
 /// — it just draws past its own rounded corner. Everything below is either
 /// flexible or scales, so the row fits by giving up a few points per chip
 /// instead.
+///
+/// **The picture is a FILE READ, on the render pass** (v5 §3, P3). The
+/// extension has no network and never will; what it draws is the ~300px
+/// thumbnail the app cached into `circlephotos/thumbs/` when the pull landed.
+/// A missing one — a post whose photo has not been fetched yet, a build with no
+/// App Group, a photo swept at thirty days — is not a failure state: the chip
+/// falls back to exactly what P2 shipped.
 private struct PostChip: View {
     let post: WidgetSnapshot.Post
+    let photoStyle: WidgetPhotoStyle
 
     /// The chip at its most comfortable, on a tile with room for it.
     static let maxWidth: CGFloat = 44
 
+    /// Enough to make a face unrecognisable at 44pt without turning the chip
+    /// into a grey square: shape and colour survive, the person does not.
+    private static let blurRadius: CGFloat = 7
+
+    /// Read once per render. `UIImage(contentsOfFile:)` rather than
+    /// `Image(uiImage:)` from a cache, because a widget process is built,
+    /// rendered and torn down — there is no session for a cache to live in, and
+    /// four 300px JPEGs are well inside the memory a tile is allowed.
+    private var photo: UIImage? {
+        guard let key: String = post.thumb,
+              let url: URL = WidgetFile.thumbnailURL(forKey: key) else { return nil }
+        return UIImage(contentsOfFile: url.path)
+    }
+
     var body: some View {
         VStack(spacing: 3) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(WidgetTheme.surface)
-                Text(post.emoji)
-                    .font(.system(size: 19))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
-            }
-            .frame(height: 42)
-            .overlay(alignment: .bottom) {
-                Capsule()
-                    .fill(WidgetTheme.tier(post.tier))
-                    .frame(height: 3)
-                    .frame(maxWidth: 22)
-                    .padding(.bottom, 4)
-            }
+            // An OVERLAY on the ground, not a sibling in a ZStack. An overlay
+            // is sized to the thing it covers and can never widen it; a
+            // `scaledToFill` image inside a stack reports a size that OVERFLOWS
+            // its proposal, the stack takes its largest child, and four chips
+            // insisting on their full 44 is exactly what clipped the fourth
+            // friend off a 375pt tile before P2's review caught it. The width
+            // budget above only holds if nothing in here has an opinion about
+            // width.
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(WidgetTheme.surface)
+                .overlay {
+                    if let photo {
+                        Image(uiImage: photo)
+                            .resizable()
+                            .scaledToFill()
+                            // Blurred INSIDE the clip below, so the soft edge
+                            // stays within the rounded rectangle instead of
+                            // bleeding a halo of somebody's face past its
+                            // corner.
+                            .blur(radius: photoStyle == .blurred
+                                    ? PostChip.blurRadius : 0)
+                    } else {
+                        Text(post.emoji)
+                            .font(.system(size: 19))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.7)
+                    }
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .frame(height: 42)
+                .overlay(alignment: .bottom) {
+                    Capsule()
+                        .fill(WidgetTheme.tier(post.tier))
+                        .frame(height: 3)
+                        .frame(maxWidth: 22)
+                        .padding(.bottom, 4)
+                }
             Text(post.name)
                 .font(Theme.sans(9, .semibold))
                 .foregroundStyle(WidgetTheme.inkMuted)

@@ -63,6 +63,45 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         }
     }
 
+    /// v5 §5 — the QUIET reload push.
+    ///
+    /// `notify` sends a second, alert-free push for every post after the first
+    /// one in a window (`reason: "not_first"`). It exists because §6's collapsed
+    /// alert is right for the TRAY and wrong for a widget: one alert per window
+    /// is exactly what a person wants to be buzzed with, and it leaves the home
+    /// screen sitting on "3 of 5" while the fourth and fifth arrive. This is the
+    /// only callback a payload with no `alert` ever reaches.
+    ///
+    /// Two things happen, in this order and for different reasons:
+    ///
+    /// 1. **Pull.** A reload with nothing new in `widget.json` redraws the same
+    ///    numbers. The receipt goes to `PushRegistrar` exactly as a tapped alert
+    ///    does, which asks `CircleSync` to pull sooner — and when that pull
+    ///    lands, `AppState.publishWidgetSnapshot` writes the file AND spends the
+    ///    reload, because the app is in the background. That is the path that
+    ///    actually moves the count.
+    /// 2. **Reload anyway.** The pull can fail (no network on a woken phone is
+    ///    ordinary), and a re-render still refreshes everything the timeline
+    ///    derives from its own clock — "until 6:42" becoming "window closed".
+    ///    A reload nobody needed is one out of §5-A's daily budget; a widget
+    ///    frozen mid-window is the thing this phase exists to fix.
+    ///
+    /// `.newData` unconditionally: iOS uses the answer to decide how generous to
+    /// be with the NEXT background wake, and this handler always does work.
+    /// Apple throttles these regardless — §5 calls the mechanism best-effort and
+    /// means it, which is why the visible alert was never replaced by one.
+    func application(_ application: UIApplication,
+                     didReceiveRemoteNotification userInfo: [AnyHashable: Any],
+                     fetchCompletionHandler completionHandler:
+                        @escaping (UIBackgroundFetchResult) -> Void) {
+        let kind: PushKind? = AppDelegate.receivedKind(remote: true, userInfo: userInfo)
+        Task { @MainActor in
+            if let kind { PushRegistrar.shared.remoteNotificationArrived(kind) }
+            WidgetBridge.reloadAllTimelines()
+            completionHandler(.newData)
+        }
+    }
+
     // MARK: - UNUserNotificationCenterDelegate
 
     func userNotificationCenter(_ center: UNUserNotificationCenter,

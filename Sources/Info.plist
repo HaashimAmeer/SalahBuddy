@@ -41,6 +41,10 @@
 	<string>SalahBuddy uses your location to calculate accurate prayer times.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>SalahBuddy lets you pick a photo from your library for your prayer post.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>remote-notification</string>
+	</array>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UISupportedInterfaceOrientations</key>

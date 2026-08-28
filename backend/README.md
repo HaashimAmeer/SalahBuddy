@@ -503,6 +503,28 @@ preferences.
   alert per window rather than 11 — and the same `postId` can never be
   re-announced. `{kind:"join"}` claims
   `circle_members.announced_at` the same way.
+- **v5 §5: every post after the first one in a window sends a QUIET reload
+  push.** The collapsed alert above is right for the tray and wrong for a
+  home-screen widget, which would otherwise sit on "3 of 5" for the rest of the
+  window. So a `not_first` post now fans out a second payload with **no alert in
+  it at all** — `content-available: 1`, `apns-push-type: background`,
+  `apns-priority: 5`, collapsed per *window* rather than per poster, 30-minute
+  TTL. Nothing reaches Notification Centre; the app wakes, pulls, rewrites
+  `widget.json` and reloads its timelines. Three properties, all pinned in
+  `tests/deno/notify_test.ts`: it obeys the SAME zone-relevance filter the alert
+  does, it is deliberately **not** gated on `notify_friend_activity` (that
+  toggle is about being *buzzed*, it is off by default, and gating a push that
+  shows nothing would leave almost every widget stale), and it spends the same
+  `posts.notified_at` lease — which is why the lease is now claimed *before* the
+  first-post check, so an unleased silent fan-out cannot be triggered in a loop.
+  Apple throttles background pushes and guarantees nothing: this is a bonus, and
+  the next foreground corrects the counts regardless.
+- **The first-post alert carries `mutable-content: 1`.** It runs the app's
+  notification service extension (`NotificationService/`, target
+  `SalahBuddyNotify`), whose only job is `WidgetCenter.reloadAllTimelines()`.
+  It changes nothing a person sees — the extension hands `request.content`
+  straight back — and a device running an older build without the extension
+  simply ignores the key.
 - **Realtime publishes `posts` and `custom_challenges` — and deliberately not
   `circle_members` or `excused_days`.** Realtime cannot apply RLS to DELETE
   events (there is no row left to test a policy against), so a delete is

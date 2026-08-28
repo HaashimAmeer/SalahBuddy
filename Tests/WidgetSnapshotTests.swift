@@ -154,7 +154,12 @@ final class WidgetSnapshotTests: XCTestCase {
     func testFileCarriesExactlyTheKeysSpecV5Section3Names() throws {
         let object = try json(sampleSnapshot())
 
-        XCTAssertEqual(Set(object.keys), ["writtenAt", "mode", "window", "you", "circle"])
+        // `photoStyle` is P3's addition (§7/§9-02) and the ONLY field this file
+        // has grown since P2 — it is here rather than beside each post because
+        // it is a property of the home screen, not of a picture.
+        XCTAssertEqual(Set(object.keys),
+                       ["writtenAt", "mode", "window", "you", "circle", "photoStyle"])
+        XCTAssertEqual(object["photoStyle"] as? String, "photos")
 
         let window = try XCTUnwrap(object["window"] as? [String: Any])
         XCTAssertEqual(Set(window.keys), ["prayer", "dayKey", "opensAt", "endsAt"])
@@ -193,6 +198,7 @@ final class WidgetSnapshotTests: XCTestCase {
     func testNoKeyAnywhereCouldCarryABreakReason() throws {
         let found: Set<String> = keys(in: try json(sampleSnapshot()))
         let allowed: Set<String> = ["writtenAt", "mode", "window", "you", "circle",
+                                    "photoStyle",
                                     "prayer", "dayKey", "opensAt", "endsAt",
                                     "logged", "streak",
                                     "prayedCount", "memberCount", "posts", "waiting",
@@ -286,7 +292,8 @@ final class WidgetSnapshotTests: XCTestCase {
                              extraPosts: [RemotePost] = [],
                              excused: [RemoteExcusedDay] = [],
                              nudged: Set<String> = [],
-                             isCarryOver: Bool = false) -> WidgetSnapshot {
+                             isCarryOver: Bool = false,
+                             photoStyle: WidgetPhotoStyle = .photos) -> WidgetSnapshot {
         let day = fixedDay()
         let window: PrayerWindow = day.schedule.window(for: .asr)!
         let me = UUID(), mina = UUID(), harun = UUID(), zayd = UUID()
@@ -312,7 +319,8 @@ final class WidgetSnapshotTests: XCTestCase {
             isCarryOverWindow: isCarryOver,
             photoPaths: photoPaths(source: source, prayer: .asr, dayKey: day.dayKey, now: now),
             nudgedMemberIDs: nudged,
-            hiddenPhotoPaths: hidden)
+            hiddenPhotoPaths: hidden,
+            photoStyle: photoStyle)
         return built
     }
 
@@ -592,6 +600,148 @@ final class WidgetSnapshotTests: XCTestCase {
         XCTAssertNil(WidgetSnapshotBuilder.thumb(forPhotoPath: "a/b.jpg", hiddenPaths: ["a/b.jpg"]))
         XCTAssertEqual(WidgetSnapshotBuilder.thumb(forPhotoPath: "a/b.jpg", hiddenPaths: ["other"]),
                        BuddyPhotoCache.key(forRemotePath: "a/b.jpg"))
+    }
+
+    // MARK: - SPEC-V5 §7/§9-02 — the widget photo setting (P3)
+
+    private func styled(_ style: WidgetPhotoStyle) -> WidgetSnapshot {
+        let day = fixedDay()
+        let window = day.schedule.window(for: .asr)!
+        let now = window.start.addingTimeInterval(80 * 60)
+        return realFixture(now: now, photoStyle: style)
+    }
+
+    /// "Names only" is applied by the WRITER, not by the extension.
+    ///
+    /// The distinction is the whole design and it is not fussiness: a `thumb`
+    /// the file does not contain is a picture no stale timeline, no cached
+    /// render and no future version of the extension can draw. Leave the name
+    /// in and rely on the renderer, and somebody who asked for no faces on
+    /// their home screen is one WidgetKit bug away from having them.
+    func testNamesOnlyWritesNoPhotoNameAtAll() throws {
+        let built = styled(.namesAndTier)
+
+        XCTAssertEqual(built.photoStyle, .namesAndTier)
+        XCTAssertEqual(built.circle.posts.count, 2, "the posts stay — only the pictures go")
+        XCTAssertTrue(built.circle.posts.allSatisfy { $0.thumb == nil })
+        XCTAssertEqual(built.circle.prayedCount, 2, "and the count does not move")
+
+        let encoded: String = try XCTUnwrap(
+            String(data: XCTUnwrap(WidgetFile.encode(built)), encoding: .utf8))
+        XCTAssertFalse(encoded.contains(BuddyPhotoCache.key(forRemotePath: "circle/mina/one.jpg")))
+        XCTAssertFalse(encoded.contains("circle/mina/one.jpg"))
+    }
+
+    /// "Blurred" is the RENDERER's, so the name has to travel — and so does the
+    /// setting, or the extension has no way to know it should soften it.
+    /// A pre-blurred file on disk would be the widget-only photo store §7
+    /// forbids.
+    func testBlurredStillNamesThePhotoAndCarriesTheSettingAcross() throws {
+        let built = styled(.blurred)
+
+        XCTAssertEqual(built.photoStyle, .blurred)
+        XCTAssertEqual(built.circle.posts.first { $0.name == "Mina" }?.thumb,
+                       BuddyPhotoCache.key(forRemotePath: "circle/mina/one.jpg"))
+
+        // Through the coder both processes share, because that is the only way
+        // the extension ever sees it.
+        let data: Data = try XCTUnwrap(WidgetFile.encode(built))
+        XCTAssertEqual(try XCTUnwrap(WidgetFile.decode(data)).photoStyle, .blurred)
+    }
+
+    func testPhotosIsWhatAFileWithNoOpinionMeans() throws {
+        // §9-02's default, on three surfaces: a fresh `AppSettings`, the
+        // builder's own default argument, and a P2 file that has no such key.
+        XCTAssertEqual(AppSettings().widgetPhotoStyle, .photos)
+        XCTAssertEqual(styled(.photos).photoStyle, .photos)
+
+        let raw = """
+        {
+          "writtenAt": "2026-06-10T17:00:00Z", "mode": "real",
+          "you": { "logged": false, "streak": 1 },
+          "circle": { "prayedCount": 0, "memberCount": 2, "posts": [], "waiting": [] }
+        }
+        """
+        XCTAssertEqual(try XCTUnwrap(WidgetFile.decode(Data(raw.utf8))).photoStyle, .photos)
+
+        // And a style from a NEWER app, read by an older widget, is photos too
+        // — not the cautious-looking "names only", which would blank the
+        // pictures on a home screen whose owner had asked for them.
+        let future = raw.replacingOccurrences(
+            of: "\"mode\": \"real\"", with: "\"mode\": \"real\", \"photoStyle\": \"facesOnly\"")
+        XCTAssertEqual(try XCTUnwrap(WidgetFile.decode(Data(future.utf8))).photoStyle, .photos)
+    }
+
+    func testTheStyleGateItself() {
+        for style in WidgetPhotoStyle.allCases {
+            let shows: Bool = style != .namesAndTier
+            XCTAssertEqual(WidgetSnapshotBuilder.thumb(forPhotoPath: "a/b.jpg",
+                                                       hiddenPaths: [], style: style) != nil,
+                           shows, "\(style)")
+            XCTAssertEqual(WidgetSnapshotBuilder.cacheablePath(forPhotoPath: "a/b.jpg",
+                                                               hiddenPaths: [], style: style),
+                           shows ? "a/b.jpg" : nil, "\(style)")
+            // The report hide outranks all three: it is not a preference.
+            XCTAssertNil(WidgetSnapshotBuilder.cacheablePath(forPhotoPath: "a/b.jpg",
+                                                             hiddenPaths: ["a/b.jpg"],
+                                                             style: style), "\(style)")
+        }
+    }
+
+    // MARK: - What the file names is what the app caches (§3, P3)
+
+    /// The prefetch list and the file's `thumb`s come from ONE function, and
+    /// this is why that matters: the app fetches `orderedPosts`' paths and the
+    /// widget opens `orderedPosts`' keys. Derive the two separately and they
+    /// agree until somebody changes the sort or the cap on one side — at which
+    /// point the home screen names four pictures and the app has cached a
+    /// different four, with nothing failing anywhere.
+    func testEveryPhotoTheFileNamesIsOneThePrefetchWouldFetch() {
+        let day = fixedDay()
+        let window: PrayerWindow = day.schedule.window(for: .asr)!
+        let now = window.end.addingTimeInterval(-60)
+        let me = UUID()
+        // Six friends with photos, so the cap really bites: the file carries
+        // four, and the prefetch must want those four and no others.
+        let friends: [(id: UUID, name: String, minute: Double)] = [
+            (UUID(), "Mina", 5), (UUID(), "Harun", 12), (UUID(), "Zayd", 20),
+            (UUID(), "Sara", 31), (UUID(), "Bilal", 44), (UUID(), "Amina", 58),
+        ]
+        let posts: [RemotePost] = friends.map {
+            post($0.id, .asr, day.dayKey, tier: .onTime,
+                 at: window.start.addingTimeInterval($0.minute * 60),
+                 photoPath: "circle/\($0.name.lowercased())/one.jpg")
+        }
+        let mirrorSnapshot = mirror(
+            me: me, friends: friends.map { $0.id },
+            profiles: [profile(me, "Haashim", "😄")]
+                + friends.map { profile($0.id, $0.name, "🌸") },
+            posts: posts)
+        let source = RemoteCircleDataSource(snapshot: mirrorSnapshot)
+        let fed: [GridEntry] = entries(source: source, you: you(), yourState: .waiting,
+                                       prayer: .asr, dayKey: day.dayKey,
+                                       window: window, now: now)
+        let paths: [String: String] = photoPaths(source: source, prayer: .asr,
+                                                 dayKey: day.dayKey, now: now)
+
+        let ordered = WidgetSnapshotBuilder.orderedPosts(entries: fed, photoPaths: paths)
+        let built = WidgetSnapshotBuilder.make(writtenAt: now, mode: .real, streak: 0,
+                                               window: (window, day.dayKey), entries: fed,
+                                               photoPaths: paths)
+
+        XCTAssertEqual(built.circle.posts.count, WidgetSnapshot.postCap)
+        XCTAssertEqual(built.circle.prayedCount, 6, "the CAP is on the row, not the count")
+        XCTAssertEqual(ordered.map { $0.post }, built.circle.posts)
+        // Newest first: Amina at 58 minutes, then Bilal, Sara, Zayd.
+        XCTAssertEqual(built.circle.posts.map { $0.name }, ["Amina", "Bilal", "Sara", "Zayd"])
+        // Every name in the file is a key the prefetch is about to write, and
+        // every path the prefetch would fetch is named in the file.
+        XCTAssertEqual(ordered.compactMap { $0.photoPath },
+                       ["circle/amina/one.jpg", "circle/bilal/one.jpg",
+                        "circle/sara/one.jpg", "circle/zayd/one.jpg"])
+        XCTAssertEqual(built.circle.posts.compactMap { $0.thumb },
+                       ordered.compactMap { $0.photoPath }
+                           .map { BuddyPhotoCache.key(forRemotePath: $0) })
     }
 
     /// Your own photo is a `PhotoStore` file — a different store with a

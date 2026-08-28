@@ -34,8 +34,10 @@ struct CircleWidget: Widget {
         }
         .configurationDisplayName("Your circle")
         .description("This prayer's window, and who in your circle has prayed.")
-        // §3's table, minus the two families that need what P2 does not have:
-        // systemLarge wants a week grid, and every photo is P3.
+        // §3's table, minus systemLarge — which wants a week grid or the
+        // race-to-target scoreboard, i.e. data `widget.json` does not carry.
+        // Photos landed in P3 and ride on systemMedium, which is the family
+        // §3's table gives them.
         .supportedFamilies([.systemSmall, .systemMedium, .accessoryRectangular])
     }
 }
@@ -62,9 +64,12 @@ struct CircleWidgetEntry: TimelineEntry {
 ///   each time it goes to the background.
 ///
 /// What is NOT here is any way for a friend's post to reach this by itself —
-/// §5 is explicit that no such API exists for a home-screen widget. P3's
-/// notification service extension is the answer, and P4's Live Activity is the
-/// better one.
+/// §5 is explicit that no such API exists for a home-screen widget. The two
+/// things that DO reach it are both outside this target: `NotificationService/`
+/// (a friend's alert carries `mutable-content: 1`, the extension calls
+/// `reloadAllTimelines()`, and this provider runs again about a second after
+/// somebody posts) and the app itself, woken by §5's quiet reload push. P4's
+/// Live Activity is the better answer still.
 struct CircleTimelineProvider: TimelineProvider {
 
     func placeholder(in context: Context) -> CircleWidgetEntry {

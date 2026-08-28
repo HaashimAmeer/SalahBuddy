@@ -12,10 +12,26 @@ import WidgetKit
 ///
 /// §5 is blunt about what is possible here: there is no API for "push an update
 /// to a home-screen widget". A reload is a REQUEST, the system decides when to
-/// honour it, and the budget is roughly 40–70 a day. So this is called once per
-/// backgrounding and from nowhere else — the file itself is rewritten on every
-/// state change, and a widget behind a foreground app has nobody looking at it.
-/// P3 adds the second caller (an NSE, on a friend's push); P4 adds the third.
+/// honour it, and the budget is roughly 40–70 a day. So it is rationed, and
+/// there are exactly four callers in the app — all of them moments when the
+/// home screen is the surface somebody could be looking at:
+///
+/// 1. **Backgrounding** (`RootView`). The file is rewritten on every state
+///    change while the app is open; this is the one reload that pays for all
+///    of them.
+/// 2. **A background push** (`AppDelegate.didReceiveRemoteNotification`) — v5
+///    §5's quiet reload push, sent for every post after the first one in a
+///    window.
+/// 3. **A changed file written while the app is in the background**
+///    (`AppState.publishWidgetSnapshot`) — i.e. the pull that (2) woke the app
+///    to make. Without it the app would wake, rewrite `widget.json` and go
+///    back to sleep with nobody's tile having moved.
+/// 4. **Reset all data** (`AppState.resetAllData`), which is the one place the
+///    tile can be showing a circle that no longer exists.
+///
+/// The FOURTH is not in this file and cannot be: `NotificationService/` is a
+/// separate process and calls `WidgetCenter` itself, on a `mutable-content`
+/// alert, which is the only path that reaches a widget with the app closed.
 enum WidgetBridge {
 
     /// Ask WidgetKit to re-read `widget.json`.

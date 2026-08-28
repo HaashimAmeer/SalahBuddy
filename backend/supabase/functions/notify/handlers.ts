@@ -16,7 +16,10 @@
 // three handlers through a fake Supabase client and pins the table.
 
 import {
+  APNS_BACKGROUND_PRIORITY,
+  APNS_BACKGROUND_PUSH_TYPE,
   buildAPNsPayload,
+  buildSilentAPNsPayload,
   deliverToDevices,
   type DeviceRow,
 } from "../_shared/apns.ts";
@@ -143,14 +146,21 @@ export async function notifyPost(
     });
   }
 
-  // §6 is "X posted FIRST for Fajr", not "X posted". Checked before the lease is
-  // claimed so a later poster's postId stays announceable if the first one is
-  // ever deleted — and so a circle of 8 produces one alert per window, not 7.
-  if (!await isFirstPostInWindow(admin, post)) {
-    return json({ ok: true, kind: "post", sent: false, reason: "not_first" });
-  }
-  // The lease: one announcement per post, ever. Nothing else in this function is
-  // stateful, so without it the same postId can be re-announced in a loop.
+  // §6 is "X posted FIRST for Fajr", not "X posted": a circle of 8 gets one
+  // ALERT per window, not 7. What the rest of them get is v5 §5's quiet reload
+  // push, below — so this is now which KIND of push, not whether there is one.
+  const first = await isFirstPostInWindow(admin, post);
+  // The lease: one notification per post, ever, whichever kind it turned out to
+  // be. Nothing else in this function is stateful, so without it the same
+  // postId can be re-announced in a loop — and that is as true of a silent
+  // push, which nobody would see coming, as it is of a banner.
+  //
+  // v5 NOTE: this used to sit BELOW the first-post check, deliberately, so that
+  // a later poster's postId stayed announceable if the first post were ever
+  // deleted. Nothing reaches that state — `notify` is called once, by the
+  // poster, right after their upload is acknowledged, and no path re-notifies
+  // an existing post — whereas an unleased reload push is a fan-out any member
+  // can trigger in a loop from a phone. The lease covers both paths now.
   if (!await claimPostNotification(admin, post.id)) {
     return json({
       ok: true,
@@ -160,28 +170,44 @@ export async function notifyPost(
     });
   }
 
-  const alert = postAlert({
-    name: caller.senderName,
-    prayer: post.prayer,
-    jamaat: post.jamaat,
-    placeLabel: post.place_label,
-  });
   // ONE clock read for both halves of the relevance decision. The poster's
   // window and every recipient's local day have to be judged at the same
   // instant: two `Date.now()` calls milliseconds apart can straddle a midnight
   // somewhere, and the invariant that nobody in the poster's own zone is ever
   // filtered would break for exactly the people awake at that moment.
   const now = Date.now();
+  // The one filter that is about WHERE the recipient is rather than what they
+  // asked for. See `relevance` in PushOptions.
+  // logged_at supplies the poster's own clock reading, which is what makes the
+  // time-of-day half of the filter possible — without it the window degrades to
+  // date-only and a Mumbai member is buzzed at 17:30 about a Seattle Fajr.
+  // Date.parse of a null/absent column yields NaN, and relevanceWindow reads a
+  // non-finite value as "unknown, do not filter".
+  //
+  // Computed once and spent by BOTH paths: a reload push about a prayer window
+  // that closed twelve hours ago in the recipient's own day is telling a phone
+  // to go and redraw something nobody's home screen is about.
+  const relevance = relevanceWindow(post.day_key, post.utc_offset, now,
+                                    Date.parse(post.logged_at));
+  const data = {
+    kind: "post",
+    circleId: caller.circleId,
+    postId: post.id,
+    userId: post.user_id,
+    dayKey: post.day_key,
+    prayer: post.prayer,
+  };
+
+  if (!first) return await reloadForPost(admin, caller, post, { relevance, now, data });
+
+  const alert = postAlert({
+    name: caller.senderName,
+    prayer: post.prayer,
+    jamaat: post.jamaat,
+    placeLabel: post.place_label,
+  });
   return await fanOut(admin, caller, alert, {
-    // The one filter that is about WHERE the recipient is rather than what
-    // they asked for. See `relevance` in PushOptions.
-    // logged_at supplies the poster's own clock reading, which is what makes
-    // the time-of-day half of the filter possible — without it the window
-    // degrades to date-only and a Mumbai member is buzzed at 17:30 about a
-    // Seattle Fajr. Date.parse of a null/absent column yields NaN, and
-    // relevanceWindow reads a non-finite value as "unknown, do not filter".
-    relevance: relevanceWindow(post.day_key, post.utc_offset, now,
-                               Date.parse(post.logged_at)),
+    relevance,
     relevanceAt: now,
     threadId: `circle-${caller.circleId}`,
     category: "CIRCLE_POST",
@@ -190,15 +216,71 @@ export async function notifyPost(
     collapseId: `post-${post.user_id}-${post.day_key}-${post.prayer}`,
     // Opt-in only: this is the friend-activity toggle, which is off by default.
     friendActivityOnly: true,
+    // v5 §5-B: wake the app's notification service extension before the banner,
+    // so `reloadAllTimelines()` runs and the home screen is current about a
+    // second after a friend posts. It changes nothing a person sees.
+    mutableContent: true,
     expiration: expiresIn(POST_TTL_SECONDS),
-    data: {
-      kind: "post",
-      circleId: caller.circleId,
-      postId: post.id,
-      userId: post.user_id,
-      dayKey: post.day_key,
-      prayer: post.prayer,
-    },
+    data,
+  });
+}
+
+/// v5 §5 — the `not_first` wrinkle, as its own push.
+///
+/// §6 only ever announced the FIRST post in a window, and that is right for the
+/// tray: one banner per prayer per friend, collapsed, is what somebody asked
+/// for when they turned friend activity on. It is wrong for a widget, which
+/// then sits on "3 of 5" for the rest of the window while the fourth and fifth
+/// people pray. So the alert is untouched and the rest of the window gets a
+/// SEPARATE push carrying no alert at all.
+///
+/// Three deliberate differences from the announcement above, each of which a
+/// test pins:
+///
+/// - **No alert, no sound, no badge, no thread, no category.** Nothing reaches
+///   Notification Centre, nothing collapses onto (or replaces) the banner that
+///   was already delivered, and there is no way for copy to leak into it — the
+///   payload is built by a function that cannot take an `Alert`.
+/// - **Not gated on friend activity.** That toggle is a RECEIVING preference
+///   about being buzzed ("When someone in your circle posts first"), it is OFF
+///   by default, and this push does not buzz. Gating it would leave the widget
+///   of everybody who never turned the toggle on — i.e. almost everybody —
+///   permanently stale, which is the exact failure §5 exists to fix. It carries
+///   no information the recipient's own next pull would not fetch anyway.
+/// - **The same relevance filter.** A phone whose local day has already moved
+///   past this window has nothing to redraw, and waking it would be worse than
+///   the alert it was already spared.
+///
+/// Best-effort by nature: Apple throttles background pushes and promises
+/// nothing. §5 calls it a bonus, never the mechanism, and the counts on the
+/// tile are still corrected by the next foreground either way.
+async function reloadForPost(
+  admin: Client,
+  caller: Caller,
+  post: { user_id: string; day_key: string; prayer: string },
+  ctx: {
+    relevance: DayWindow | null;
+    now: number;
+    data: Record<string, unknown>;
+  },
+): Promise<Response> {
+  return await fanOut(admin, caller, null, {
+    relevance: ctx.relevance,
+    relevanceAt: ctx.now,
+    // Keyed on the WINDOW rather than the poster, unlike the alert's: five
+    // people praying Asr within a minute of each other should wake a phone
+    // once, not five times, and every one of those pushes is asking for the
+    // same single redraw.
+    collapseId: `reload-${caller.circleId}-${post.day_key}-${post.prayer}`,
+    // Short, because a reload is only worth anything while the window it is
+    // about is still the one on the tile. Apple's default is store-and-retry
+    // forever, which here would mean waking a phone tomorrow to redraw
+    // yesterday.
+    expiration: expiresIn(RELOAD_TTL_SECONDS),
+    // Reported so the reply is legible: `sent` is about a push nobody will ever
+    // see, and `not_first` is what tells a reader which one it was.
+    reason: "not_first",
+    data: ctx.data,
   });
 }
 
@@ -324,6 +406,10 @@ export async function notifyNudge(
 export const NUDGE_TTL_SECONDS = 60 * 60;
 export const POST_TTL_SECONDS = 6 * 60 * 60;
 export const JOIN_TTL_SECONDS = 24 * 60 * 60;
+/// v5 §5's quiet reload. The shortest of the four on purpose: it is only worth
+/// delivering while the window it would redraw is still the current one, and a
+/// prayer window is rarely wider than this.
+export const RELOAD_TTL_SECONDS = 30 * 60;
 
 function expiresIn(seconds: number): number {
   return Math.floor(Date.now() / 1000) + seconds;
@@ -337,6 +423,14 @@ export interface PushOptions {
   expiration?: number;
   friendActivityOnly?: boolean;
   countsPrivate?: boolean;
+  /// v5 §5-B: set `mutable-content: 1`, which runs the app's notification
+  /// service extension before the banner. ALERTS only — it is meaningless on a
+  /// payload with no alert, and `push` ignores it there.
+  mutableContent?: boolean;
+  /// Echoed into the reply. Only the quiet reload push sets it today
+  /// (`"not_first"`), because that is the one push whose `sent: true` describes
+  /// something nobody will ever see.
+  reason?: string;
   /// The span of local days this alert is still current news on
   /// (`_shared/zones.ts`). Set for POSTS only: a post is about one prayer
   /// window on one schedule day, so a circle-mate whose own day has already
@@ -358,10 +452,15 @@ export interface PushOptions {
 
 /// Everyone in the circle except the caller — minus anyone the alert has
 /// already gone stale for.
+///
+/// `alert: null` is v5 §5's reload-only push. Nullable rather than a separate
+/// entry point so that the relevance filter, the friend-activity clause and the
+/// per-device partition are literally the same code for both — the quiet push
+/// respecting the same zone rule as the loud one is a property, not a habit.
 export async function fanOut(
   admin: Client,
   caller: Caller,
-  alert: Alert,
+  alert: Alert | null,
   opts: PushOptions,
 ): Promise<Response> {
   const recipients = await circleMemberIds(
@@ -391,20 +490,33 @@ export async function fanOut(
 export async function push(
   admin: Client,
   devices: DeviceRow[],
-  alert: Alert,
+  alert: Alert | null,
   opts: PushOptions & { outOfZone?: number },
 ): Promise<Response> {
-  const payload = buildAPNsPayload({
-    alert,
-    threadId: opts.threadId,
-    category: opts.category,
-    data: opts.data,
-  });
+  // v5 §5: no alert means the reload-only payload, and it is chosen by the
+  // ABSENCE of copy rather than by a flag — there is no way to hand this
+  // function an alert and have it silently not send one, or the other way
+  // round. `buildSilentAPNsPayload` cannot take an `Alert` at all.
+  const silent = alert === null;
+  const payload = silent
+    ? buildSilentAPNsPayload({ data: opts.data })
+    : buildAPNsPayload({
+      alert,
+      threadId: opts.threadId,
+      category: opts.category,
+      mutableContent: opts.mutableContent,
+      data: opts.data,
+    });
   // deliverToDevices log-and-skips when APNs is unconfigured, so a staging
   // project without a push key still answers 200 and the caller carries on.
   const summary = await deliverToDevices(devices, payload, {
     collapseId: opts.collapseId,
     expiration: opts.expiration,
+    // Apple rejects a `content-available` payload sent as an alert, and rejects
+    // a background push at priority 10. Both headers move together with the
+    // payload shape, here, for that reason.
+    pushType: silent ? APNS_BACKGROUND_PUSH_TYPE : undefined,
+    priority: silent ? APNS_BACKGROUND_PRIORITY : undefined,
     onUnregistered: (token) => deleteDevice(admin, token),
     onEnvironmentChanged: (token, environment) =>
       setDeviceEnvironment(admin, token, environment),
@@ -416,6 +528,7 @@ export async function push(
     ok: true,
     kind: opts.kind,
     sent: summary.delivered > 0,
+    ...(opts.reason ? { reason: opts.reason } : {}),
     devices: summary.attempted,
     delivered: summary.delivered,
     skipped: summary.skipped,

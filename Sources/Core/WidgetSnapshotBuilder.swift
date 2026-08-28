@@ -105,11 +105,110 @@ enum WidgetSnapshotBuilder {
     /// The value is a `BuddyPhotoCache` key, not a path: the widget shares the
     /// container and therefore the cache, and §7 is explicit that there is never
     /// a widget-only photo store. P3 writes the ~300px thumbnail under this same
-    /// key and renders it; P2 writes the name and draws none of them.
-    static func thumb(forPhotoPath path: String?, hiddenPaths: Set<String>) -> String? {
+    /// key — in `circlephotos/thumbs/`, so the string did not have to change —
+    /// and the extension opens it through `WidgetFile.thumbnailURL(forKey:)`.
+    ///
+    /// **P3 adds the second gate.** `.namesAndTier` (§9-02's third option) is
+    /// applied HERE rather than in the renderer, for the same reason the report
+    /// hide is: a name that never reaches the file is a name no stale timeline,
+    /// no cached render and no future version of the extension can draw.
+    /// `.blurred` is deliberately NOT applied here — a pre-blurred file on disk
+    /// would be the widget-only photo store §7 forbids, so that one travels as
+    /// `WidgetSnapshot.photoStyle` and is the renderer's.
+    static func thumb(forPhotoPath path: String?, hiddenPaths: Set<String>,
+                      style: WidgetPhotoStyle = .photos) -> String? {
+        guard let path: String = cacheablePath(forPhotoPath: path, hiddenPaths: hiddenPaths,
+                                               style: style) else { return nil }
+        return BuddyPhotoCache.key(forRemotePath: path)
+    }
+
+    /// The Storage path a `thumb` would be derived from, or nil for every
+    /// reason there is not one: no photo, your own photo, a photo this device
+    /// reported, or a setting that says no pictures.
+    ///
+    /// Separated from `thumb` because the app needs the PATH and the file needs
+    /// the KEY, and the two must agree about which photos exist. This is what
+    /// `AppState` hands `PhotoSync.prefetchWidgetPhotos`, so what gets cached is
+    /// exactly what gets named — a thumbnail nothing references, or a name with
+    /// no thumbnail behind it, are both states that cannot arise.
+    static func cacheablePath(forPhotoPath path: String?, hiddenPaths: Set<String>,
+                              style: WidgetPhotoStyle = .photos) -> String? {
+        guard style.writesPhotoNames else { return nil }
         guard let path, !path.isEmpty else { return nil }
         guard !hiddenPaths.contains(path) else { return nil }
-        return BuddyPhotoCache.key(forRemotePath: path)
+        return path
+    }
+
+    // MARK: - Which posts the file carries (v5 §3, P3)
+
+    /// One post as the file will carry it, next to the Storage path behind it.
+    struct OrderedPost: Equatable {
+        let post: WidgetSnapshot.Post
+        /// The buddy photo `post.thumb` names — nil whenever there is no
+        /// picture to cache (see `cacheablePath`). The app prefetches these and
+        /// nothing else.
+        let photoPath: String?
+    }
+
+    /// This window's posts, newest first and capped at `WidgetSnapshot.postCap`
+    /// — the exact list `make` writes, with the path behind each one.
+    ///
+    /// It exists so the two answers cannot drift. `make` needs the posts; the
+    /// APP needs the paths, because §3's photo fix is "when a pull lands new
+    /// posts, eagerly fetch THIS window's photos", and "this window's photos"
+    /// has to mean the same four pictures the file is about to name. Deriving
+    /// the prefetch list separately would work right up until somebody changed
+    /// the sort or the cap on one side of it.
+    static func orderedPosts(entries: [GridEntry],
+                             photoPaths: [String: String] = [:],
+                             hiddenPhotoPaths: Set<String> = [],
+                             photoStyle: WidgetPhotoStyle = .photos) -> [OrderedPost] {
+        var ordered: [OrderedPost] = []
+        for entry in entries {
+            let member: CircleMember = entry.member
+            let tier: LogTier
+            let at: Date
+            switch entry.state {
+            case .posted(_, let postedTier, let postedAt):
+                tier = postedTier
+                at = postedAt
+            case .qada(let qadaAt):
+                // A make-up is still a prayer prayed, so it shows. Its own tier
+                // says which it was.
+                tier = .qada
+                at = qadaAt
+            case .waiting, .missed, .excused:
+                continue
+            }
+            // Your own square draws a `PhotoStore` file, which is a different
+            // store with a different lifetime (SPEC-V4 §4) and no cache key. It
+            // stays out of `thumb` until something decides how your own photo
+            // reaches the extension.
+            let raw: String? = member.isYou ? nil : photoPaths[member.id]
+            let path: String? = cacheablePath(forPhotoPath: raw,
+                                              hiddenPaths: hiddenPhotoPaths,
+                                              style: photoStyle)
+            ordered.append(OrderedPost(
+                post: WidgetSnapshot.Post(
+                    name: displayName(member),
+                    emoji: member.emoji,
+                    tier: tier,
+                    loggedAt: at,
+                    thumb: path.map { BuddyPhotoCache.key(forRemotePath: $0) }),
+                photoPath: path))
+        }
+
+        // Newest first (§3), with the name as a stable tiebreak so two devices
+        // holding the same second never disagree about the order.
+        ordered.sort { left, right in
+            left.post.loggedAt == right.post.loggedAt
+                ? left.post.name < right.post.name
+                : left.post.loggedAt > right.post.loggedAt
+        }
+        if ordered.count > WidgetSnapshot.postCap {
+            ordered = Array(ordered.prefix(WidgetSnapshot.postCap))
+        }
+        return ordered
     }
 
     // MARK: - The snapshot
@@ -130,6 +229,9 @@ enum WidgetSnapshotBuilder {
     ///     posts are seeded illustrations) and for you.
     ///   - nudgedMemberIDs: who has already been nudged for this window.
     ///   - hiddenPhotoPaths: `PhotoReports.hiddenPaths`. See `thumb`.
+    ///   - photoStyle: `AppSettings.widgetPhotoStyle` (§9-02). `.namesAndTier`
+    ///     is applied here, by writing no `thumb` at all; `.blurred` travels
+    ///     into the file for the renderer to apply.
     static func make(writtenAt: Date,
                      mode: CircleMode,
                      streak: Int,
@@ -138,9 +240,17 @@ enum WidgetSnapshotBuilder {
                      isCarryOverWindow: Bool = false,
                      photoPaths: [String: String] = [:],
                      nudgedMemberIDs: Set<String> = [],
-                     hiddenPhotoPaths: Set<String> = []) -> WidgetSnapshot {
+                     hiddenPhotoPaths: Set<String> = [],
+                     photoStyle: WidgetPhotoStyle = .photos) -> WidgetSnapshot {
 
-        var posts: [WidgetSnapshot.Post] = []
+        // The posts, their order and their cap are `orderedPosts`' answer, so
+        // that the app can ask the same question when it decides which photos
+        // to cache. Everything below counts.
+        let posts: [WidgetSnapshot.Post] = orderedPosts(entries: entries,
+                                                        photoPaths: photoPaths,
+                                                        hiddenPhotoPaths: hiddenPhotoPaths,
+                                                        photoStyle: photoStyle)
+            .map { $0.post }
         var waiting: [WidgetSnapshot.Waiting] = []
         var prayedCount: Int = 0
         var youLogged: Bool = false
@@ -151,18 +261,12 @@ enum WidgetSnapshotBuilder {
         for entry in entries {
             let member: CircleMember = entry.member
             switch entry.state {
-            case .posted(_, let tier, let at):
+            // A make-up is still a prayer prayed, so it counts exactly as an
+            // in-window post does. (Which of them is DRAWN, and in what order,
+            // is `orderedPosts`; the count is every one of them, uncapped.)
+            case .posted, .qada:
                 prayedCount += 1
                 youLogged = youLogged || member.isYou
-                posts.append(post(member: member, tier: tier, at: at,
-                                  photoPaths: photoPaths, hiddenPhotoPaths: hiddenPhotoPaths))
-            case .qada(let at):
-                // A make-up is still a prayer prayed, so it counts and it shows.
-                // Its own tier says which it was.
-                prayedCount += 1
-                youLogged = youLogged || member.isYou
-                posts.append(post(member: member, tier: .qada, at: at,
-                                  photoPaths: photoPaths, hiddenPhotoPaths: hiddenPhotoPaths))
             case .waiting:
                 // A nudge target is somebody whose window has been OPEN long
                 // enough to be late in, and is still empty (`canNudge`, above —
@@ -183,16 +287,6 @@ enum WidgetSnapshotBuilder {
             }
         }
 
-        // Newest first (§3), with the name as a stable tiebreak so two devices
-        // holding the same second never disagree about the order.
-        posts.sort { left, right in
-            left.loggedAt == right.loggedAt ? left.name < right.name
-                                            : left.loggedAt > right.loggedAt
-        }
-        if posts.count > WidgetSnapshot.postCap {
-            posts = Array(posts.prefix(WidgetSnapshot.postCap))
-        }
-
         let shape: WidgetSnapshot.Window? = window.map {
             WidgetSnapshot.Window(prayer: $0.window.prayer, dayKey: $0.dayKey,
                                   opensAt: $0.window.start, endsAt: $0.window.end)
@@ -205,25 +299,11 @@ enum WidgetSnapshotBuilder {
             circle: WidgetSnapshot.Circle(prayedCount: prayedCount,
                                           memberCount: entries.count,
                                           posts: posts,
-                                          waiting: waiting))
+                                          waiting: waiting),
+            photoStyle: photoStyle)
     }
 
     // MARK: - Helpers
-
-    private static func post(member: CircleMember, tier: LogTier, at: Date,
-                             photoPaths: [String: String],
-                             hiddenPhotoPaths: Set<String>) -> WidgetSnapshot.Post {
-        // Your own square draws a `PhotoStore` file, which is a different store
-        // with a different lifetime (SPEC-V4 §4) and no cache key. It stays out
-        // of `thumb` until P3 decides how your own photo reaches the extension.
-        let path: String? = member.isYou ? nil : photoPaths[member.id]
-        return WidgetSnapshot.Post(name: displayName(member),
-                                   emoji: member.emoji,
-                                   tier: tier,
-                                   loggedAt: at,
-                                   thumb: thumb(forPhotoPath: path,
-                                                hiddenPaths: hiddenPhotoPaths))
-    }
 
     /// A name the home screen can print. `CircleSnapshot` already substitutes
     /// "You"/"Friend" for an empty profile name; this covers the demo and

@@ -35,6 +35,18 @@ struct WidgetSnapshot: Codable, Equatable, Sendable {
     var window: Window?
     var you: You
     var circle: Circle
+    /// v5 §7/§9-02 — how much of a friend's photo this home screen may show.
+    ///
+    /// The setting is applied on BOTH sides of the file and it has to be:
+    /// `.namesAndTier` is applied by the WRITER (no post carries a `thumb` at
+    /// all, so the extension never learns the name of a picture it may not
+    /// draw), and `.blurred` can only be applied by the RENDERER — a
+    /// pre-blurred thumbnail on disk would be the widget-only photo store §7
+    /// forbids. This field is what carries the second half across.
+    ///
+    /// Defaults to `.photos` when absent, which is both §9-02's decision and
+    /// the only tolerant answer: a P2 file has no such key.
+    var photoStyle: WidgetPhotoStyle
 
     struct Window: Codable, Equatable, Sendable {
         var prayer: Prayer
@@ -80,13 +92,17 @@ struct WidgetSnapshot: Codable, Equatable, Sendable {
         var loggedAt: Date
         /// The `BuddyPhotoCache` key of this post's photo — a filename, never a
         /// path, never bytes. nil when the post has no photo, when the photo is
-        /// yours (P3 decides how your own `PhotoStore` file reaches the widget),
-        /// and — §7 — whenever this device has REPORTED it. The hide is applied
-        /// as the file is written, so a photo hidden in the app can never come
-        /// back on the home screen.
+        /// yours (your own square draws a `PhotoStore` file, a different store
+        /// with a different lifetime and no cache key), when this device has
+        /// REPORTED it (§7 — the hide is applied as the file is written, so a
+        /// photo hidden in the app can never come back on the home screen), and
+        /// when the §9-02 setting is `.namesAndTier`.
         ///
-        /// P2 writes it and renders none of it; P3 is what puts a picture on
-        /// the other end of this name.
+        /// P3 puts a picture on the other end of it: the app caches a ~300px
+        /// thumbnail under this same key in `circlephotos/thumbs/`, and the
+        /// extension opens it through `WidgetFile.thumbnailURL(forKey:)`. A key
+        /// with no file behind it yet is an ordinary state, not an error — the
+        /// chip draws its emoji.
         var thumb: String?
     }
 
@@ -186,15 +202,17 @@ struct WidgetSnapshot: Codable, Equatable, Sendable {
     // MARK: - Codable
 
     private enum CodingKeys: String, CodingKey {
-        case writtenAt, mode, window, you, circle
+        case writtenAt, mode, window, you, circle, photoStyle
     }
 
-    init(writtenAt: Date, mode: CircleMode, window: Window?, you: You, circle: Circle) {
+    init(writtenAt: Date, mode: CircleMode, window: Window?, you: You, circle: Circle,
+         photoStyle: WidgetPhotoStyle = .photos) {
         self.writtenAt = writtenAt
         self.mode = mode
         self.window = window
         self.you = you
         self.circle = circle
+        self.photoStyle = photoStyle
     }
 
     init(from decoder: Decoder) throws {
@@ -205,6 +223,12 @@ struct WidgetSnapshot: Codable, Equatable, Sendable {
         window = (try? c.decodeIfPresent(Window.self, forKey: .window)) ?? nil
         you = (try? c.decodeIfPresent(You.self, forKey: .you)) ?? You(logged: false, streak: 0)
         circle = (try? c.decodeIfPresent(Circle.self, forKey: .circle)) ?? Circle.empty
+        // A P2 file has no `photoStyle`, and §9-02's default is photos. A style
+        // this build cannot name lands there too: the safe-looking alternative
+        // (fall back to names-only) would blank the pictures on somebody's home
+        // screen every time the app was rolled back under a newer widget.
+        photoStyle = (try? c.decodeIfPresent(WidgetPhotoStyle.self, forKey: .photoStyle))
+            ?? .photos
     }
 
     func encode(to encoder: Encoder) throws {
@@ -214,6 +238,7 @@ struct WidgetSnapshot: Codable, Equatable, Sendable {
         try c.encodeIfPresent(window, forKey: .window)
         try c.encode(you, forKey: .you)
         try c.encode(circle, forKey: .circle)
+        try c.encode(photoStyle, forKey: .photoStyle)
     }
 }
 
@@ -331,6 +356,48 @@ enum WidgetFile {
 
     static var url: URL? {
         containerURL?.appendingPathComponent(name)
+    }
+
+    // MARK: - Where a post's picture is (v5 §3/§7, P3)
+
+    /// `BuddyPhotoCache`'s directory, named here for the same reason
+    /// `appGroupID` is: the extension cannot compile `BuddyPhotoCache` (it pulls
+    /// `Store`, `Nonce` and the whole sync layer behind it) but it has to open
+    /// the files that type writes. `BuddyPhotoCache.directoryName` reads these
+    /// two constants rather than the other way round, so one spelling serves
+    /// both processes and neither can drift.
+    static let photoDirectoryName: String = "circlephotos"
+
+    /// The ~300px thumbnails, in a subdirectory of the cache rather than beside
+    /// the full-size files.
+    ///
+    /// **Deliberately a subdirectory, not a suffix.** A thumbnail sharing the
+    /// cache directory would be counted by `BuddyPhotoCache.maxCount`, and a
+    /// fully-photographed week is already 280 objects against a cap of 400 — so
+    /// every photo would suddenly be evicted at roughly half the age it is
+    /// today, which is a visible regression in the app's own grid for a file
+    /// the app does not draw. Separate directories mean separate counts. The
+    /// 30-day rule is what must not move, and it does not: `sweep` visits this
+    /// directory too (see `BuddyPhotoCache.sweep`).
+    static let thumbnailDirectoryName: String = "thumbs"
+
+    /// The file to open for a `WidgetSnapshot.Post.thumb`, or nil.
+    ///
+    /// `key` is a `BuddyPhotoCache` filename — 64 hex characters and `.jpg`,
+    /// with no separator in it by construction. It is checked anyway: this is
+    /// the one place a STRING out of a JSON file becomes a path, and a widget
+    /// that would happily open `../../Library/…` because the file said so is
+    /// not a thing to leave to the writer's good behaviour.
+    static func thumbnailURL(forKey key: String,
+                             in container: URL? = WidgetFile.containerURL) -> URL? {
+        guard let container, !key.isEmpty else { return nil }
+        guard !key.contains("/"), !key.contains("\\"), key != ".", key != ".." else {
+            return nil
+        }
+        return container
+            .appendingPathComponent(photoDirectoryName, isDirectory: true)
+            .appendingPathComponent(thumbnailDirectoryName, isDirectory: true)
+            .appendingPathComponent(key)
     }
 
     static func encoder() -> JSONEncoder {

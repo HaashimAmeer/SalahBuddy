@@ -202,6 +202,159 @@ final class WidgetWriterTests: XCTestCase {
         XCTAssertFalse(raw.contains(BuddyPhotoCache.key(forRemotePath: path)))
     }
 
+    // MARK: - SPEC-V5 §7/§9-02 — the widget photo setting, through the real writer
+
+    /// A real circle in which Mina has posted the CURRENT window with a photo.
+    /// Which window that is is the app's own answer, not the test's, so
+    /// everything built on this holds at any hour of any day.
+    @discardableResult
+    private func minaPosts(into state: AppState) throws
+    -> (path: String, window: WidgetSnapshot.Window) {
+        state.publishWidgetSnapshot()
+        let opening: WidgetSnapshot = try XCTUnwrap(published())
+        let window: WidgetSnapshot.Window = try XCTUnwrap(opening.window)
+
+        let path = "circle/widget-style-test/one.jpg"
+        let circleID = UUID(), me = UUID(), mina = UUID()
+        let minaPost = RemotePost(id: UUID(), userID: mina, circleID: circleID,
+                                  dayKey: window.dayKey, prayer: window.prayer,
+                                  tier: .onTime,
+                                  loggedAt: opening.writtenAt.addingTimeInterval(-60),
+                                  photoPath: path)
+        state.applyCircleSnapshot(CircleSnapshot(
+            circle: RemoteCircle(id: circleID, code: "ABC234", name: "Test", emoji: "🤝"),
+            me: me,
+            profiles: [RemoteProfile(id: me, name: "Haashim", avatarEmoji: "😄"),
+                       RemoteProfile(id: mina, name: "Mina", avatarEmoji: "🌸")],
+            members: [RemoteMember(circleID: circleID, userID: me,
+                                   joinedAt: Date(timeIntervalSince1970: 1)),
+                      RemoteMember(circleID: circleID, userID: mina,
+                                   joinedAt: Date(timeIntervalSince1970: 2))],
+            posts: [minaPost], excusedDays: []))
+        return (path, window)
+    }
+
+    private func style(_ style: WidgetPhotoStyle, on state: AppState) {
+        var settings: AppSettings = state.settings
+        settings.widgetPhotoStyle = style
+        state.settings = settings
+    }
+
+    /// §9-02's setting has to reach the file through the PRODUCTION call site,
+    /// which is the half `WidgetSnapshotTests` cannot see: it hands the builder
+    /// its arguments itself, and `photoStyle:` defaults to `.photos`. Drop it
+    /// from `AppState.publishWidgetSnapshot` and every assertion over there
+    /// still passes while somebody who asked for no faces on their home screen
+    /// keeps getting them.
+    func testTheWidgetPhotoSettingReachesTheFileThroughTheRealWriter() throws {
+        prepareDisk(circleMode: .real)
+        let state = AppState()
+        let posted = try minaPosts(into: state)
+        let key: String = BuddyPhotoCache.key(forRemotePath: posted.path)
+
+        // Photos — §9-02's default, and what a save with no opinion means.
+        XCTAssertEqual(state.settings.widgetPhotoStyle, .photos)
+        let shown: WidgetSnapshot = try XCTUnwrap(published())
+        XCTAssertEqual(shown.photoStyle, .photos)
+        XCTAssertEqual(shown.circle.posts.first { $0.name == "Mina" }?.thumb, key)
+
+        // Names only — applied by the WRITER, so the name is not in the bytes
+        // at all rather than being in them and trusted not to be drawn.
+        style(.namesAndTier, on: state)
+        let names: WidgetSnapshot = try XCTUnwrap(published())
+        XCTAssertEqual(names.photoStyle, .namesAndTier)
+        XCTAssertNotNil(names.circle.posts.first { $0.name == "Mina" },
+                        "the POST stays — she prayed, and the count must not lie")
+        XCTAssertNil(names.circle.posts.first { $0.name == "Mina" }?.thumb)
+        let raw: String = try XCTUnwrap(String(data: try Data(contentsOf: widgetURL),
+                                               encoding: .utf8))
+        XCTAssertFalse(raw.contains(key))
+        XCTAssertFalse(raw.contains(posted.path))
+
+        // Blurred — the RENDERER's, so the name comes back AND the setting
+        // travels with it. A pre-blurred file on disk would be the widget-only
+        // photo store §7 forbids.
+        style(.blurred, on: state)
+        let blurred: WidgetSnapshot = try XCTUnwrap(published())
+        XCTAssertEqual(blurred.photoStyle, .blurred)
+        XCTAssertEqual(blurred.circle.posts.first { $0.name == "Mina" }?.thumb, key)
+    }
+
+    /// Changing the setting has to REWRITE the file, and nothing else in the
+    /// app was going to.
+    ///
+    /// `settings.didSet` only calls `refresh()` when the change moves the prayer
+    /// windows, and this one does not — so without the publish beside it,
+    /// somebody could turn photos off in Settings and watch their home screen
+    /// keep showing faces until the next time a friend prayed.
+    func testTurningPhotosOffRewritesTheFileImmediately() throws {
+        prepareDisk(circleMode: .real)
+        let state = AppState()
+        try minaPosts(into: state)
+        let before: WidgetSnapshot = try XCTUnwrap(published())
+
+        // Nothing but the setting moves — no log, no pull, no clock.
+        style(.namesAndTier, on: state)
+
+        let after: WidgetSnapshot = try XCTUnwrap(published())
+        XCTAssertEqual(after.photoStyle, .namesAndTier)
+        XCTAssertEqual(after.circle.prayedCount, before.circle.prayedCount)
+        XCTAssertEqual(after.circle.memberCount, before.circle.memberCount)
+        XCTAssertFalse(before.hasSameContent(as: after),
+                       "if the two files said the same thing this test proves nothing")
+    }
+
+    // MARK: - What the file names is what the app caches (§3, P3)
+
+    /// The prefetch's list, taken off a real `AppState` and checked against the
+    /// bytes that real `AppState` just wrote.
+    ///
+    /// This is the wiring half, and it is the half that breaks. The builder's
+    /// own tests prove `orderedPosts` and `make` agree when handed the same
+    /// arguments; nothing over there notices if `AppState` asks one of them for
+    /// a different window, a different dayKey, or a photo set built without the
+    /// report hide. What that failure looks like in production is a home screen
+    /// naming four pictures the app never cached — four emoji where there
+    /// should be faces, on somebody else's phone, with a fully green suite.
+    ///
+    /// The DOWNLOAD is deliberately not exercised: `prefetchWidgetPhotos` sits
+    /// behind the same `circleSync` fence as every other outbound call in
+    /// `AppState`, so a unit test reaches no network — which is why the list is
+    /// a function of its own.
+    func testTheAppCachesExactlyThePhotosTheFileNames() throws {
+        prepareDisk(circleMode: .real)
+        reporterToRestore = PhotoReports.shared.currentUserID
+        PhotoReports.shared.currentUserID = { nil }
+
+        let state = AppState()
+        let posted = try minaPosts(into: state)
+
+        let file: WidgetSnapshot = try XCTUnwrap(published())
+        XCTAssertEqual(state.widgetPhotoPathsToCache(), [posted.path])
+        XCTAssertEqual(file.circle.posts.compactMap { $0.thumb },
+                       state.widgetPhotoPathsToCache()
+                           .map { BuddyPhotoCache.key(forRemotePath: $0) },
+                       "the file names a picture the app was never going to cache")
+
+        // §7: a reported photo is not fetched either. Downloading it again
+        // would put the bytes somebody just hid straight back on the disk the
+        // extension reads.
+        hidesToForget.append(posted.path)
+        PhotoReports.shared.hide(RemotePost(id: UUID(), userID: UUID(), circleID: UUID(),
+                                            dayKey: posted.window.dayKey,
+                                            prayer: posted.window.prayer, tier: .onTime,
+                                            loggedAt: file.writtenAt,
+                                            photoPath: posted.path))
+        XCTAssertEqual(state.widgetPhotoPathsToCache(), [])
+
+        // ...and neither is anything, under "Names only": no network, no disk,
+        // nothing cached for a tile that will not draw it.
+        PhotoReports.shared.forgetHideForTesting(posted.path)
+        XCTAssertEqual(state.widgetPhotoPathsToCache(), [posted.path])
+        style(.namesAndTier, on: state)
+        XCTAssertEqual(state.widgetPhotoPathsToCache(), [])
+    }
+
     // MARK: - The dayKey the entries are fetched for
 
     /// After midnight the live window is YESTERDAY's isha (it ends at today's

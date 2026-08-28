@@ -214,6 +214,15 @@ export function buildAPNsPayload(opts: {
   threadId?: string | null;
   category?: string | null;
   sound?: string | null;
+  /// v5 §5-B: run the app's Notification Service Extension before the banner
+  /// is shown. The extension's only job is `reloadAllTimelines()`, which is the
+  /// one way a friend's post reaches a home-screen widget with the app closed.
+  ///
+  /// It changes NOTHING about the notification a person sees — the extension
+  /// hands `request.content` straight back — and it is safe on a device with an
+  /// older build installed: a phone with no such extension simply ignores the
+  /// key and shows the alert.
+  mutableContent?: boolean;
   data?: Record<string, unknown>;
 }): Record<string, unknown> {
   const aps: Record<string, unknown> = {
@@ -223,6 +232,7 @@ export function buildAPNsPayload(opts: {
   if (aps.sound === undefined) delete aps.sound;
   if (opts.threadId) aps["thread-id"] = opts.threadId;
   if (opts.category) aps.category = opts.category;
+  if (opts.mutableContent) aps["mutable-content"] = 1;
 
   const payload: Record<string, unknown> = { aps };
   for (const [key, value] of Object.entries(opts.data ?? {})) {
@@ -230,6 +240,36 @@ export function buildAPNsPayload(opts: {
   }
   return payload;
 }
+
+/// v5 §5 — the reload-only push: `content-available` and the custom data, and
+/// nothing a person can see.
+///
+/// A SEPARATE function rather than a nullable `alert` on the one above, because
+/// the property that matters is "there is no way for a title to end up in
+/// here". §6's collapsed alert (one per prayer window per friend) is right for
+/// the tray and must not move; what it leaves behind is a widget sitting on
+/// "3 of 5" while the fourth and fifth post arrive. This is what tells the
+/// phone to go and look, with no banner, no sound and no badge.
+///
+/// It is delivered to `AppDelegate.didReceiveRemoteNotification` and to the
+/// notification service extension NEVER — that one runs for alerts only. Apple
+/// throttles background pushes and guarantees nothing about them, which is
+/// exactly why §5 calls this a bonus and not the mechanism.
+export function buildSilentAPNsPayload(
+  opts: { data?: Record<string, unknown> } = {},
+): Record<string, unknown> {
+  const payload: Record<string, unknown> = { aps: { "content-available": 1 } };
+  for (const [key, value] of Object.entries(opts.data ?? {})) {
+    if (value !== undefined && value !== null) payload[key] = value;
+  }
+  return payload;
+}
+
+/// Apple's push type for a payload with no alert in it, and the priority it
+/// insists on. A background push sent at priority 10 is rejected outright
+/// (`BadPriority`), which would make the §5 reload look like a silent no-op.
+export const APNS_BACKGROUND_PUSH_TYPE = "background";
+export const APNS_BACKGROUND_PRIORITY = 5;
 
 // ------------------------------------------------------------------- delivery
 
@@ -423,6 +463,16 @@ export async function sendAPNs(opts: SendAPNsOptions): Promise<APNsSendResult> {
   }
 }
 
+/// Whether a built payload asks for the notification service extension.
+/// Reads the payload rather than an option, because by the time delivery has it
+/// the payload IS the fact — an option that was dropped on the way here would
+/// still read as "true" from the wrong side of the decision.
+function mutableContentOf(payload: Record<string, unknown>): boolean {
+  const aps = payload.aps;
+  if (typeof aps !== "object" || aps === null) return false;
+  return (aps as Record<string, unknown>)["mutable-content"] === 1;
+}
+
 export function parseAPNsReason(body: string): string | undefined {
   if (!body) return undefined;
   try {
@@ -472,6 +522,11 @@ export async function deliverToDevices(
     expiration?: number;
     concurrency?: number;
     timeoutMs?: number;
+    /// v5 §5: `"background"` for a reload-only payload. Absent means `"alert"`,
+    /// which is `sendAPNs`' own default and every push before this one.
+    pushType?: string;
+    /// Paired with `pushType` — Apple rejects a background push at 10.
+    priority?: number;
   } = {},
 ): Promise<DeliverSummary> {
   const log = opts.log ?? defaultLog;
@@ -489,7 +544,21 @@ export async function deliverToDevices(
 
   if (!creds) {
     // One line, not one per device — an unconfigured environment is normal.
-    log("apns: not configured — skipping fan-out", { devices: devices.length });
+    //
+    // The two fields beyond the count are the two v5 §5 decisions, and they are
+    // here because they answer the same operational question: "why is nobody's
+    // widget updating". A push that went as an `alert` when it should have been
+    // a `background`, and an alert that did not ask for the notification
+    // service extension, both look exactly like Apple throttling from the
+    // outside — silent, intermittent, and about somebody else's phone. This is
+    // the line that says which. (`notify_test.ts` reads it for the same
+    // reason, and the shape is one object with named keys rather than a
+    // message, so rewording the sentence does not break it.)
+    log("apns: not configured — skipping fan-out", {
+      devices: devices.length,
+      pushType: opts.pushType ?? "alert",
+      mutableContent: mutableContentOf(payload),
+    });
     summary.skipped = devices.length;
     return summary;
   }
@@ -505,6 +574,8 @@ export async function deliverToDevices(
       credentials: creds,
       collapseId: opts.collapseId,
       expiration: opts.expiration,
+      pushType: opts.pushType,
+      priority: opts.priority,
       fetchImpl: opts.fetchImpl,
       timeoutMs: opts.timeoutMs,
       log,

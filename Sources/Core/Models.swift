@@ -383,6 +383,49 @@ enum CircleMode: String, Codable {
     case demo, real
 }
 
+/// v5 §7/§9-02 — how much of a friend's photo the HOME SCREEN may show.
+///
+/// A friend's face inside the app is one thing; the same face on a home screen
+/// is a bigger step, because a widget is visible to whoever is standing next to
+/// you and it is visible without anybody unlocking anything. §9-02 settles both
+/// halves of that: the default is **photos**, and the choice ships in the same
+/// phase the photos do (P3) rather than being owed.
+///
+/// It lives in `Models.swift`, beside `CircleMode`, because it is BOTH an
+/// `AppSettings` field and a `WidgetSnapshot` field — and this is the file both
+/// processes compile. The two halves are enforced in different places, and they
+/// have to be:
+///
+/// - `.namesAndTier` is the WRITER's: `WidgetSnapshotBuilder` refuses to put a
+///   photo's cache key in the file, so the extension never learns the name of a
+///   picture it may not draw. Nothing a stale timeline or a cached render can
+///   get wrong, which is the same reasoning §7 applies to a reported photo.
+/// - `.blurred` is the RENDERER's: the name is written and the picture is drawn
+///   soft. It cannot be the writer's, because a blurred thumbnail would be a
+///   second photo store on disk and §7 forbids one.
+enum WidgetPhotoStyle: String, Codable, CaseIterable {
+    /// §9-02's default: the ~300px thumbnails, as taken.
+    case photos
+    /// The same thumbnails, drawn soft — shape and colour, no face.
+    case blurred
+    /// No pictures at all: emoji, name, and the tier bar under it.
+    case namesAndTier
+
+    /// Whether a photo's cache key may reach `widget.json` at all. False only
+    /// for `.namesAndTier`, and it is what keeps that mode from depending on
+    /// the extension remembering anything.
+    var writesPhotoNames: Bool { self != .namesAndTier }
+
+    /// What the Settings row calls each option.
+    var label: String {
+        switch self {
+        case .photos: return "Photos"
+        case .blurred: return "Blurred"
+        case .namesAndTier: return "Names only"
+        }
+    }
+}
+
 /// The pre-v4.1 shape: one coordinate per tag, in a dictionary keyed by the
 /// tag's rawValue. Kept ONLY so `AppSettings`'s decoder can migrate an existing
 /// save — nothing else may refer to it.
@@ -511,6 +554,11 @@ struct AppSettings: Codable {
     /// hint is the only thing telling them why nudges do nothing — but it is
     /// a suggestion, and a suggestion you cannot silence is an advert.
     var circlePushHintDismissed: Bool = false
+    /// v5 §7/§9-02: how much of a friend's photo the home screen may show.
+    /// Absent in a save means `.photos` — §9-02's settled default — so a P2
+    /// install picks up pictures on update without being asked, and the row in
+    /// Settings is how somebody says otherwise.
+    var widgetPhotoStyle: WidgetPhotoStyle = .photos
 
     init() {}
 
@@ -580,6 +628,13 @@ struct AppSettings: Codable {
         circleMode = (try? c.decode(CircleMode.self, forKey: .circleMode)) ?? .demo
         circlePushHintDismissed =
             (try? c.decode(Bool.self, forKey: .circlePushHintDismissed)) ?? false
+        // v5 §9-02: absent → `.photos`. A value this build has never heard of
+        // lands there too, which is the tolerant-decoder rule and NOT the
+        // cautious-sounding alternative: falling back to `.namesAndTier` would
+        // silently strip a future "faces only" mode's photos from a home screen
+        // whose owner had asked for them, on a downgrade nobody announced.
+        widgetPhotoStyle =
+            (try? c.decode(WidgetPhotoStyle.self, forKey: .widgetPhotoStyle)) ?? .photos
     }
 }
 

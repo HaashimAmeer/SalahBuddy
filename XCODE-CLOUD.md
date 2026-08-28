@@ -41,11 +41,21 @@ build reaching TestFlight.
 
 So before merging a branch that adds a target, its bundle id needs an explicit
 **App ID in the developer portal** carrying every capability its
-`.entitlements` file names. v5 §3's `SalahBuddyWidget` is the live example:
-`org.amacvoters.salahbuddymock.widget`, with **App Groups**
-(`group.org.amacvoters.salahbuddymock`) and **Keychain Sharing** enabled — the
-same two the app's own App ID gained in v5 §2. Only Haashim can do this, and it
-is a toggle on a new identity rather than any code change.
+`.entitlements` file names. There are TWO owed as of v5 P3, and both gate the
+merge:
+
+| Bundle id | Target | Capabilities to enable |
+|---|---|---|
+| `org.amacvoters.salahbuddymock.widget` | `SalahBuddyWidget` (§3, P2) | **App Groups** (`group.org.amacvoters.salahbuddymock`) and **Keychain Sharing** — the same two the app's own App ID gained in v5 §2 |
+| `org.amacvoters.salahbuddymock.notify` | `SalahBuddyNotify` (§5-B, P3) | **none** — it reads nothing, authenticates nothing, and ships no `.entitlements` file. It still needs the App ID to exist. |
+
+Only Haashim can do this, and it is a toggle on a new identity rather than any
+code change.
+
+**The app's own App ID needs nothing new for P3.** `UIBackgroundModes:
+remote-notification` (v5 §5's quiet reload push) is an Info.plist key, not a
+capability — `aps-environment` is already on the identity, and background
+delivery rides on the same push entitlement.
 
 ## One-time setup (needs the Mac + Xcode, ~10 minutes)
 

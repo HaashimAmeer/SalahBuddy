@@ -1,8 +1,9 @@
 // The §6 fan-out table, pinned:
 //
-//     post   →  relevance-filtered
-//     join   →  never filtered
-//     nudge  →  never filtered
+//     post            →  relevance-filtered
+//     post (reload)   →  relevance-filtered      (v5 §5)
+//     join            →  never filtered
+//     nudge           →  never filtered
 //
 // Until now nothing enforced the second and third rows but the absence of an
 // argument at two call sites. `zones_test.ts` proves the FILTER is right —
@@ -26,6 +27,10 @@
 
 import assert from "node:assert/strict";
 import {
+  buildAPNsPayload,
+  buildSilentAPNsPayload,
+} from "../../supabase/functions/_shared/apns.ts";
+import {
   type Caller,
   notifyJoin,
   notifyNudge,
@@ -45,6 +50,10 @@ const BILAL = "a1000000-0000-4000-8000-000000000003"; // Mumbai, +5:30
 const HANIF = "a1000000-0000-4000-8000-000000000004"; // an iPad with no offset
 const SALMA = "a1000000-0000-4000-8000-000000000005"; // Seattle, friend activity OFF
 const POST = "b1000000-0000-4000-8000-000000000001";
+/// Amina's Fajr, five minutes before Yusuf's — seeded only by `circleWith`'s
+/// `secondPlace` option. Its whole job is to make `POST` not the first post in
+/// its window, which is the v5 §5 path.
+const EARLIER_POST = "b1000000-0000-4000-8000-000000000002";
 
 const SEATTLE = -7 * 3600; // PDT
 const MUMBAI = 5 * 3600 + 30 * 60; // IST, a half-hour zone
@@ -89,18 +98,38 @@ const SALMA_PHONE = phone(SALMA, "salma-phone", SEATTLE, false);
 /// Yusuf's circle, his 05:00 Fajr already in `posts`, and one device row per
 /// phone. `posterZone` is the post's own `utc_offset` — nullable forever, and
 /// null there means "filter nobody".
+///
+/// `secondPlace` seeds an EARLIER post by Amina in the same window, which makes
+/// Yusuf's `not_first` (v5 §5) — the only difference between the two post paths
+/// is whether somebody in the circle got there first, so it is the only thing
+/// the fixture changes.
 function circleWith(
   phones: readonly Phone[],
-  opts: { posterZone?: number | null } = {},
+  opts: { posterZone?: number | null; secondPlace?: boolean } = {},
 ): FakeSupabase {
   const members = [YUSUF, ...new Set(phones.map((p) => p.user))];
+  const earlier: Row[] = opts.secondPlace
+    ? [{
+      id: EARLIER_POST,
+      user_id: AMINA,
+      circle_id: CIRCLE,
+      day_key: DAY_KEY,
+      prayer: "fajr",
+      tier: "onTime",
+      jamaat: false,
+      place_label: null,
+      utc_offset: SEATTLE,
+      logged_at: "2026-08-22T11:55:00Z",
+      notified_at: "2026-08-22T11:55:01Z",
+    }]
+    : [];
   return new FakeSupabase({
     circle_members: members.map((user_id): Row => ({
       user_id,
       circle_id: CIRCLE,
       announced_at: null,
     })),
-    posts: [{
+    posts: [...earlier, {
       id: POST,
       user_id: YUSUF,
       circle_id: CIRCLE,
@@ -128,6 +157,17 @@ interface Sent {
   body: Record<string, unknown>;
   /// Every APNs fan-out the call made, as device counts.
   fanOuts: number[];
+  /// The `apns-push-type` each of those carried, in the same order:
+  /// `"alert"` for something a person sees, `"background"` for v5 §5's
+  /// reload-only push. Reading the HEADER is enough to tell the two apart
+  /// because `notify/handlers.ts`'s `push` derives the header and the payload
+  /// from the same `alert === null` — there is no arrangement of that function
+  /// in which a background push carries a title.
+  pushTypes: string[];
+  /// Whether each of those payloads asked for the notification service
+  /// extension (v5 §5-B's `mutable-content: 1`). Read off the built payload, so
+  /// it is the fact rather than the intention.
+  mutable: boolean[];
 }
 
 /// Runs one handler with the server clock pinned.
@@ -152,10 +192,15 @@ async function run(
   const fixed = Date.parse(at);
   assert.ok(!Number.isNaN(fixed), `bad instant in test: ${at}`);
   const fanOuts: number[] = [];
+  const pushTypes: string[] = [];
+  const mutable: boolean[] = [];
   Date.now = () => fixed;
   console.log = (...args: unknown[]) => {
-    const count = fanOutSize(args);
-    if (count !== null) fanOuts.push(count);
+    const meta = fanOutMeta(args);
+    if (meta === null) return;
+    fanOuts.push(meta.devices);
+    pushTypes.push(meta.pushType);
+    mutable.push(meta.mutableContent);
   };
   let response: Response;
   try {
@@ -165,15 +210,20 @@ async function run(
     console.log = realLog;
   }
   assert.equal(response.status, 200);
-  return { body: await response.json(), fanOuts };
+  return { body: await response.json(), fanOuts, pushTypes, mutable };
 }
 
 /// `run`, for the calls that are expected to reach APNs exactly once.
 async function send(
   at: string,
   handler: () => Promise<Response>,
-): Promise<{ body: Record<string, unknown>; pushedTo: number }> {
-  const { body, fanOuts } = await run(at, handler);
+): Promise<{
+  body: Record<string, unknown>;
+  pushedTo: number;
+  pushType: string;
+  mutableContent: boolean;
+}> {
+  const { body, fanOuts, pushTypes, mutable } = await run(at, handler);
   assert.equal(
     fanOuts.length,
     1,
@@ -181,15 +231,28 @@ async function send(
       JSON.stringify(body)
     }`,
   );
-  return { body, pushedTo: fanOuts[0] };
+  return {
+    body,
+    pushedTo: fanOuts[0],
+    pushType: pushTypes[0],
+    mutableContent: mutable[0],
+  };
 }
 
-function fanOutSize(args: unknown[]): number | null {
+function fanOutMeta(
+  args: unknown[],
+): { devices: number; pushType: string; mutableContent: boolean } | null {
   if (args.length < 2 || typeof args[1] !== "string") return null;
   try {
     const meta = JSON.parse(args[1]) as Record<string, unknown> | null;
     const devices = meta?.devices;
-    return typeof devices === "number" ? devices : null;
+    if (typeof devices !== "number") return null;
+    const pushType = meta?.pushType;
+    return {
+      devices,
+      pushType: typeof pushType === "string" ? pushType : "",
+      mutableContent: meta?.mutableContent === true,
+    };
   } catch {
     return null;
   }
@@ -270,6 +333,185 @@ Deno.test("a post whose poster never said where they were filters nobody", async
   assert.equal(body.devices, 3);
   assert.equal(body.outOfZone, 0);
   assert.equal(pushedTo, 3);
+});
+
+Deno.test("the announcement asks the notification service extension to run", async () => {
+  // v5 §5-B. `mutable-content: 1` is what gives the app ~30 seconds of
+  // extension time BEFORE the banner, which is the only moment a friend's post
+  // can reach a home-screen widget with the app closed. It changes nothing a
+  // person sees — the extension hands `request.content` straight back — so the
+  // only way to notice it is gone is a widget that never updates, on somebody
+  // else's phone, days later.
+  //
+  // Read off the payload that was actually built for the fan-out, not off a
+  // copy of the arguments: deleting `mutableContent: true` from `notifyPost`
+  // has to be what fails this, and an assertion on `buildAPNsPayload` called
+  // again by hand would sail straight past it.
+  const db = circleWith([AMINA_PHONE]);
+  const announcement = await send(
+    FAJR,
+    () => notifyPost(db.asClient(), CALLER, POST),
+  );
+  assert.equal(announcement.mutableContent, true);
+  // The push type stays `alert` — an announcement is a thing people see.
+  assert.equal(announcement.pushType, "alert");
+
+  // ...and it is per push, not something every payload picked up: a join does
+  // not ask for the extension. (Nor does a nudge, which never reaches `fanOut`
+  // at all.) Nothing about a widget changes when somebody is nudged, and §5-B
+  // asked for the post alert.
+  const join = await send(FAJR, () => notifyJoin(db.asClient(), CALLER));
+  assert.equal(join.mutableContent, false);
+  assert.equal(join.pushType, "alert");
+
+  // The key itself, at the one function that can emit it — 1, not `true`:
+  // Apple's `aps` dictionary takes a number here and ignores a boolean.
+  const payload = buildAPNsPayload({
+    alert: { title: "t", body: "b" },
+    mutableContent: true,
+  });
+  assert.equal((payload.aps as Record<string, unknown>)["mutable-content"], 1);
+});
+
+// ------------------------------------------- v5 §5: the not_first wrinkle
+
+Deno.test("a later post in the same window is announced QUIETLY, and never in the tray", async () => {
+  // §6 pushes a banner for the FIRST post per window and nothing after it,
+  // which is right for the tray and leaves a widget sitting on "3 of 5" for the
+  // rest of the window. §5's answer is a second, separate push with no alert in
+  // it at all: `content-available`, sent as `background`, so the phone goes and
+  // looks and nobody's screen lights up.
+  //
+  // Amina got there five minutes earlier, so Yusuf's post is `not_first`.
+  const db = circleWith([AMINA_PHONE, BILAL_PHONE, HANIF_IPAD], {
+    secondPlace: true,
+  });
+  const { body, pushedTo, pushType, mutableContent } = await send(
+    FAJR,
+    () => notifyPost(db.asClient(), CALLER, POST),
+  );
+
+  assert.equal(body.ok, true);
+  assert.equal(body.kind, "post");
+  assert.equal(
+    body.reason,
+    "not_first",
+    "the reply still says which push this was",
+  );
+  assert.equal(
+    pushType,
+    "background",
+    "a reload push sent as an alert is a banner nobody asked for",
+  );
+  assert.equal(
+    mutableContent,
+    false,
+    "there is no alert here for an extension to modify",
+  );
+
+  // The reload-only payload cannot carry copy: the function that builds it
+  // takes no `Alert` at all, and `push` chooses it by the ABSENCE of one — so
+  // "no alert body" is a property of the shape rather than of this call.
+  const quiet = buildSilentAPNsPayload({ data: { kind: "post" } });
+  const aps = quiet.aps as Record<string, unknown>;
+  assert.equal(aps["content-available"], 1);
+  assert.equal("alert" in aps, false, "a quiet push with a body in it");
+  assert.equal("sound" in aps, false);
+  assert.equal("thread-id" in aps, false, "nothing to collapse into a thread");
+  assert.equal("badge" in aps, false);
+  assert.equal("mutable-content" in aps, false);
+  assert.equal(quiet.kind, "post", "the custom data still rides along");
+
+  // §5 keeps the collapsed tray behaviour EXACTLY as it is, which starts with
+  // the alert being sent once and only once: the fan-out above is the ONLY one
+  // this call made.
+  assert.equal(pushedTo, 2, "Amina beside him, and the iPad with no zone");
+  assert.equal(body.outOfZone, 1, "Bilal, whose clock reads 17:30");
+});
+
+Deno.test("the reload push is filtered by the same zone rule the alert is", async () => {
+  // The wrong way to read "best-effort" would be "send it to everybody". A
+  // phone whose own local day has already moved past this window has nothing to
+  // redraw, and waking it is worse than the banner it was already spared. Same
+  // three phones, same instant, one at a time — the table from the alert case,
+  // reproduced for the quiet one.
+  const cases: { phone: Phone; kept: number; why: string }[] = [
+    { phone: AMINA_PHONE, kept: 1, why: "05:00, beside the poster" },
+    { phone: BILAL_PHONE, kept: 0, why: "17:30, twelve hours past it" },
+    { phone: HANIF_IPAD, kept: 1, why: "no offset — unknown is never silence" },
+  ];
+  for (const { phone, kept, why } of cases) {
+    const db = circleWith([phone], { secondPlace: true });
+    const { body, pushedTo, pushType } = await send(
+      FAJR,
+      () => notifyPost(db.asClient(), CALLER, POST),
+    );
+    assert.equal(pushType, "background", `${phone.token}: ${why}`);
+    assert.equal(body.devices, kept, `${phone.token}: ${why}`);
+    assert.equal(body.outOfZone, 1 - kept, `${phone.token}: ${why}`);
+    assert.equal(pushedTo, kept, `${phone.token}: ${why}`);
+  }
+});
+
+Deno.test("the reload push is NOT gated on the friend-activity toggle, and the alert still is", async () => {
+  // The one place the two post paths deliberately disagree, and the reasoning
+  // is the toggle's own copy: "Friend activity — when someone in your circle
+  // posts first" is a preference about being BUZZED, and it is OFF by default.
+  // Apply it to a push that shows nothing and the widget of everybody who never
+  // turned it on — i.e. almost everybody — goes stale for the rest of every
+  // window, which is the exact failure §5 exists to fix. The quiet push carries
+  // nothing the recipient's own next pull would not fetch anyway.
+  //
+  // Salma is standing beside the poster, so nothing about WHERE she is can
+  // account for a difference.
+  const loud = circleWith([AMINA_PHONE, SALMA_PHONE]);
+  const announcement = await send(
+    FAJR,
+    () => notifyPost(loud.asClient(), CALLER, POST),
+  );
+  assert.equal(announcement.body.devices, 1, "Amina only — Salma opted out");
+
+  const quiet = circleWith([AMINA_PHONE, SALMA_PHONE], { secondPlace: true });
+  const reload = await send(
+    FAJR,
+    () => notifyPost(quiet.asClient(), CALLER, POST),
+  );
+  assert.equal(reload.body.reason, "not_first");
+  assert.equal(reload.body.devices, 2, "Salma's widget is stale too");
+  assert.equal(reload.pushedTo, 2);
+
+  // The toggle is a WHERE clause, so the difference is visible in the traffic
+  // and not only in the counts: the quiet lookup carries no
+  // `notify_friend_activity` filter at all.
+  assert.deepEqual(deviceLookups(loud).map((q) => q.filters), [
+    [`user_id=in.(${AMINA},${SALMA})`, "notify_friend_activity=eq.true"],
+  ]);
+  assert.deepEqual(deviceLookups(quiet).map((q) => q.filters), [
+    [`user_id=in.(${AMINA},${SALMA})`],
+  ]);
+});
+
+Deno.test("one notification per post, whichever kind it turned out to be", async () => {
+  // The lease used to be claimed only on the announcement path, because a
+  // `not_first` post returned before reaching it. Now that the quiet push
+  // exists, an unleased second path would be a fan-out any member could trigger
+  // in a loop from a phone — and a silent one, so nobody would notice it
+  // happening. `claimPostNotification` therefore covers both, which is why it
+  // moved above the first-post check.
+  const db = circleWith([AMINA_PHONE], { secondPlace: true });
+
+  const first = await send(FAJR, () => notifyPost(db.asClient(), CALLER, POST));
+  assert.equal(first.body.reason, "not_first");
+  assert.equal(first.pushedTo, 1);
+  assert.notEqual(
+    db.table("posts").find((row) => row.id === POST)?.notified_at,
+    null,
+    "the quiet push has to spend the lease, or it is unbounded",
+  );
+
+  const again = await run(FAJR, () => notifyPost(db.asClient(), CALLER, POST));
+  assert.equal(again.body.reason, "already_notified");
+  assert.deepEqual(again.fanOuts, [], "no second reload");
 });
 
 // -------------------------------------------------------------------- joins

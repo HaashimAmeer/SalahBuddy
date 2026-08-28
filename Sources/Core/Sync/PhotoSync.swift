@@ -205,6 +205,59 @@ enum PhotoSync {
     /// `BuddyPhotoDownloads`.
     fileprivate static let downloads: BuddyPhotoDownloads = BuddyPhotoDownloads()
 
+    // MARK: - The home screen's photos (v5 §3, P3)
+
+    /// Put this window's buddy photos, and a ~300px thumbnail of each, on disk
+    /// before anybody asks for them.
+    ///
+    /// **The problem §3 names.** Buddy photos download LAZILY — a `PhotoSquare`
+    /// asks for one when it scrolls onto the screen — so the newest post in a
+    /// circle is precisely the one that is not cached yet. The widget has no
+    /// network (it is a renderer over a file in a shared container, and giving
+    /// it a Supabase client would undo the whole of §3), so a photo that is not
+    /// already on disk when the timeline is built is a photo the home screen
+    /// simply cannot draw. The fix has to be in the APP, on the event that
+    /// brings the post in: a pull landing.
+    ///
+    /// Bounded on purpose, in three ways:
+    /// 1. the caller passes only the paths `widget.json` is going to NAME —
+    ///    `WidgetSnapshotBuilder.orderedPosts`, i.e. at most
+    ///    `WidgetSnapshot.postCap` of them, for one window;
+    /// 2. a path whose thumbnail is already there costs one `stat` and nothing
+    ///    else, so a pull that changed nothing does no work at all;
+    /// 3. the download itself goes through the same coalescer every other buddy
+    ///    photo uses, so a prefetch racing the Today grid for the same picture
+    ///    fetches it once between them — and the cache's own sweep counter
+    ///    keeps counting, which is what stops an eager fetch from being an
+    ///    unbounded cache.
+    ///
+    /// Serial rather than a `TaskGroup`: four photos on a phone that has just
+    /// woken up, behind an app whose grid wants the same bytes, is not a place
+    /// to open four sockets to save a second nobody is watching.
+    ///
+    /// Never throws and never reports: a thumbnail that does not arrive means
+    /// the chip draws its emoji, which is exactly what P2 shipped.
+    @discardableResult
+    static func prefetchWidgetPhotos(paths: [String]) async -> Int {
+        var written: Int = 0
+        for path in paths {
+            if Task.isCancelled { break }
+            guard !path.isEmpty, !BuddyPhotoCache.hasThumbnail(path) else { continue }
+            // The full-size file first: it is usually already here (the Today
+            // grid drew it), and re-downloading a photo to shrink it would make
+            // the prefetch cost more the better the cache was working.
+            var bytes: Data? = BuddyPhotoCache.data(forRemotePath: path)
+            if bytes == nil {
+                bytes = await PhotoSync.downloads.data(for: path)
+            }
+            guard let bytes, !bytes.isEmpty else { continue }
+            if BuddyPhotoCache.storeThumbnail(from: bytes, forRemotePath: path) {
+                written += 1
+            }
+        }
+        return written
+    }
+
     // MARK: - Internals
 
     private static func isAlreadyExists(_ error: any Error) -> Bool {

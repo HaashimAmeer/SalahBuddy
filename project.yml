@@ -33,6 +33,9 @@ targets:
       # "ships with the app" means for a widget — and it means the app's
       # scheme builds it, so `build-for-testing` compiles it too.
       - { target: SalahBuddyWidget }
+      # v5 §5-B (P3): the notification service extension. Embedded the same
+      # way, for the same reason — and so the app's scheme compiles it.
+      - { target: SalahBuddyNotify }
     info:
       path: Sources/Info.plist
       properties:
@@ -61,6 +64,19 @@ targets:
         # used for authentication regardless. Revisit only if the app ever
         # ships its own cryptography.
         ITSAppUsesNonExemptEncryption: false
+        # v5 §5: the QUIET reload push. `notify` sends an alert-free
+        # `content-available` push for every post after the first one in a
+        # window, so the home screen does not sit on "3 of 5" while the fourth
+        # and fifth arrive. A background push is delivered to
+        # `AppDelegate.didReceiveRemoteNotification` and NOWHERE ELSE, and iOS
+        # drops it silently unless this mode is declared — so the missing key
+        # would look exactly like Apple's throttling, which §5 says to expect.
+        #
+        # It grants no new capability at the App Store review desk beyond what
+        # `aps-environment` already implies, and it does not enable background
+        # FETCH (that is a different mode, deliberately absent).
+        UIBackgroundModes:
+          - remote-notification
         NSLocationWhenInUseUsageDescription: "SalahBuddy uses your location to calculate accurate prayer times."
         NSCameraUsageDescription: "SalahBuddy uses the camera so you can snap a quick photo when you pray and share it with your circle."
         NSPhotoLibraryUsageDescription: "SalahBuddy lets you pick a photo from your library for your prayer post."
@@ -131,6 +147,52 @@ targets:
         # nothing the app claims that an extension may not (Sign in with Apple,
         # aps-environment). See the comments in the file.
         CODE_SIGN_ENTITLEMENTS: SalahBuddyWidget.entitlements
+  # v5 §5-B (P3) — the notification service extension.
+  #
+  # One file, one call: `WidgetCenter.reloadAllTimelines()` on a push carrying
+  # `mutable-content: 1`. It is the only mechanism by which a friend's post can
+  # reach a home-screen widget while the app is closed (§5 lists the three
+  # options and this is the only one that exists as an API today).
+  #
+  # It compiles `NotificationService/` and NOTHING else — no `Sources/`, not
+  # even `Sources/Shared`. It has no business reading `widget.json`: the app is
+  # that file's one writer, and an extension that could open the container is an
+  # extension somebody will eventually be tempted to make write to it.
+  #
+  # And therefore NO entitlements file. It needs no App Group (it reads
+  # nothing), no keychain group (it authenticates nothing) and no
+  # aps-environment (that is the app's). An extension that claims a capability
+  # its App ID does not have fails to sign, which is a slow way to find out.
+  SalahBuddyNotify:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: NotificationService
+    info:
+      path: NotificationService/Info.plist
+      properties:
+        CFBundleDisplayName: SalahBuddy
+        # The same version trap the other two document: a literal here WINS
+        # over the build setting, and App Store Connect rejects an upload whose
+        # extension disagrees with its host app.
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.usernotifications.service
+          # Module-qualified because the class is Swift: `NotificationService`
+          # alone is an Objective-C class name, which this target does not have
+          # one of, and the extension would fail to launch at delivery time —
+          # silently, since iOS then just shows the alert.
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).NotificationService
+    settings:
+      base:
+        # A SECOND explicit App ID in the portal, exactly like the widget's —
+        # and it gates the merge for the same reason: every check in this repo
+        # builds unsigned for the simulator and stays green without it, and the
+        # first sign of trouble is Xcode Cloud's Archive failing on `staging`.
+        # See "A new TARGET is a portal step" in XCODE-CLOUD.md.
+        PRODUCT_BUNDLE_IDENTIFIER: org.amacvoters.salahbuddymock.notify
+        TARGETED_DEVICE_FAMILY: "1"
   SalahBuddyTests:
     type: bundle.unit-test
     platform: iOS
