@@ -27,7 +27,9 @@ enum SessionKeychain {
     /// The Keychain service `KeychainLocalStorage` namespaces items under. It
     /// is the SDK's own default, restated because we have to address the very
     /// items the SDK would.
-    static let service: String = "supabase.gotrue.swift"
+    /// v5 §4 (P4): spelled in `SharedBackend` now, because the widget's nudge
+    /// button opens the very same item and cannot compile this file.
+    static let service: String = SharedBackend.keychainService
 
     /// Set once a session has been adopted (or once the shared group already
     /// had one), and never cleared.
@@ -62,10 +64,7 @@ enum SessionKeychain {
     /// Answers nil for a URL with no host — which `SupabaseClient` treats as
     /// fatal, and which this file treats as "then there is nothing to adopt".
     static func storageKey(forProjectURL url: URL) -> String? {
-        guard let host: String = url.host(percentEncoded: false),
-              let reference: Substring = host.split(separator: ".").first,
-              !reference.isEmpty else { return nil }
-        return "sb-\(reference)-auth-token"
+        SharedBackend.sessionStorageKey(forProjectURL: url)
     }
 
     /// What one adoption attempt did. Returned rather than logged so the

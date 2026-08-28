@@ -11,10 +11,15 @@ import Supabase
 /// That's why they can live in a public repo.
 enum SupabaseConfig {
 
-    static let url = URL(string: "https://rmyygmyxppmnzcnvprvb.supabase.co")!
+    /// v5 §4 (P4): both live in `SharedBackend` now. The widget's nudge button
+    /// POSTs to the same project with the same key and cannot compile this file
+    /// (it imports `Supabase` and `GoogleSignIn`), and a project URL spelled in
+    /// two places is a widget quietly nudging into a project the app has moved
+    /// off — a failure indistinguishable from a network error.
+    static let url = SharedBackend.url
 
     /// New-format publishable key (`sb_publishable_…`), not a legacy anon JWT.
-    static let publishableKey = "sb_publishable_CDUUDqJc8edrT92QIIq8FA_sYz1ut3Q"
+    static let publishableKey = SharedBackend.publishableKey
 
     /// Private Storage bucket holding circle photos, keyed
     /// `<circle_id>/<user_id>/<uuid>.jpg` (SPEC-V4 §4).

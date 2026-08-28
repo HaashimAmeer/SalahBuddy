@@ -18,6 +18,8 @@
 import {
   APNS_BACKGROUND_PRIORITY,
   APNS_BACKGROUND_PUSH_TYPE,
+  APNS_LIVE_ACTIVITY_PRIORITY,
+  APNS_LIVE_ACTIVITY_PUSH_TYPE,
   buildAPNsPayload,
   buildSilentAPNsPayload,
   deliverToDevices,
@@ -32,14 +34,24 @@ import {
   claimPostNotification,
   type Client,
   deleteDevice,
+  deleteLiveActivityToken,
   devicesFor,
   isFirstPostInWindow,
+  type LiveActivityTokenRow,
+  liveActivityTokensFor,
   postById,
+  postsInWindow,
   profileFor,
+  profilesFor,
   resolveCallerId,
   serviceClient,
   setDeviceEnvironment,
 } from "../_shared/db.ts";
+import {
+  buildLiveActivityContentState,
+  buildLiveActivityPush,
+  type LiveActivityFace,
+} from "../_shared/liveactivity.ts";
 import {
   HttpError,
   json,
@@ -206,7 +218,20 @@ export async function notifyPost(
     now,
     data,
   });
-  if (!first) return reply(reload, { kind: "post", reason: "not_first" });
+  // v5 §6, and for every post too: a Live Activity that only moved on the FIRST
+  // post would sit on "1 of 5" for the rest of the window, which is the exact
+  // thing an activity exists to not do.
+  const activity = await liveActivityForPost(admin, caller, post, {
+    relevance,
+    now,
+  });
+  if (!first) {
+    return reply(reload, {
+      kind: "post",
+      reason: "not_first",
+      liveActivity: activity,
+    });
+  }
 
   const alert = postAlert({
     name: caller.senderName,
@@ -244,6 +269,7 @@ export async function notifyPost(
       delivered: reload.delivered,
       outOfZone: reload.outOfZone,
     },
+    liveActivity: activity,
     data,
   });
 }
@@ -328,6 +354,236 @@ async function reloadForPost(
     expiration: expiresIn(RELOAD_TTL_SECONDS),
     data: ctx.data,
   });
+}
+
+// --------------------------------------------------- the Live Activity (v5 §6)
+
+/// What one Live Activity fan-out reached. Echoed into the reply beside
+/// `reload`, and for the same reason: three fan-outs now leave this function
+/// for one post, they deliver to different sets of phones by design, and a
+/// reply that reported only the banner's count would read as a mostly-failed
+/// send.
+export interface LiveActivityCounts {
+  /// Activity tokens this post was relevant to.
+  tokens: number;
+  updated: number;
+  /// Activities whose window had already closed — retired rather than moved.
+  ended: number;
+  delivered: number;
+  /// Tokens whose owner's local day had moved past this window.
+  outOfZone: number;
+  /// Faces the 4 KB budget could not fit. Zero in every ordinary circle; a
+  /// number here is the only warning that somebody's Lock Screen is showing
+  /// fewer people than it should.
+  facesDropped: number;
+}
+
+const NO_LIVE_ACTIVITIES: LiveActivityCounts = {
+  tokens: 0,
+  updated: 0,
+  ended: 0,
+  delivered: 0,
+  outOfZone: 0,
+  facesDropped: 0,
+};
+
+/// How long an ENDED activity stays on the Lock Screen before the system
+/// retires it. Long enough to be seen by somebody who picks their phone up as
+/// the window closes; short enough that yesterday's Asr is not still there at
+/// Maghrib.
+export const LIVE_ACTIVITY_DISMISSAL_SECONDS = 5 * 60;
+
+/// v5 §6 — move every Live Activity this post is about.
+///
+/// **UPDATES ONLY, and that is a decision rather than an omission.** The table
+/// also holds push-to-START tokens, and nothing here spends one. The reason is
+/// short and does not get better by being restated in more places, so it lives
+/// in backend/README.md under "Who starts a Live Activity": a push-to-start
+/// payload must carry the activity's ATTRIBUTES, attributes include the window's
+/// `endsAt`, and the server cannot compute one — prayer times are derived
+/// on-device from coordinates the backend deliberately does not hold. Any
+/// client that could tell us when the window ends is a client that is running,
+/// and a running client starts its own activity without a push. The tokens are
+/// registered and kept because the day that stops being true, this is a
+/// four-line change and the registration is the half that needs a real device
+/// to prove.
+///
+/// Three deliberate properties, each pinned by `notify_test.ts`:
+///
+/// - **The poster is excluded**, like every other fan-out here. Their own phone
+///   is running at that instant and moves its own activity through the same
+///   `publishWidgetSnapshot` path that writes `widget.json` — the app is the
+///   writer, on its own device, exactly as §3 says.
+/// - **The same relevance filter as the alert.** An activity on a phone whose
+///   local day has moved past this window is about a prayer that is over there.
+/// - **`youLogged` is the only per-phone field**, so this builds at most two
+///   payloads per event and groups the tokens under them. Not one push per
+///   person: a circle of eight would be eight payload builds and eight 4 KB
+///   serialisations for two distinct strings.
+async function liveActivityForPost(
+  admin: Client,
+  caller: Caller,
+  post: { user_id: string; day_key: string; prayer: string },
+  ctx: { relevance: DayWindow | null; now: number },
+): Promise<LiveActivityCounts> {
+  const members = await circleMemberIds(admin, caller.circleId);
+  const recipients = members.filter((id) => id !== caller.callerId);
+  if (recipients.length === 0) return NO_LIVE_ACTIVITIES;
+
+  const all = await liveActivityTokensFor(admin, recipients);
+  // Only the activities that are ABOUT this window. A phone running an isha
+  // activity has nothing to learn from a dhuhr post, and pushing it one would
+  // overwrite the isha content state with dhuhr's counts.
+  const matching = all.filter((row) =>
+    row.kind === "update" && row.day_key === post.day_key &&
+    row.prayer === post.prayer
+  );
+  if (matching.length === 0) return NO_LIVE_ACTIVITIES;
+
+  const { current, stale } = partitionByRelevance(
+    matching,
+    ctx.relevance,
+    ctx.now,
+  );
+  if (current.length === 0) {
+    return { ...NO_LIVE_ACTIVITIES, tokens: 0, outOfZone: stale.length };
+  }
+
+  const window = await windowState(admin, caller.circleId, post, members.length);
+
+  // An activity whose window has already closed is RETIRED rather than moved.
+  // Reachable in ordinary use: a make-up logged after the window ends is still
+  // a post for that (day, prayer), and it must not resurrect an activity the
+  // app has not been awake to end itself.
+  const nowSeconds = Math.floor(ctx.now / 1000);
+  const ending: LiveActivityTokenRow[] = [];
+  const moving: LiveActivityTokenRow[] = [];
+  for (const row of current) {
+    const endsAt = row.ends_at ? Date.parse(row.ends_at) : NaN;
+    // NaN — an unknown end — keeps the activity. Unknown never means silence,
+    // the same call `zones.ts` makes about an unknown offset.
+    if (Number.isFinite(endsAt) && endsAt <= ctx.now) ending.push(row);
+    else moving.push(row);
+  }
+
+  let delivered = 0;
+  let facesDropped = 0;
+  const send = async (
+    rows: LiveActivityTokenRow[],
+    event: "update" | "end",
+  ): Promise<void> => {
+    // Two groups at most: `youLogged` is the only field that differs per phone.
+    for (const logged of [true, false]) {
+      const group = rows.filter((row) => window.prayed.has(row.user_id) === logged);
+      if (group.length === 0) continue;
+      // The stale date is the window's own end, which every row in a group may
+      // spell slightly differently (each device computed its own). The first
+      // one is as good as any — they differ by seconds, and the value only
+      // decides when iOS starts dimming the activity.
+      const endsAt = group.find((row) => row.ends_at)?.ends_at;
+      const staleSeconds = endsAt
+        ? Math.floor(Date.parse(endsAt) / 1000)
+        : undefined;
+      const push = buildLiveActivityPush({
+        event,
+        contentState: buildLiveActivityContentState({
+          prayedCount: window.prayed.size,
+          memberCount: window.memberCount,
+          youLogged: logged,
+          faces: window.faces,
+          updatedAtSeconds: nowSeconds,
+        }),
+        timestampSeconds: nowSeconds,
+        staleSeconds: Number.isFinite(staleSeconds as number)
+          ? staleSeconds
+          : undefined,
+        dismissalSeconds: event === "end"
+          ? nowSeconds + LIVE_ACTIVITY_DISMISSAL_SECONDS
+          : undefined,
+      });
+      facesDropped = Math.max(facesDropped, push.facesDropped);
+      const summary = await deliverToDevices(
+        group.map((row) => ({
+          user_id: row.user_id,
+          apns_token: row.token,
+          environment: row.environment,
+          utc_offset: row.utc_offset,
+        })),
+        push.payload,
+        {
+          pushType: APNS_LIVE_ACTIVITY_PUSH_TYPE,
+          priority: APNS_LIVE_ACTIVITY_PRIORITY,
+          // Keyed on the WINDOW: several people praying within a minute of each
+          // other are asking for one redraw of the same activity, not five.
+          collapseId:
+            `activity-${caller.circleId}-${post.day_key}-${post.prayer}`,
+          // An activity update is worth nothing once its window is over; Apple's
+          // default is store-and-retry forever.
+          expiration: expiresIn(RELOAD_TTL_SECONDS),
+          // A dead ACTIVITY token, not a dead device: the phone is fine, the
+          // activity it addressed is gone. Deleting the `devices` row here would
+          // silence a working phone's alerts for the life of the install.
+          onUnregistered: (token) => deleteLiveActivityToken(admin, token),
+        },
+      );
+      delivered += summary.delivered;
+    }
+    // An activity we just retired has no address left worth keeping. The sweep
+    // (`purge_expired_live_activity_tokens`) would collect these within twelve
+    // hours anyway; doing it here means the next post in the window does not
+    // pay for them.
+    if (event === "end") {
+      for (const row of rows) await deleteLiveActivityToken(admin, row.token);
+    }
+  };
+
+  if (moving.length > 0) await send(moving, "update");
+  if (ending.length > 0) await send(ending, "end");
+
+  return {
+    tokens: current.length,
+    updated: moving.length,
+    ended: ending.length,
+    delivered,
+    outOfZone: stale.length,
+    facesDropped,
+  };
+}
+
+/// The counts and faces every recipient's activity shares, read once.
+///
+/// `memberCount` is the circle's size INCLUDING the poster and the recipient —
+/// "3 of 5 prayed" is the same sentence the widget writes, and it is the whole
+/// circle. `prayed` is by USER, not by post, because a make-up and an in-window
+/// post are one person either way.
+async function windowState(
+  admin: Client,
+  circleId: string,
+  post: { day_key: string; prayer: string },
+  memberCount: number,
+): Promise<{ prayed: Set<string>; memberCount: number; faces: LiveActivityFace[] }> {
+  const rows = await postsInWindow(admin, circleId, post.day_key, post.prayer);
+  const prayed = new Set<string>(rows.map((row) => row.user_id));
+  const profiles = await profilesFor(admin, [...prayed]);
+  const byId = new Map(profiles.map((row) => [row.id, row]));
+
+  const faces: LiveActivityFace[] = [];
+  const seen = new Set<string>();
+  // `postsInWindow` is already newest-first; one face per person, the newest of
+  // their posts, which is what `WidgetSnapshotBuilder.orderedPosts` does too.
+  for (const row of rows) {
+    if (seen.has(row.user_id)) continue;
+    seen.add(row.user_id);
+    const profile = byId.get(row.user_id);
+    faces.push({
+      // An empty name is the ordinary state for somebody who has not set one —
+      // `CircleSnapshot` prints "Friend" for exactly this, and so does this.
+      name: (profile?.name ?? "").trim() || "Friend",
+      emoji: profile?.avatar_emoji ?? "🙂",
+      tier: row.tier,
+    });
+  }
+  return { prayed, memberCount, faces };
 }
 
 export async function notifyJoin(
@@ -483,6 +739,10 @@ export interface PushOptions {
   /// (the alert is friend-activity gated, the reload is not) and a reply that
   /// showed only the first would read as a fan-out that had mostly failed.
   reload?: { devices: number; delivered: number; outOfZone: number };
+  /// v5 §6: the Live Activity fan-out that went alongside. Same reasoning as
+  /// `reload` — it reaches a different set of phones (those with a running
+  /// activity for this window) and is usually a different number.
+  liveActivity?: LiveActivityCounts;
   /// The span of local days this alert is still current news on
   /// (`_shared/zones.ts`). Set for POSTS only: a post is about one prayer
   /// window on one schedule day, so a circle-mate whose own day has already
@@ -631,5 +891,6 @@ function reply(counts: DeliveredCounts, opts: PushOptions): Response {
     // "why did nobody get it" question has an answer that is not a guess.
     outOfZone: counts.outOfZone,
     ...(opts.reload ? { reload: opts.reload } : {}),
+    ...(opts.liveActivity ? { liveActivity: opts.liveActivity } : {}),
   });
 }

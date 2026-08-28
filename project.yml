@@ -77,6 +77,17 @@ targets:
         # FETCH (that is a different mode, deliberately absent).
         UIBackgroundModes:
           - remote-notification
+        # v5 §6 (P4): the Live Activity. Without this key ActivityKit reports
+        # `areActivitiesEnabled == false` on every device and `Activity.request`
+        # throws — which looks exactly like a person having turned Live
+        # Activities off in Settings, i.e. like nothing at all. It belongs to
+        # the APP even though the widget extension draws the surface.
+        NSSupportsLiveActivities: true
+        # Frequent updates are deliberately NOT declared
+        # (`NSSupportsLiveActivitiesFrequentUpdates`). §6's activity moves when
+        # a friend prays — a handful of times per window — and the key exists
+        # for surfaces that update every few minutes. Claiming it would ask iOS
+        # to budget for traffic this app does not send.
         NSLocationWhenInUseUsageDescription: "SalahBuddy uses your location to calculate accurate prayer times."
         NSCameraUsageDescription: "SalahBuddy uses the camera so you can snap a quick photo when you pray and share it with your circle."
         NSPhotoLibraryUsageDescription: "SalahBuddy lets you pick a photo from your library for your prayer post."
@@ -88,6 +99,17 @@ targets:
           - CFBundleTypeRole: Editor
             CFBundleURLSchemes:
               - com.googleusercontent.apps.923951498597-445nb4q5o5k66imnbbul70h88s7bct72
+          # v5 §2 tooth #3 (P4): the app's own scheme, and it exists for ONE
+          # case. The widget's nudge button holds a session it may NEVER
+          # refresh — two processes rotating one refresh token invalidate each
+          # other — so an expired token means "hand this to the app". A widget
+          # cannot open a sheet, so handing over is a URL:
+          # `salahbuddy://nudge?member=…&prayer=…&dayKey=…`. Spelled in
+          # `SharedBackend.urlScheme`, which both processes compile.
+          - CFBundleTypeRole: Editor
+            CFBundleURLName: org.amacvoters.salahbuddymock
+            CFBundleURLSchemes:
+              - salahbuddy
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: org.amacvoters.salahbuddymock
@@ -99,15 +121,24 @@ targets:
         # so P2's widget extension brings its OWN file rather than editing this
         # one (an extension must not claim Sign in with Apple or aps-environment).
         CODE_SIGN_ENTITLEMENTS: SalahBuddy.entitlements
-  # v5 §3 (P2) — the widget process.
+  # v5 §3 (P2) / §4 §6 (P4) — the widget process.
   #
-  # It compiles FOUR things and nothing else: its own `Widget/` sources, the
-  # shared `widget.json` contract, `Models.swift` (pure value types — so the
-  # extension speaks the app's `Prayer` and `LogTier` rather than a second copy
-  # of them that could drift) and `Theme.swift` (the palette, for the same
-  # reason). No `GameEngine`, no Adhan, no Supabase, no `Store`, no `AppClock`:
-  # §3 says the widget re-derives nothing, and the surest way to keep a rule
-  # like that is to not give the target the files it would need to break it.
+  # It compiles FOUR PATHS and nothing else: its own `Widget/` sources,
+  # `Sources/Shared/` (the two file formats the two processes must agree on —
+  # `widget.json` and the Live Activity's content state — plus the backend
+  # constants and the nudge's session read), `Models.swift` (pure value types,
+  # so the extension speaks the app's `Prayer` and `LogTier` rather than a
+  # second copy of them that could drift) and `Theme.swift` (the palette, for
+  # the same reason). No `GameEngine`, no Adhan, no Supabase SDK, no `Store`,
+  # no `AppClock`: §3 says the widget re-derives nothing, and the surest way to
+  # keep a rule like that is to not give the target the files it would need to
+  # break it.
+  #
+  # P4's nudge button is the one thing in here that touches the network, and it
+  # does so with `URLSession` and a Keychain read — NOT with the Supabase SDK,
+  # which would drag the whole sync layer across this line. §2 tooth #3 is why
+  # it can never do more than read: two processes rotating one refresh token
+  # invalidate each other.
   SalahBuddyWidget:
     type: app-extension
     platform: iOS

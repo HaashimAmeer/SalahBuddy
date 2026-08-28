@@ -28,6 +28,16 @@
 				<string>com.googleusercontent.apps.923951498597-445nb4q5o5k66imnbbul70h88s7bct72</string>
 			</array>
 		</dict>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>org.amacvoters.salahbuddymock</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>salahbuddy</string>
+			</array>
+		</dict>
 	</array>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
@@ -41,6 +51,8 @@
 	<string>SalahBuddy uses your location to calculate accurate prayer times.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>SalahBuddy lets you pick a photo from your library for your prayer post.</string>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>remote-notification</string>

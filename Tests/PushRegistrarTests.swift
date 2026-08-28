@@ -52,10 +52,16 @@ private final class StubPushTransport: PushTransport {
     var deletes: [String] = []
     var bodies: [NotifyBody] = []
 
+    /// v5 §6: every `register_live_activity_token` call, and every token this
+    /// device asked the server to forget.
+    var liveActivityRegistrations: [LiveActivityRegistration] = []
+    var liveActivityDeletes: [String] = []
+
     var reply: NotifyReply = NotifyReply(ok: true, kind: nil, sent: true, reason: nil)
     var upsertError: (any Error)?
     var deleteError: (any Error)?
     var notifyError: (any Error)?
+    var liveActivityError: (any Error)?
 
     func registerDevice(_ device: RemoteDevice) async throws {
         if let upsertError { throw upsertError }
@@ -71,6 +77,16 @@ private final class StubPushTransport: PushTransport {
         bodies.append(body)
         if let notifyError { throw notifyError }
         return reply
+    }
+
+    func registerLiveActivityToken(_ registration: LiveActivityRegistration) async throws {
+        if let liveActivityError { throw liveActivityError }
+        liveActivityRegistrations.append(registration)
+    }
+
+    func deleteLiveActivityToken(token: String) async throws {
+        if let liveActivityError { throw liveActivityError }
+        liveActivityDeletes.append(token)
     }
 }
 

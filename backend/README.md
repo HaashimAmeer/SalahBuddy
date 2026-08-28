@@ -38,16 +38,18 @@ backend/
       20260822000300_post_identity_offset.sql # ...and put it in the posts unique key
       20260822000400_post_zone_wildcard.sql   # a NULL offset is a wildcard, not a third zone
       20260822000500_device_utc_offset.sql    # the RECIPIENT's zone, so push can skip a stale day
+      20260828000100_live_activity_tokens.sql # v5 §6 — ActivityKit's ephemeral push tokens,
+                                    #   their own table (devices is keyed on a STABLE token)
     functions/
-      _shared/                      # apns.ts, auth.ts, db.ts, http.ts, messages.ts, sweep.ts,
-                                    #   util.ts, validate.ts, zones.ts
+      _shared/                      # apns.ts, auth.ts, db.ts, http.ts, liveactivity.ts,
+                                    #   messages.ts, sweep.ts, util.ts, validate.ts, zones.ts
       notify/index.ts               # Deno.serve, and nothing else
       notify/handlers.ts            # post / join / nudge push fan-out (APNs, signed in-function)
       retention/index.ts            # the ~30-day photo sweep
       sweep-orphans/index.ts        # deletes the auth.users shells delete_account() cannot
   tests/
     shim/00_supabase_shim.sql       # fakes auth.*/storage.*/the API roles on vanilla Postgres
-    sql/01..29_*.sql                # assertion tests — RLS, caps, privacy, constraints
+    sql/01..30_*.sql                # assertion tests — RLS, caps, privacy, constraints
     run_sql_tests.sh                # scratch DB -> shim -> migrations -> assertions
     deno/*_test.ts                  # unit tests for the function helpers (offline, no permissions)
     deno/fake_supabase.ts           # PostgREST-shaped fake client, so db.ts runs against real rows
@@ -572,6 +574,130 @@ preferences.
 - **The developer time-travel offset is forced to zero while a real circle is
   active** (client-side, SPEC-V4 §3). Posting fictional timestamps to real
   friends would break the very thing time travel exists to test.
+
+---
+
+## Live Activities (SPEC-V5 §6)
+
+A prayer window is a bounded event with a known end and changing state, so it
+is the one surface push can keep current without an extension hop and without
+the app running: "Asr · 2h 14m left · 3 of 5 prayed", filling in as the circle
+posts. The server's half is three things — a table, a push type, and a topic.
+
+### The table
+
+`public.live_activity_tokens` (`20260828000100`). It is **its own table and not
+a column on `devices`**, which is the point §6 makes and worth restating:
+
+- `devices.apns_token` is **stable** — one install, one row, for the life of the
+  install, and the row *follows* the token when a phone changes hands.
+- ActivityKit's tokens are **ephemeral**. An `update` token is minted when an
+  activity starts and is dead the moment it ends (five a day per phone if every
+  window gets one; ~8h is ActivityKit's own cap). A `start` (push-to-start)
+  token belongs to the app rather than to any activity, but it still rotates.
+
+Hanging either off `devices` would mean a column that is NULL for most rows,
+rewritten five times a day, and whose staleness breaks the ordinary alert path
+when it is cleared wrong.
+
+Shape, RLS and grants follow `devices` exactly: the token is the primary key,
+`live_activity_tokens_all` is `user_id = auth.uid()`, `authenticated` holds
+table-wide SELECT/DELETE and **column-scoped** INSERT/UPDATE. `expires_at`,
+`created_at` and `updated_at` are outside that list — `expires_at` is the
+sweep's clock, and a client that could push its own out to 2126 would park a
+dead token on the fan-out's books forever. `register_live_activity_token(...)`
+is the SECURITY DEFINER reclaim, same delete-then-insert as `register_device`,
+plus one extra delete: registering an `update` token drops any other row this
+user holds for the same `(day_key, prayer)`, so a phone that restarts an
+activity never leaves the old one taking a push per post.
+
+**Cleanup, two clocks.** Window close is the client's and is the fast path: the
+app ends its activity and DELETEs its own row (the policy scopes that to its
+own rows, so no RPC is needed). Expiry is the backstop for every phone that
+never came back — uninstalled, flat battery, signed out offline, killed
+mid-window: rows default to `now() + 12 hours` (against ActivityKit's ~8h
+lifetime) and `purge_expired_live_activity_tokens()` collects them. The nightly
+`retention` function calls it last, and never fatally — a token sweep that
+failed must not turn a successful photo sweep into a 500 the scheduler retries.
+`delete_account()` was **replaced** in the same migration to delete these rows:
+it enumerates tables by hand and leaves the `auth.users` row alone, so `on
+delete cascade` covers nothing, and without that line a deleted account would
+leave live push addresses behind. Test 30 pins it.
+
+### Who starts a Live Activity — the decision, and why
+
+Push-to-start fires when a window OPENS, and **no server event marks that**.
+Three options were on the table; the third is what shipped.
+
+1. **A scheduled invocation.** Rejected, and not on cost grounds. To know when
+   anyone's window opens, the server would need that person's prayer times —
+   which are derived on-device from coordinates, calculation method and madhab
+   (Adhan). The backend holds no coordinates today and this is not a good reason
+   to start: a new class of personal data, for every user, so that a Lock Screen
+   can appear a few minutes earlier.
+2. **`notify` gains a `kind: "window"`.** Rejected as circular. The client that
+   could POST it is a client that is *running* — and a running client starts its
+   own activity locally, with no push and no round trip. It would buy nothing.
+3. **Client-assisted start.** Shipped. The app starts the activity when it runs
+   (`LiveActivityController.apply`, from the same `publishWidgetSnapshot` that
+   writes `widget.json`), and registers that activity's update token — with the
+   window's own `ends_at`. From then on the SERVER does the half it can do
+   honestly: it moves the activity as the circle posts, with the app closed,
+   which is what §6 wanted push for in the first place.
+
+**The honest gap:** an activity does not exist until the app has run inside the
+window. A phone that has not been opened since Asr came in gets no Lock Screen
+countdown, only the ordinary §5 alert. Two things soften it — the app runs on
+every §5 quiet reload push, i.e. every time a friend posts, and on every
+foreground — but it is a gap, not a rounding error, and it is the price of not
+holding everybody's prayer times on a server.
+
+**Push-to-start tokens are registered and stored anyway.** They are the one
+input a server-side start would need that cannot be reconstructed later, and the
+registration path is the half only a real device can prove. Nothing spends one:
+`notify` filters to `kind = 'update'`, and `liveactivity_test.ts` asserts a
+start token is never pushed to. The day the server can name a window's end
+honestly, this is a four-line change.
+
+### The push itself
+
+`sendAPNs` already took a `pushType`. Two things had to move:
+
+- **The topic.** `apns-topic` was the bare bundle id — §1 flagged it as the one
+  line that assumed one. A Live Activity is a different endpoint of the same
+  app: `<bundle id>.push-type.liveactivity`. `apnsTopic()` is that rule, pure
+  and idempotent (an `APNS_BUNDLE_ID` somebody has already suffixed by hand is
+  not suffixed twice). Get it wrong and Apple answers 400/TopicDisallowed, which
+  from the outside is indistinguishable from a push key that was never
+  configured.
+- **The payload.** `_shared/liveactivity.ts` builds the `aps` block ActivityKit
+  decodes into `PrayerWindowAttributes.ContentState`
+  (`Sources/Shared/PrayerWindowActivity.swift`). There is no reply on that path:
+  a shape that disagrees is a push that does nothing, silently, forever. Hence
+  three rules on both sides — no dates (every instant is seconds since 1970,
+  because two JSON decoders we do not control would otherwise have to agree on
+  a date strategy), `tier` as a bare string (an unknown tier costs a colour, not
+  the push), and every field decoding with a default.
+
+**4 KB, and a payload one byte over is rejected whole.** `LIVE_ACTIVITY_FACE_CAP`
+bounds the face COUNT, which does not bound the bytes — a name is user-supplied
+text. `buildLiveActivityPush` therefore trims: faces go one at a time, oldest
+first, until it fits, and the counts (which are the point of the surface) are
+never what gets dropped. The reply reports `liveActivity.facesDropped`, which is
+zero in every ordinary circle and the only warning that somebody's Lock Screen
+is showing fewer people than it should.
+
+**What the fan-out does, per post.** Roster, then tokens, and it stops there if
+nobody in the circle has an activity for this window — the window read and the
+profile read are two more round trips inside one invocation's wall clock. When
+there are activities: the poster is excluded (their own phone is running and
+moves its own activity locally, through the same `publishWidgetSnapshot` path);
+the same zone filter as the alert applies (`_shared/zones.ts` — an activity on a
+phone whose local day has moved past this window is about a prayer that is over
+there); activities whose `ends_at` has passed are **ended** rather than moved,
+with a five-minute dismissal, and their rows dropped; and `youLogged` is the
+only per-phone field, so at most two payloads are built per event and the tokens
+are grouped under them rather than one push being built per person.
 
 ---
 

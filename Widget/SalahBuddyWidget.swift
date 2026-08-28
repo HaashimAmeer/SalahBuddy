@@ -20,6 +20,14 @@ import WidgetKit
 struct SalahBuddyWidgets: WidgetBundle {
     var body: some Widget {
         CircleWidget()
+        // v5 §6 (P4): the prayer window on the Lock Screen and in the Dynamic
+        // Island. It lives in THIS target because a Live Activity's UI is a
+        // widget extension's job — the app supplies the content state and the
+        // server moves it, but neither of them draws it.
+        PrayerWindowLiveActivity()
+        // §3's last family: Control Center. No availability gate — §9-04 raised
+        // the floor to iOS 18 so this could be written plainly.
+        NudgeCircleControl()
     }
 }
 

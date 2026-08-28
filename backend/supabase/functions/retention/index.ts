@@ -111,7 +111,32 @@ async function handle(req: Request): Promise<Response> {
     // paths still pending come back on the next run; nothing is lost
     pendingRetry: paths.length - confirmed,
     storageErrors: errors,
+    liveActivityTokensCleared: await sweepLiveActivityTokens(admin),
   });
+}
+
+/// v5 §6 — the Live Activity token backstop.
+///
+/// A window closing is the client's job: the app ends its activity and deletes
+/// its own row (`live_activity_tokens_all` scopes that to its own rows, so no
+/// RPC is needed). This is for every phone that never came back to do it —
+/// uninstalled, out of battery, signed out offline, killed mid-window. Without
+/// it the table is append-only and every future fan-out pays a round trip to
+/// Apple for phones that stopped listening months ago.
+///
+/// LAST, and never fatal. The photo sweep is the reason this function exists
+/// and has already done its work by the time we get here; a token sweep that
+/// failed must not turn a successful retention run into a 500 the scheduler
+/// retries — the rows are still expired, and the next tick collects them.
+async function sweepLiveActivityTokens(admin: Client): Promise<number> {
+  const { data, error } = await admin.rpc(
+    "purge_expired_live_activity_tokens",
+  );
+  if (error) {
+    console.error("retention: live activity sweep failed", error.message);
+    return 0;
+  }
+  return typeof data === "number" ? data : 0;
 }
 
 async function removeObjects(

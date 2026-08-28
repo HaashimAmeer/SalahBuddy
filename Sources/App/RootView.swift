@@ -58,6 +58,18 @@ struct RootView: View {
             // one through. `.empty` in demo mode, which costs a tile nothing.
             .environment(\.circleMirror, state.circleSnapshot)
             .onPreferenceChange(TutorialFramesKey.self) { tourFrames = $0 }
+            // v5 §2 tooth #3 / §4: the widget's nudge button could not
+            // authenticate and handed the tap back through
+            // `salahbuddy://nudge`. All this owes the person is the screen the
+            // nudge lives on — the chip is there, with the same names on it.
+            // Deliberately NOT a nudge sent on their behalf: they were bounced
+            // here to sign in, and a push going out during the bounce is
+            // something nobody asked for.
+            .onChange(of: state.pendingWidgetNudge) { _, target in
+                guard target != nil else { return }
+                withAnimation(Theme.spring) { selectedTab = 0 }
+                state.clearPendingWidgetNudge()
+            }
             .onAppear { maybeStartTour() }
             .onChange(of: state.settings.hasOnboarded) { _, onboarded in
                 if onboarded { maybeStartTour() }

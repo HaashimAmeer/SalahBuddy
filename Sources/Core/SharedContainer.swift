@@ -49,7 +49,12 @@ enum SharedContainer {
     /// runtime, so the resolved string is spelled out once, here. The team id is
     /// not a secret: `project.yml` has carried `DEVELOPMENT_TEAM: 852AXZ2B57`
     /// in this public repo since v4.
-    static let keychainAccessGroup: String = "852AXZ2B57.group.org.amacvoters.salahbuddymock"
+    ///
+    /// v5 §4 (P4): spelled in `SharedBackend`, not here, for the same reason
+    /// `appGroupID` is spelled in `WidgetFile` — the extension cannot compile
+    /// this file, and the nudge button has to open the very group the app
+    /// writes to.
+    static let keychainAccessGroup: String = SharedBackend.keychainAccessGroup
 
     /// Where every Keychain item this app wrote BEFORE v5 landed:
     /// `$(AppIdentifierPrefix)$(CFBundleIdentifier)`, resolved. With no
@@ -57,7 +62,7 @@ enum SharedContainer {
     /// that is the default group, and the Supabase SDK named no group, so this
     /// is where the session is. `SessionKeychain` reads it from here exactly
     /// once.
-    static let legacyKeychainAccessGroup: String = "852AXZ2B57.org.amacvoters.salahbuddymock"
+    static let legacyKeychainAccessGroup: String = SharedBackend.legacyKeychainAccessGroup
 
     // MARK: - Where the data lives
 

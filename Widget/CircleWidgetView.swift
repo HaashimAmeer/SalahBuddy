@@ -41,6 +41,28 @@ struct CircleWidgetModel {
     /// The writer has already applied `.namesAndTier` (no post carries a
     /// `thumb`); what is left for this side is `.blurred`.
     let photoStyle: WidgetPhotoStyle
+    /// v5 §4 (P4) — what the nudge button needs to name a person and a window.
+    /// Both come straight out of the file; nothing here re-derives a schedule.
+    let dayKey: String?
+    let prayerRaw: String?
+    /// The person the button is aimed at: the first in `waiting` who has not
+    /// been nudged. nil when there is nobody to nudge, which is the ordinary
+    /// state for most of a window (`waiting` is empty until it has been open
+    /// half an hour — see `WidgetSnapshotBuilder.nudgesAllowed`).
+    let nudgeTarget: WidgetSnapshot.Waiting?
+    /// Whether THIS PROCESS can send the nudge itself.
+    ///
+    /// §2 tooth #3: the extension may never refresh the session, so an expired
+    /// one is not a failed button — it is a deep link into the app. Deciding it
+    /// at RENDER time (rather than discovering it inside `perform()`) is what
+    /// makes the difference visible: the tile draws a link, and the tap goes
+    /// somewhere that can actually sign you in.
+    ///
+    /// A Keychain read per render, which is cheap and rare — a widget renders
+    /// at window boundaries and on reloads, not continuously. It answers false
+    /// on a device that has not been unlocked since boot, and false is the safe
+    /// answer there too.
+    let canNudge: Bool
 
     init(snapshot: WidgetSnapshot?, date: Date) {
         let circle: WidgetSnapshot.Circle = snapshot?.circle ?? .empty
@@ -54,6 +76,9 @@ struct CircleWidgetModel {
         // One person in the circle is you, and "0 of 1 prayed" is a strange way
         // to tell somebody they have not prayed yet.
         isSolo = circle.memberCount <= 1
+        nudgeTarget = snapshot?.nextNudgeTarget
+        canNudge = nudgeTarget != nil
+            && (SharedSession.load()?.isFresh(at: date) ?? false)
 
         guard let snapshot, let window = snapshot.window else {
             phase = .empty
@@ -61,8 +86,12 @@ struct CircleWidgetModel {
             title = "SalahBuddy"
             timeLine = "Open the app to get started"
             countLine = ""
+            dayKey = nil
+            prayerRaw = nil
             return
         }
+        dayKey = window.dayKey
+        prayerRaw = window.prayer.rawValue
         prayer = window.prayer
         title = window.prayer.displayName
         if date < window.opensAt {
@@ -223,10 +252,90 @@ private struct MediumCircleView: View {
                     }
                 }
                 Spacer(minLength: 0)
-                WaitingLine(model: model)
+                // v5 §4 (P4): the one thing you can DO from a home screen. It
+                // falls back to the plain waiting line whenever there is nobody
+                // to nudge, which is most of a window.
+                NudgeRow(model: model)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+}
+
+// MARK: - The nudge (v5 §4)
+
+/// The button, the deep link, or the sentence — in that order of preference.
+///
+/// Three states, and the middle one is the whole of SPEC-V5 §2's third tooth:
+///
+/// - **A person to nudge and a usable session** → `Button(intent:)`. The intent
+///   runs headless, writes the optimistic state into the container before it
+///   returns (§4), and this tile redraws with the next name.
+/// - **A person to nudge and a session this process may not spend** →
+///   `Link`. The extension NEVER refreshes a token (two processes rotating one
+///   refresh token invalidate each other), so an expired one is handed to the
+///   app rather than used, retried or repaired here.
+/// - **Nobody to nudge** → `WaitingLine`, exactly as P2 shipped it.
+///
+/// `waiting` is spent VERBATIM. It is already the nudge list rather than
+/// "everybody who has not posted" — the window must be open, thirty minutes in,
+/// and never the carry-over isha (`WidgetSnapshotBuilder.nudgesAllowed`) — so
+/// there is no gate on this side, and there must not be: two surfaces deciding
+/// who is late is two surfaces that can disagree.
+private struct NudgeRow: View {
+    let model: CircleWidgetModel
+
+    var body: some View {
+        if let target = model.nudgeTarget, let dayKey = model.dayKey,
+           let prayerRaw = model.prayerRaw {
+            if model.canNudge {
+                Button(intent: NudgeFriendIntent(memberID: target.userID,
+                                                 dayKey: dayKey,
+                                                 prayer: prayerRaw)) {
+                    NudgeLabel(name: target.name, emoji: target.emoji)
+                }
+                .buttonStyle(.plain)
+            } else if let url = SharedBackend.nudgeDeepLink(memberID: target.userID,
+                                                            prayer: prayerRaw,
+                                                            dayKey: dayKey) {
+                Link(destination: url) {
+                    NudgeLabel(name: target.name, emoji: target.emoji)
+                }
+            } else {
+                WaitingLine(model: model)
+            }
+        } else {
+            WaitingLine(model: model)
+        }
+    }
+}
+
+/// One chunky, flat, mint pill — the app's button language at widget scale.
+///
+/// Width is the constraint that decides everything here: the medium tile's
+/// right-hand column is ~175pt on the narrowest phone iOS 18 runs on (see
+/// `MediumCircleView`'s budget), and the four post chips above it already own
+/// that width. So the label scales rather than wrapping, and nothing inside has
+/// a fixed width.
+private struct NudgeLabel: View {
+    let name: String
+    let emoji: String
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Text(emoji)
+                .font(.system(size: 12))
+            Text("Nudge \(name)")
+                .font(Theme.sans(11, .semibold))
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+        }
+        .foregroundStyle(WidgetTheme.ground)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 5)
+        .frame(maxWidth: .infinity, alignment: .center)
+        .background(
+            Capsule().fill(WidgetTheme.accent))
     }
 }
 

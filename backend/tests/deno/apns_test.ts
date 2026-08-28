@@ -7,6 +7,9 @@
 import assert from "node:assert/strict";
 import {
   APNS_ENV_VARS,
+  APNS_LIVE_ACTIVITY_PRIORITY,
+  APNS_LIVE_ACTIVITY_PUSH_TYPE,
+  APNS_LIVE_ACTIVITY_TOPIC_SUFFIX,
   APNS_TOKEN_TTL_SECONDS,
   apnsConfigured,
   apnsCredentialsFrom,
@@ -385,6 +388,39 @@ Deno.test("sendAPNs posts to Apple with the provider token and topic", async () 
   assert.deepEqual(JSON.parse(String(calls[0].init.body)), {
     aps: { alert: { title: "T", body: "B" } },
   });
+  resetAPNsTokenCache();
+});
+
+Deno.test("sendAPNs addresses a Live Activity at the suffixed topic", async () => {
+  // v5 §1 named this as the one line that assumed a bare bundle id. It matters
+  // ON THE WIRE and not only in `apnsTopic`: a liveactivity push sent to the
+  // app's own topic is 400/TopicDisallowed, which is indistinguishable from a
+  // push key that was never configured — the activity simply never moves, on
+  // somebody else's phone, where nobody can see it.
+  resetAPNsTokenCache();
+  const { pem } = await generateTestKey();
+  const { impl, calls } = recordingFetch(() => new Response("", { status: 200 }));
+  const result = await sendAPNs({
+    token: "activity-1",
+    environment: "sandbox",
+    payload: {
+      aps: { timestamp: 1, event: "update", "content-state": { prayedCount: 3 } },
+    },
+    credentials: creds(pem),
+    pushType: APNS_LIVE_ACTIVITY_PUSH_TYPE,
+    priority: APNS_LIVE_ACTIVITY_PRIORITY,
+    fetchImpl: impl,
+    log: silent,
+  });
+
+  assert.equal(result.delivered, true);
+  const headers = calls[0].init.headers as Record<string, string>;
+  assert.equal(
+    headers["apns-topic"],
+    `org.amacvoters.salahbuddymock${APNS_LIVE_ACTIVITY_TOPIC_SUFFIX}`,
+  );
+  assert.equal(headers["apns-push-type"], "liveactivity");
+  assert.equal(headers["apns-priority"], "10");
   resetAPNsTokenCache();
 });
 

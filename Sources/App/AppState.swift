@@ -1086,6 +1086,45 @@ final class AppState: ObservableObject {
         Task { await PushRegistrar.shared.nudge(member: member, dayKey: dayKey, prayer: prayer) }
     }
 
+    // MARK: - The widget handed one back (v5 §2 tooth #3, §4)
+
+    /// A nudge the extension could not send itself.
+    ///
+    /// SPEC-V5 §2's third tooth is the whole reason this type exists: two
+    /// processes rotating one refresh token invalidate each other, so the
+    /// extension NEVER refreshes — an expired session means "deep-link into the
+    /// app", not "refresh it myself". This is what arrives on the other end of
+    /// that link. Everything in it was already in `widget.json`; nothing new
+    /// crosses.
+    struct WidgetNudgeTarget: Equatable, Sendable {
+        var memberID: String?
+        var prayer: Prayer?
+        var dayKey: String?
+    }
+
+    /// Set by `handleDeepLink`, cleared by `RootView` once it has put the Today
+    /// screen up. Not acted on here: which tab is showing is a view's business,
+    /// and the nudge itself is deliberately NOT re-sent — a person who has been
+    /// bounced into the app to sign in should be looking at the grid, deciding,
+    /// rather than discovering a push went out while they were being redirected.
+    @Published var pendingWidgetNudge: WidgetNudgeTarget?
+
+    /// True when the URL was ours. `SalahBuddyApp` hands anything else to
+    /// `AuthService` — Google's OAuth callback comes through the same door.
+    @discardableResult
+    func handleDeepLink(_ url: URL) -> Bool {
+        guard let target = SharedBackend.nudgeDeepLinkTarget(url) else { return false }
+        pendingWidgetNudge = WidgetNudgeTarget(
+            memberID: target.memberID,
+            prayer: target.prayer.flatMap { Prayer(rawValue: $0) },
+            dayKey: target.dayKey)
+        return true
+    }
+
+    func clearPendingWidgetNudge() {
+        pendingWidgetNudge = nil
+    }
+
     /// Grid order: buddies first, you LAST (isYou flag set).
     var circleMembers: [CircleMember] {
         circleSource.members + [youMember]
@@ -2096,6 +2135,15 @@ final class AppState: ObservableObject {
             // the extension to apply. See `WidgetPhotoStyle`.
             photoStyle: settings.widgetPhotoStyle)
 
+        // v5 §6 (P4): the Lock Screen, from the SAME snapshot at the SAME
+        // instant. Deriving it separately is how two surfaces on one phone come
+        // to disagree about one window — the tile saying "3 of 5" while the
+        // Dynamic Island says 2, neither of them wrong about its own source.
+        // It is outside the changed-content check on purpose: an activity has
+        // to be STARTED when the window opens and ENDED when it closes, and
+        // both of those are moments when the file's content has not moved.
+        LiveActivityController.shared.apply(snapshot: snapshot, now: now)
+
         if publishedWidgetSnapshot?.hasSameContent(as: snapshot) != true {
             // The memo records what is ON DISK, so it is only earned by a write
             // that succeeded. Set it first and a single failure (no space, or
@@ -2440,5 +2488,11 @@ final class AppState: ObservableObject {
         // The file is current by now (`persist` wrote it), but the tile on the
         // home screen is still drawing the circle this just erased.
         WidgetBridge.reloadAllTimelines()
+        // v5 §6: and so is the Lock Screen. `publishWidgetSnapshot` above has
+        // already re-planned it, but only to the extent the new file says —
+        // and if the window is still open it says "keep running", with a circle
+        // of one. An erased circle is the one case the plan cannot express, so
+        // it is torn down explicitly.
+        Task { await LiveActivityController.shared.endAll() }
     }
 }
