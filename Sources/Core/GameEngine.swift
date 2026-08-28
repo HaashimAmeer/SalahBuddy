@@ -562,6 +562,63 @@ enum GameEngine {
         return !logs.contains { $0.photoFilename == filename }
     }
 
+    // MARK: - The confirm screen's deadline (v4.1)
+
+    /// What the camera confirm screen owes the person looking at it about the
+    /// window it is racing.
+    ///
+    /// v4.1 (design session): the photo is taken inside the window and posted
+    /// whenever Post is tapped, so the screen can outlive its own deadline —
+    /// and `tier` answers `.qada` past `window.end` rather than refusing, which
+    /// means the log lands, `buildLog` drops the photo, and 5 XP arrives where
+    /// the screen was promising 20 or 30. Warn before and after; never in the
+    /// middle of a window, and never during capture.
+    enum LapseNotice: Equatable {
+        /// Plenty of window left. The confirm screen says nothing at all and
+        /// looks exactly as it always has — this is the ordinary case.
+        case none
+        /// The window closes shortly; the screen counts down to it.
+        case closingSoon
+        /// The window has closed. Posting now books a make-up and the photo is
+        /// not kept, so say so instead of counting down to a moment that passed.
+        case closed
+    }
+
+    /// How near the end of a window the confirm screen starts saying so.
+    /// Two minutes: enough to finish tagging a place and tap Post without
+    /// hurrying, short enough that it is not on screen for most of a window.
+    static let lapseWarningLead: TimeInterval = 2 * 60
+
+    /// Which notice — if any — the confirm screen should be showing.
+    ///
+    /// The `.closed` boundary is `tier`'s boundary, deliberately and to the
+    /// second: `tier` calls everything at or after `window.end` a qada, so a
+    /// screen still counting down at `window.end` would be lying about what
+    /// the very next tap does.
+    static func lapseNotice(windowEnd: Date, now: Date,
+                            lead: TimeInterval = lapseWarningLead) -> LapseNotice {
+        let remaining = windowEnd.timeIntervalSince(now)
+        if remaining <= 0 { return .closed }
+        return remaining <= lead ? .closingSoon : .none
+    }
+
+    /// Did the log this camera flow just wrote land as a make-up because the
+    /// window closed underneath it?
+    ///
+    /// `startedInWindow` is the whole difference between an accident and an
+    /// intention. The Today CTA only exists while a window is open, so a qada
+    /// out of THAT flow is always a lapse — but a flow that set out to record a
+    /// make-up must never be apologised for, and the shape of the question asks
+    /// rather than assumes.
+    ///
+    /// `added` is what `AppState.log`/`logCombined` actually appended, which is
+    /// also how the flow hears a refusal: an empty `added` is the OTHER silence
+    /// (no target window, already logged, window not open yet) and not this one.
+    static func lapsedIntoQada(added: [PrayerLog], startedInWindow: Bool) -> Bool {
+        guard startedInWindow else { return false }
+        return added.contains { $0.tier == .qada }
+    }
+
     /// The log that REPRESENTS `(prayer, dayKey)` in a view of a PAST day — a
     /// week-grid cell, a memory, a day sheet.
     ///

@@ -43,7 +43,14 @@ struct HomeView: View {
                             CurrentPrayerBlock(
                                 block: block,
                                 onPost: {
+                                    // v4.1: the CTA only exists while the window is
+                                    // open (`showCTA`), so `inWindowAtOpen` is true
+                                    // in practice — but it is answered from the
+                                    // clock rather than assumed, because it is what
+                                    // decides whether a qada gets apologised for.
                                     cameraTarget = CameraTarget(prayer: block.prayer, dayKey: block.dayKey,
+                                                                windowEnd: block.windowEnd,
+                                                                inWindowAtOpen: now < block.windowEnd,
                                                                 combinedLead: block.combinedWith != nil ? block.prayer : nil)
                                 },
                                 onEnlarge: { enlarged = EnlargedPost(entry: $0, prayer: block.prayer) })
@@ -220,6 +227,15 @@ struct PrayerTimesStrip: View {
 struct CameraTarget: Identifiable, Equatable {
     let prayer: Prayer
     let dayKey: String
+    /// v4.1: when the window this flow is racing closes — for a travel pair the
+    /// END of the pair, which is the deadline `logCombined` will actually be
+    /// judged against. The confirm screen counts down to it.
+    let windowEnd: Date
+    /// v4.1: was the window still open when this flow was OPENED? A qada that
+    /// lands out of a flow that started in-window is a lapse and is explained;
+    /// a flow that set out to record a make-up is a choice and is left alone.
+    /// No default — the one thing a future make-up caller must not get wrong.
+    let inWindowAtOpen: Bool
     /// v3.3: when set, posting logs this prayer AND its travel partner together
     /// (jam') via `logCombined`. `prayer` is the lead (earlier) prayer.
     var combinedLead: Prayer? = nil

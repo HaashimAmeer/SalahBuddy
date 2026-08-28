@@ -1051,6 +1051,115 @@ final class GameEngineTests: XCTestCase {
         XCTAssertFalse(GameEngine.isPhotoOrphaned("", in: []))
     }
 
+    // MARK: - The confirm screen's deadline (warn before, and after)
+
+    /// The boundary that matters, from both sides of it. `lapseNotice` and
+    /// `tier` have to agree to the SECOND about where the window ends, because
+    /// the notice is a promise about what the very next tap will do: one second
+    /// before the end the tap still earns in-window XP and the screen counts
+    /// down to it, and AT the end it books a make-up and the screen must say so
+    /// instead of showing "0s left".
+    func testTheNoticeFlipsAtExactlyTheInstantTheTierDoes() {
+        let start = date(2026, 8, 22, 12, 0)
+        let window = PrayerWindow(prayer: .dhuhr, start: start,
+                                  end: start.addingTimeInterval(120 * 60))
+        let end = window.end
+
+        // Just before: still in the window, still counting down.
+        XCTAssertEqual(GameEngine.lapseNotice(windowEnd: end, now: end.addingTimeInterval(-1)),
+                       .closingSoon)
+        XCTAssertEqual(GameEngine.tier(for: window, at: end.addingTimeInterval(-1)), .closeCall)
+
+        // Exactly at the end: closed, and the tap would book a qada.
+        XCTAssertEqual(GameEngine.lapseNotice(windowEnd: end, now: end), .closed)
+        XCTAssertEqual(GameEngine.tier(for: window, at: end), .qada)
+
+        // After: still closed, no matter how long after.
+        XCTAssertEqual(GameEngine.lapseNotice(windowEnd: end, now: end.addingTimeInterval(1)),
+                       .closed)
+        XCTAssertEqual(GameEngine.lapseNotice(windowEnd: end, now: end.addingTimeInterval(5 * 3600)),
+                       .closed)
+    }
+
+    /// The other boundary: when the notice APPEARS. Silence for the whole
+    /// window until the lead time, then the countdown — an ordinary post must
+    /// never see this thing.
+    func testTheNoticeStaysSilentUntilTheLeadTime() {
+        let end = date(2026, 8, 22, 14, 0)
+        let lead = GameEngine.lapseWarningLead
+
+        XCTAssertEqual(GameEngine.lapseWarningLead, 120, "two minutes — the shipped threshold")
+
+        // A whole window earlier, and a second before the lead: nothing.
+        XCTAssertEqual(GameEngine.lapseNotice(windowEnd: end, now: end.addingTimeInterval(-3600)),
+                       .none)
+        XCTAssertEqual(GameEngine.lapseNotice(windowEnd: end, now: end.addingTimeInterval(-lead - 1)),
+                       .none)
+        // Exactly at the lead time it starts speaking.
+        XCTAssertEqual(GameEngine.lapseNotice(windowEnd: end, now: end.addingTimeInterval(-lead)),
+                       .closingSoon)
+        XCTAssertEqual(GameEngine.lapseNotice(windowEnd: end, now: end.addingTimeInterval(-30)),
+                       .closingSoon)
+
+        // The lead is a parameter, and a caller that passes its own is obeyed.
+        XCTAssertEqual(GameEngine.lapseNotice(windowEnd: end, now: end.addingTimeInterval(-90),
+                                              lead: 60),
+                       .none)
+        XCTAssertEqual(GameEngine.lapseNotice(windowEnd: end, now: end.addingTimeInterval(-60),
+                                              lead: 60),
+                       .closingSoon)
+    }
+
+    /// THE SILENCE, and what breaks it. The confirm screen sat open past the
+    /// end of the window, so the log `AppState.log` appended is a qada — 5 XP
+    /// where the screen was promising 30, and no photo. The flow started while
+    /// the window was open, so that is a lapse and it gets explained.
+    func testAQadaOutOfAnInWindowFlowIsALapse() {
+        let landed = [log(.dhuhr, .qada, dayKey: "2026-08-22")]
+        XCTAssertTrue(GameEngine.lapsedIntoQada(added: landed, startedInWindow: true))
+    }
+
+    /// A deliberate make-up is a choice, not an accident. Same log, same tier —
+    /// only the intent differs, and it is the intent that decides.
+    func testADeliberateMakeUpIsNeverApologisedFor() {
+        let landed = [log(.dhuhr, .qada, dayKey: "2026-08-22")]
+        XCTAssertFalse(GameEngine.lapsedIntoQada(added: landed, startedInWindow: false),
+                       "the flow set out to record a make-up — nothing went wrong")
+    }
+
+    /// The success path, which must stay exactly as silent as it is today: a
+    /// log that landed in-window has nothing to explain, at any tier — including
+    /// `closeCall`, which is the tier of someone who only just made it and is
+    /// precisely who a false notice would insult.
+    func testAnInWindowLandingSaysNothing() {
+        for tier in [LogTier.onTime, .prayed, .lastCall, .closeCall] {
+            XCTAssertFalse(GameEngine.lapsedIntoQada(added: [log(.asr, tier, dayKey: "2026-08-22")],
+                                                     startedInWindow: true),
+                           "\(tier) is in the window — the post did what it promised")
+        }
+    }
+
+    /// A REFUSAL is the other silence and not this one. `log` reports "no" by
+    /// appending nothing (no target window, already logged, window not open
+    /// yet), and an empty `added` must not be mistaken for a lapse — there is
+    /// no make-up to apologise for because there is no log at all.
+    func testARefusalIsNotALapse() {
+        XCTAssertFalse(GameEngine.lapsedIntoQada(added: [], startedInWindow: true))
+        XCTAssertFalse(GameEngine.lapsedIntoQada(added: [], startedInWindow: false))
+    }
+
+    /// v3.3 travel: one tap, two logs, and the window that lapsed was the
+    /// PAIR's. Both sides land as make-ups, so the notice is owed once and the
+    /// XP it names is the pair's 10 — not 5.
+    func testATravelPairLapsesTogether() {
+        let key = "2026-08-22"
+        let added = [log(.dhuhr, .qada, dayKey: key), log(.asr, .qada, dayKey: key)]
+
+        XCTAssertTrue(GameEngine.lapsedIntoQada(added: added, startedInWindow: true))
+        XCTAssertEqual(added.reduce(0) { $0 + $1.xp }, 2 * LogTier.qada.xp,
+                       "what the notice tells them they earned")
+    }
+
     // MARK: - What a square draws
 
     /// The Today grid and `status(of:)` must never contradict each other. On

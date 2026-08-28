@@ -6,6 +6,14 @@ import UIKit
 /// appState.log → drop the JPEG if the log didn't take it → dismiss (the
 /// existing celebration overlay then fires on Today).
 /// Owned by the home agent.
+///
+/// v4.1: the confirm stage has a deadline, and it now says so at both ends.
+/// BEFORE — near the window's close, a live countdown under the XP line
+/// (`WindowClosingNotice`), because the XP the screen is promising expires.
+/// AFTER — if the window closed anyway and the log landed as a make-up, the
+/// sheet stops dismissing itself and says what happened (`LapsedWindowNotice`).
+/// Capture never warns: there is nothing to lose yet, and a countdown over the
+/// viewfinder would only rush the photo.
 struct CameraFlowSheet: View {
     let target: CameraTarget
 
@@ -13,14 +21,34 @@ struct CameraFlowSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var captured: UIImage?
+    /// Set ONLY when the window lapsed under this flow and the log landed as a
+    /// make-up. On the success path it stays nil and nothing here changes.
+    @State private var lapse: LapseOutcome?
+
+    /// What actually landed, read off the logs rather than off the target, so
+    /// the notice can name it: a travel pair posts two make-ups from one tap
+    /// and is worth 10, not 5 — and a pair that `logCombined` could not form
+    /// after all posted just the one, which this still gets right.
+    private struct LapseOutcome: Equatable {
+        let name: String
+        let xp: Int
+
+        init(_ added: [PrayerLog]) {
+            name = added.map(\.prayer.displayName).joined(separator: " + ")
+            xp = added.reduce(0) { $0 + $1.xp }
+        }
+    }
 
     var body: some View {
         ZStack {
             Theme.bg.ignoresSafeArea()
 
-            if let image = captured {
+            if let lapse {
+                LapsedWindowNotice(name: lapse.name, xp: lapse.xp, onDone: { dismiss() })
+            } else if let image = captured {
                 PostConfirmView(prayer: target.prayer,
                                 image: image,
+                                windowEnd: target.windowEnd,
                                 onPost: { jamaat, place, placeName in
                                     post(image, jamaat: jamaat, place: place, placeName: placeName)
                                 },
@@ -52,11 +80,18 @@ struct CameraFlowSheet: View {
     /// file is still wanted (`GameEngine.isPhotoOrphaned`) — a travel pair
     /// shares one photo across two logs and that has to keep counting as
     /// wanted.
+    ///
+    /// v4.1: and the same lapse is no longer silent. `log` reports what it did
+    /// by what it APPENDED, so the ids the array did not have a moment ago are
+    /// exactly the logs this tap wrote — ask them their tier, and a `.qada` out
+    /// of a flow that started in-window (`GameEngine.lapsedIntoQada`) holds the
+    /// sheet open for one short explanation instead of vanishing on 5 XP.
     private func post(_ image: UIImage, jamaat: Bool, place: PlaceTag?, placeName: String?) {
         // Photo-save failure (disk) must never lose the prayer: an empty
         // filename from PhotoStore.save is treated as "no photo".
         let saved = PhotoStore.save(image, dayKey: target.dayKey, prayer: target.prayer)
         let filename = saved.isEmpty ? nil : saved
+        let known = Set(state.logs.map(\.id))
         withAnimation(Theme.spring) {
             if let lead = target.combinedLead {
                 state.logCombined(lead: lead, photoFilename: filename, jamaat: jamaat,
@@ -67,7 +102,13 @@ struct CameraFlowSheet: View {
             }
         }
         PhotoStore.deleteIfOrphaned(filename, in: state.logs)
-        dismiss()
+
+        let added = state.logs.filter { !known.contains($0.id) }
+        guard GameEngine.lapsedIntoQada(added: added, startedInWindow: target.inWindowAtOpen) else {
+            dismiss()
+            return
+        }
+        withAnimation(Theme.spring) { lapse = LapseOutcome(added) }
     }
 }
 
@@ -78,6 +119,8 @@ struct CameraFlowSheet: View {
 struct PostConfirmView: View {
     let prayer: Prayer
     let image: UIImage
+    /// v4.1: when this screen's window closes — see `WindowClosingNotice`.
+    let windowEnd: Date
     let onPost: (Bool, PlaceTag?, String?) -> Void
     let onRetake: () -> Void
     let onCancel: () -> Void
@@ -106,12 +149,12 @@ struct PostConfirmView: View {
 
                 placePicker
 
-                if let tier = state.potentialTier(for: prayer), tier.isInWindow {
-                    Text("+\(GameEngine.prayerXP(tier: tier, jamaat: jamaat)) XP — \(jamaat ? "Jamaat 🕌" : tier.label)")
-                        .font(Theme.sans(15, .bold))
-                        .foregroundStyle(Theme.gold)
-                        .animation(Theme.spring, value: jamaat)
-                }
+                PotentialXPLine(prayer: prayer, jamaat: jamaat, windowEnd: windowEnd)
+
+                // v4.1: sits directly under the XP line because it is that line
+                // that expires. Renders nothing at all until the window is
+                // nearly out, so an ordinary post never sees it.
+                WindowClosingNotice(prayer: prayer, windowEnd: windowEnd)
 
                 // v3.9: no circle yet → nowhere to post it "to".
                 ChunkyButton(title: state.isSoloMode ? "Post your prayer 🎉" : "Post to your circle 🎉",
@@ -272,5 +315,147 @@ struct PostConfirmView: View {
             .foregroundStyle(selected ? Theme.inkDeep : Theme.inkMuted)
         }
         .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Before: the window is about to close (v4.1)
+
+/// The "+30 XP — On time! ⚡" line, unchanged in every pixel — but now on a
+/// clock.
+///
+/// It was a snapshot before: nothing here read the time, so the line kept
+/// promising whatever tier was current when the screen was built. Left alone
+/// it would sit directly above a notice saying the window had CLOSED, still
+/// offering 30 XP for a tap that would book a make-up. So it moved into its own
+/// view, which reads `\.appNow` and re-renders once a second — the tier falls
+/// through the quarters as they pass, and the line leaves the screen at the
+/// same instant `WindowClosingNotice` starts saying the window is gone.
+///
+/// The tier still comes from `AppState` (it owns the window and the isha
+/// midnight case); `now` is what makes the question get asked again.
+private struct PotentialXPLine: View {
+    let prayer: Prayer
+    let jamaat: Bool
+    let windowEnd: Date
+
+    @EnvironmentObject private var state: AppState
+    @Environment(\.appNow) private var now
+
+    var body: some View {
+        if GameEngine.lapseNotice(windowEnd: windowEnd, now: now) != .closed,
+           let tier = state.potentialTier(for: prayer), tier.isInWindow {
+            Text("+\(GameEngine.prayerXP(tier: tier, jamaat: jamaat)) XP — \(jamaat ? "Jamaat 🕌" : tier.label)")
+                .font(Theme.sans(15, .bold))
+                .foregroundStyle(Theme.gold)
+                .animation(Theme.spring, value: jamaat)
+        }
+    }
+}
+
+/// The countdown the confirm screen owes you, and nothing else.
+///
+/// Like `PotentialXPLine` it reads `\.appNow` ITSELF rather than letting
+/// `PostConfirmView` read it, which is the whole point of both being separate
+/// views: the two small strips re-render each second and the 330pt photo
+/// preview above them is not diffed sixty times a minute. Until the last two
+/// minutes this renders EMPTY, so an ordinary post is untouched — it never
+/// even learns the screen had a deadline.
+///
+/// `GameEngine.lapseNotice` decides; this only draws. Amber, because amber is
+/// how this app raises its voice (`Theme.mist` for missed, never red).
+private struct WindowClosingNotice: View {
+    let prayer: Prayer
+    let windowEnd: Date
+
+    @Environment(\.appNow) private var now
+
+    var body: some View {
+        switch GameEngine.lapseNotice(windowEnd: windowEnd, now: now) {
+        case .none:
+            EmptyView()
+        case .closingSoon:
+            notice(headline: "\(prayer.displayName) closes in \(HomeTimeFormat.countdown(to: windowEnd, from: now))",
+                   detail: "Post before then to keep this XP. After that it saves as a make-up (+\(LogTier.qada.xp) XP) and the photo isn't kept.")
+        case .closed:
+            notice(headline: "\(prayer.displayName)'s window has closed",
+                   detail: "Posting now saves it as a make-up (+\(LogTier.qada.xp) XP), and the photo isn't kept. It still counts 💙")
+        }
+    }
+
+    private func notice(headline: String, detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Image(systemName: "hourglass")
+                    .font(.system(size: 13, weight: .semibold))
+                Text(headline)
+                    .font(Theme.sans(14, .bold))
+            }
+            .foregroundStyle(Theme.amber)
+
+            Text(detail)
+                .font(Theme.sans(12.5, .semibold))
+                .foregroundStyle(Theme.inkMuted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Theme.amber.opacity(0.12))
+        )
+        .transition(.opacity)
+    }
+}
+
+// MARK: - After: it closed anyway (v4.1)
+
+/// What the sheet says when the window closed while it was open: the log
+/// landed, as a make-up, and `buildLog` dropped the photo on purpose.
+///
+/// This screen exists because the alternative was nothing. The sheet used to
+/// dismiss on the same tap whatever the log decided, so the only evidence that
+/// anything had gone differently was 5 XP in a celebration that had just been
+/// promising 30 — and a photo that was never anywhere.
+///
+/// It is deliberately a dead end with one way out: dismissing itself after a
+/// beat would put it back in the category of things you can miss.
+private struct LapsedWindowNotice: View {
+    /// The prayer, or the travel pair posted as one.
+    let name: String
+    /// What the make-up actually earned — 5, or 10 for a pair.
+    let xp: Int
+    let onDone: () -> Void
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Spacer(minLength: 0)
+
+            Image(systemName: "hourglass")
+                .font(.system(size: 42, weight: .semibold))
+                .foregroundStyle(Theme.amber)
+
+            Text("The \(name) window closed")
+                .font(Theme.sans(22, .bold))
+                .foregroundStyle(Theme.inkDeep)
+                .multilineTextAlignment(.center)
+
+            Text("It closed while this screen was open, so we saved it as a make-up — +\(xp) XP, and the photo isn't kept.")
+                .font(Theme.sans(14, .semibold))
+                .foregroundStyle(Theme.inkMuted)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text("A make-up still counts 💙")
+                .font(Theme.sans(13, .bold))
+                .foregroundStyle(Theme.qadaBlue)
+
+            Spacer(minLength: 0)
+
+            ChunkyButton(title: "Got it", color: Theme.green, isEnabled: true) {
+                onDone()
+            }
+        }
+        .padding(.horizontal, 28)
+        .padding(.vertical, 30)
     }
 }
