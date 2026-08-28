@@ -17,6 +17,14 @@ struct SalahBuddyApp: App {
     /// exist. The two `@StateObject` initialisers below are `@autoclosure`, so
     /// neither has run yet when this does.
     ///
+    /// Only the JSON half blocks: five small files, which is what `AppState()`
+    /// is about to read. The photo library follows on a utility queue — it has
+    /// no ceiling (`photos/` never prunes, `circlephotos/` runs to 400), and a
+    /// few hundred megabytes of read-and-rewrite in front of the first frame,
+    /// on the launch straight after an update, is how a release earns a
+    /// watchdog kill it cannot recover from. `PhotoStore.load` reads out of
+    /// Documents while that is in flight, so nothing on screen waits for it.
+    ///
     /// Idempotent and marker-guarded, so this is one `UserDefaults` read on
     /// every launch after the first, and the whole move exactly once. A build
     /// with no container (see `Store.directory`) does nothing at all here.

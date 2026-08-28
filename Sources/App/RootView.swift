@@ -153,7 +153,7 @@ struct RootView: View {
         // keeps the bound honest for someone who mostly reads the grid. Off the
         // main actor — it is a directory scan.
         Task.detached(priority: .utility) {
-            _ = BuddyPhotoCache.sweep()
+            _ = BuddyPhotoCache.sweepEverywhere()
         }
     }
 

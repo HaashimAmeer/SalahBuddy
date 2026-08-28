@@ -39,6 +39,22 @@ enum SessionKeychain {
     /// which is what "read-once-and-re-store" says.
     static let adoptedKey: String = "v5.sessionKeychainAdopted"
 
+    /// Set once the v4 item is confirmed GONE, and never cleared.
+    ///
+    /// A second marker, because the two questions have opposite failure modes
+    /// and cannot share one. `adoptedKey` has to be set the moment a session is
+    /// home, or a signed-out user is signed back in on the next launch — so it
+    /// cannot wait for anything fallible. But `SecItemDelete` is fallible for
+    /// reasons that pass (a Keychain still locked before first unlock, most of
+    /// all), and a v4 item that survives is a live rotating refresh token that
+    /// `signOut()` can never reach, because the client only ever knows the
+    /// shared group. Keychain items outlive the app's own deletion, so it would
+    /// outlive an uninstall too.
+    ///
+    /// So the delete is retried on its own terms, at a cost of one Keychain
+    /// read per launch until it lands.
+    static let legacyClearedKey: String = "v5.legacySessionCleared"
+
     /// PURE. The storage key `SupabaseClient` derives from the project URL:
     /// `sb-<project ref>-auth-token`. Recomputed here from the same URL rather
     /// than hard-coded, so a project change moves both sides at once.
@@ -55,8 +71,10 @@ enum SessionKeychain {
     /// What one adoption attempt did. Returned rather than logged so the
     /// decision is testable without a Keychain.
     enum Outcome: Equatable, Sendable {
-        /// Already done once. Nothing is read, nothing is written — see
-        /// `adoptedKey`.
+        /// The session question is already settled — see `adoptedKey`. No
+        /// session is read and none is written; the only thing that can still
+        /// happen on this path is a retry of the v4 item's removal
+        /// (`legacyClearedKey`), which never touches the shared copy.
         case alreadyRun
         /// The shared group already holds a session (a fresh v5 sign-in, or a
         /// second launch after a successful adoption).
@@ -101,10 +119,18 @@ enum SessionKeychain {
                       legacy: any SessionStore,
                       shared: any SessionStore,
                       defaults: UserDefaults) -> Outcome {
-        guard !defaults.bool(forKey: SessionKeychain.adoptedKey) else { return .alreadyRun }
+        guard !defaults.bool(forKey: SessionKeychain.adoptedKey) else {
+            // The session question is settled. Whether the OLD copy actually
+            // went is a separate one, and it may still be owed.
+            SessionKeychain.clearLegacyIfNeeded(key: key, legacy: legacy, shared: shared,
+                                                defaults: defaults)
+            return .alreadyRun
+        }
 
         if let existing: Data = shared.read(key), !existing.isEmpty {
             defaults.set(true, forKey: SessionKeychain.adoptedKey)
+            SessionKeychain.clearLegacyIfNeeded(key: key, legacy: legacy, shared: shared,
+                                                defaults: defaults)
             return .alreadyShared
         }
         guard let carried: Data = legacy.read(key), !carried.isEmpty else {
@@ -112,20 +138,63 @@ enum SessionKeychain {
         }
         guard shared.write(key, carried) else { return .failed }
 
-        // The old copy is a duplicate credential now — a refresh token that
-        // outlives the sign-out that was supposed to end it — so it goes.
+        // The session is home, so record THAT before anything fallible: a
+        // signed-out user being signed back in from a leftover is the worse
+        // failure, and the marker is the only thing that prevents it.
+        defaults.set(true, forKey: SessionKeychain.adoptedKey)
+        SessionKeychain.clearLegacyIfNeeded(key: key, legacy: legacy, shared: shared,
+                                            defaults: defaults)
+        return .adopted
+    }
+
+    /// Get rid of the v4 item, and remember only a delete that is confirmed.
+    ///
+    /// The old copy is a duplicate credential once the session is in the shared
+    /// group — a refresh token that outlives the sign-out that was supposed to
+    /// end it, because `signOut()` clears the shared item and nothing else. So
+    /// it goes; and if it does not go, it is tried again next launch, which is
+    /// what `legacyClearedKey` is for.
+    ///
+    /// Proof is a re-read, not a status code. `SecItemDelete`'s return says
+    /// what the call thought it did, and an item that is still readable
+    /// afterwards is the only fact that matters here.
+    ///
+    /// - Returns: whether the v4 item is gone for good — i.e. nothing owed.
+    @discardableResult
+    static func clearLegacyIfNeeded(key: String,
+                                    legacy: any SessionStore,
+                                    shared: any SessionStore,
+                                    defaults: UserDefaults) -> Bool {
+        guard !defaults.bool(forKey: SessionKeychain.legacyClearedKey) else { return true }
+        guard legacy.read(key) != nil else {
+            defaults.set(true, forKey: SessionKeychain.legacyClearedKey)
+            return true
+        }
+
+        // What the shared group holds right now, so it can be put straight back
+        // if the delete turns out to reach it too.
+        let live: Data? = shared.read(key)
         legacy.delete(key)
-        if shared.read(key) == nil {
+
+        if live != nil, shared.read(key) == nil {
             // The delete reached the new copy as well: the two groups resolved
             // to one item. That is what the SIMULATOR does — it ignores access
             // groups entirely and keeps a single Keychain for every app — and
             // it is what a mis-scoped query would do on a device. Put it back;
             // signing everyone out is the one outcome this file exists to
             // prevent, and it is worth a second write to be sure of.
-            _ = shared.write(key, carried)
+            //
+            // And then stop looking: in that world the "leftover" WAS the
+            // session, so there is no old copy left to clear and retrying would
+            // only take the session out again on every launch.
+            if let live { _ = shared.write(key, live) }
+            defaults.set(true, forKey: SessionKeychain.legacyClearedKey)
+            return true
         }
-        defaults.set(true, forKey: SessionKeychain.adoptedKey)
-        return .adopted
+
+        guard legacy.read(key) == nil else { return false }
+        defaults.set(true, forKey: SessionKeychain.legacyClearedKey)
+        return true
     }
 }
 
@@ -141,6 +210,9 @@ protocol SessionStore {
     /// True when the value is stored. Failures are reported, never thrown: a
     /// Keychain that cannot be written to is a launch that retries, not a crash.
     func write(_ key: String, _ value: Data) -> Bool
+    /// Reports nothing, on purpose. `SecItemDelete`'s status says what the call
+    /// believed it did; `clearLegacyIfNeeded` reads the item back instead,
+    /// which is the stronger evidence and the only one it acts on.
     func delete(_ key: String)
 }
 

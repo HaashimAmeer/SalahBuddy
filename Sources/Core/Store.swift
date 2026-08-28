@@ -48,6 +48,26 @@ enum Store {
         group: SharedContainer.containerURL,
         fallback: Store.documentsDirectory)
 
+    /// Every directory this app's files can be sitting in, the live one first.
+    ///
+    /// Reads and writes only ever use `directory`. **Erasure has to use this.**
+    /// The v5 migration COPIES Documents into the container rather than moving
+    /// it, because a build that later loses the entitlement falls back to
+    /// Documents and has to find something there — but that means a v4 install
+    /// which updated carries a full second copy of its JSON and its photos, in
+    /// a directory nothing else in the app enumerates. A delete that visits
+    /// only `directory` leaves that copy behind, and it is one nil
+    /// `containerURL` away from being live again. "Reset all data" has to mean
+    /// it, a reported photo has to actually stop existing (SPEC-V5 §7), and
+    /// neither is true of a directory nobody sweeps.
+    ///
+    /// One entry whenever the two are the same place — the test host, CI, a
+    /// build with no container — so this costs nothing on the machines where
+    /// the container never appears.
+    static let allDirectories: [URL] = SharedContainer.erasableDirectories(
+        live: Store.directory,
+        fallback: Store.documentsDirectory)
+
     static func url(for filename: String) -> URL {
         directory.appendingPathComponent(filename)
     }
@@ -73,7 +93,13 @@ enum Store {
         try? data.write(to: url(for: filename), options: .atomic)
     }
 
+    /// Erase `filename` — from EVERY directory it could be in, not just the
+    /// live one. See `allDirectories`: the only callers are the paths that mean
+    /// "this is gone" (leaving a circle, clearing the outbox, reset-all-data),
+    /// and a shadow copy left behind in Documents would make all three a lie.
     static func delete(_ filename: String) {
-        try? FileManager.default.removeItem(at: url(for: filename))
+        for directory in Store.allDirectories {
+            try? FileManager.default.removeItem(at: directory.appendingPathComponent(filename))
+        }
     }
 }

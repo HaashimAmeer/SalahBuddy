@@ -28,8 +28,9 @@ enum PhotoSyncError: Error, Equatable {
 /// Three rules shape everything below.
 ///
 /// 1. **Your photos never move.** `PhotoStore` semantics are untouched: the
-///    file stays in `Documents/photos/`, Memories still finds it, and the
-///    upload is a copy of the same bytes. Nothing here deletes a local photo.
+///    file stays in `photos/` under `Store.directory`, Memories still finds it,
+///    and the upload is a copy of the same bytes. Nothing here deletes a local
+///    photo.
 /// 2. **The bytes are already right.** `PhotoStore` downscaled to 1200px and
 ///    encoded at quality 0.7 when the photo was taken; this layer re-reads that
 ///    exact JPEG and sends it. It never loads a `UIImage` to send one — a
@@ -262,7 +263,7 @@ fileprivate actor BuddyPhotoDownloads {
             storesSinceSweep += 1
             if storesSinceSweep >= BuddyPhotoDownloads.sweepInterval {
                 storesSinceSweep = 0
-                BuddyPhotoCache.sweep()
+                BuddyPhotoCache.sweepEverywhere()
             }
         }
         return result

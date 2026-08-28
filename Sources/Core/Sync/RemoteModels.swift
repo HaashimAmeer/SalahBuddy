@@ -302,8 +302,8 @@ struct RemotePost: Codable, Equatable, Sendable, Identifiable {
     /// exact same pure functions as your own.
     ///
     /// - `photoFilename` is ALWAYS nil — buddy photos live in the disposable
-    ///   `Documents/circlephotos/` cache keyed by `photoPath`, never in
-    ///   `PhotoStore`, which is yours forever (§4).
+    ///   `circlephotos/` cache (under `Store.directory`) keyed by `photoPath`,
+    ///   never in `PhotoStore`, which is yours forever (§4).
     /// - `placeTag`/`placeName` stay nil: the wire carries only the rendered
     ///   label, and the tag matters solely for your own Journey "Places" stats.
     func asPrayerLog() -> PrayerLog {

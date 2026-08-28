@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 import XCTest
 @testable import SalahBuddy
 
@@ -25,7 +26,14 @@ import XCTest
 ///   without touching what already landed;
 /// - **modification dates survive** — `BuddyPhotoCache` ages photos by file
 ///   date and sweeps at 30 days to match the server (SPEC-V5 §7). Restamping
-///   them on the way across would give every cached photo another month.
+///   them on the way across would give every cached photo another month;
+/// - **owed is never recorded as done** — a directory that will not enumerate
+///   is not an empty one, and reading it as empty would set the marker on a
+///   migration that moved nothing;
+/// - **erasure reaches every copy** — the move is a COPY, so Documents keeps a
+///   shadow. `Store.allDirectories` is what makes "reset all data", an undo,
+///   the retention sweep and a report actually mean it. Without that half, §7's
+///   retention and reports invariants break with no user action at all.
 final class SharedContainerTests: XCTestCase {
 
     // MARK: - Rig
@@ -193,16 +201,84 @@ final class SharedContainerTests: XCTestCase {
                             "deadbeef.jpg"), "cached")
     }
 
-    /// The source is left alone on purpose. A migration that deletes as it goes
+    /// YOUR data is left alone on purpose. A migration that deletes as it goes
     /// has no way back if the container later turns out to be unavailable — the
     /// app would fall back to Documents and find them empty.
-    func testTheOriginalsAreLeftWhereTheyWere() throws {
+    ///
+    /// What makes that safe rather than a leak is the other half of the design:
+    /// every erasure path in the app visits `Store.allDirectories`, so the
+    /// shadow is reachable by "reset all data" and by an undo. See
+    /// `testEveryErasePathReachesEveryCopy…` below.
+    func testYourOwnDataIsLeftWhereItWas() throws {
         try write("{}", to: source, named: Store.settingsFile)
+        try write("jpeg", to: source.appendingPathComponent(PhotoStore.directoryName),
+                  named: "a.jpg")
 
         ContainerMigration.migrate(from: source, to: destination)
 
         XCTAssertEqual(read(source, Store.settingsFile), "{}",
                        "a copy, not a move — the fallback still needs something to read")
+        XCTAssertEqual(read(source.appendingPathComponent(PhotoStore.directoryName), "a.jpg"),
+                       "jpeg",
+                       "your photos are yours forever (§4); the fallback has to find them")
+    }
+
+    /// SPEC-V5 §7, and the one directory the copy-for-safety argument does NOT
+    /// cover. A buddy photo is somebody else's face on a 30-day clock — "cheap
+    /// to lose, wrong to keep" (SPEC-V4 §4) — so a second copy left in
+    /// Documents is up to 400 faces in a directory that no sweep, no
+    /// report-hide and no leave-the-circle path enumerates. It goes.
+    func testTheBuddyCacheKeepsNoCopyInDocuments() throws {
+        let cache: URL = source.appendingPathComponent(BuddyPhotoCache.directoryName,
+                                                       isDirectory: true)
+        try write("cached-a", to: cache, named: "aa.jpg")
+        try write("cached-b", to: cache, named: "bb.jpg")
+
+        let report: ContainerMigration.Report = ContainerMigration.migrate(from: source,
+                                                                          to: destination)
+
+        XCTAssertEqual(report, ContainerMigration.Report(copied: 2, skipped: 0, failed: 0))
+        XCTAssertEqual(read(destination.appendingPathComponent(BuddyPhotoCache.directoryName),
+                            "aa.jpg"), "cached-a")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: cache.path),
+                       "a cached copy that outlived the object it mirrors is a photo the "
+                       + "poster believes is gone")
+    }
+
+    /// …but only once it has actually landed. A run that could not create the
+    /// destination directory has nothing to finish from except the source, so
+    /// the source stays exactly where it is.
+    func testAnUnlandedBuddyCacheKeepsItsSource() throws {
+        let cache: URL = source.appendingPathComponent(BuddyPhotoCache.directoryName,
+                                                       isDirectory: true)
+        try write("cached", to: cache, named: "aa.jpg")
+        // A plain FILE where the destination directory belongs: nothing can be
+        // written into it, so every file in the source is owed.
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        try write("not a directory", to: destination, named: BuddyPhotoCache.directoryName)
+
+        let report: ContainerMigration.Report = ContainerMigration.migrate(from: source,
+                                                                          to: destination)
+
+        XCTAssertFalse(report.isComplete)
+        XCTAssertEqual(read(cache, "aa.jpg"), "cached",
+                       "the source is the only thing the next launch can finish from")
+    }
+
+    /// The second run has nothing left to look at, and says so without failing.
+    func testASecondRunDoesNotMissTheBuddyCacheItAlreadyTookAway() throws {
+        try write("cached", to: source.appendingPathComponent(BuddyPhotoCache.directoryName),
+                  named: "aa.jpg")
+
+        let first: ContainerMigration.Report = ContainerMigration.migrate(from: source,
+                                                                         to: destination)
+        let second: ContainerMigration.Report = ContainerMigration.migrate(from: source,
+                                                                          to: destination)
+
+        XCTAssertEqual(first, ContainerMigration.Report(copied: 1, skipped: 0, failed: 0))
+        XCTAssertEqual(second, ContainerMigration.Report(),
+                       "an absent source directory is nothing to do, not something owed")
+        XCTAssertTrue(second.isComplete)
     }
 
     /// Run twice: the second run must copy nothing at all.
@@ -356,7 +432,7 @@ final class SharedContainerTests: XCTestCase {
         try write("{}", to: source, named: Store.settingsFile)
 
         let report: ContainerMigration.Report = SharedContainer.prepareOnLaunch(
-            from: source, to: destination, defaults: defaults)
+            from: source, to: destination, defaults: defaults, photos: .inline)
 
         XCTAssertEqual(report, ContainerMigration.Report(copied: 1, skipped: 0, failed: 0))
         XCTAssertTrue(defaults.bool(forKey: SharedContainer.migrationDoneKey))
@@ -368,12 +444,12 @@ final class SharedContainerTests: XCTestCase {
     func testASecondLaunchDoesNotLookAtTheFilesAtAll() throws {
         let defaults: UserDefaults = try scratchDefaults()
         try write("{}", to: source, named: Store.settingsFile)
-        SharedContainer.prepareOnLaunch(from: source, to: destination, defaults: defaults)
+        SharedContainer.prepareOnLaunch(from: source, to: destination, defaults: defaults, photos: .inline)
 
         // Something the second run would certainly copy, if it ran.
         try write("{\"new\":true}", to: source, named: Store.profileFile)
         let report: ContainerMigration.Report = SharedContainer.prepareOnLaunch(
-            from: source, to: destination, defaults: defaults)
+            from: source, to: destination, defaults: defaults, photos: .inline)
 
         XCTAssertEqual(report, ContainerMigration.Report())
         XCTAssertNil(read(destination, Store.profileFile))
@@ -388,7 +464,7 @@ final class SharedContainerTests: XCTestCase {
         try write("{}", to: source, named: Store.settingsFile)
 
         let report: ContainerMigration.Report = SharedContainer.prepareOnLaunch(
-            from: source, to: source, defaults: defaults)
+            from: source, to: source, defaults: defaults, photos: .inline)
 
         XCTAssertEqual(report, ContainerMigration.Report())
         XCTAssertFalse(defaults.bool(forKey: SharedContainer.migrationDoneKey),
@@ -397,7 +473,7 @@ final class SharedContainerTests: XCTestCase {
         // And the launch after it, on a build that DOES have the container,
         // still does the whole job.
         let later: ContainerMigration.Report = SharedContainer.prepareOnLaunch(
-            from: source, to: destination, defaults: defaults)
+            from: source, to: destination, defaults: defaults, photos: .inline)
         XCTAssertEqual(later, ContainerMigration.Report(copied: 1, skipped: 0, failed: 0))
         XCTAssertTrue(defaults.bool(forKey: SharedContainer.migrationDoneKey))
     }
@@ -410,10 +486,240 @@ final class SharedContainerTests: XCTestCase {
         let blocked: URL = try write("not a directory", to: root, named: "AppGroupBlocked")
 
         let report: ContainerMigration.Report = SharedContainer.prepareOnLaunch(
-            from: source, to: blocked, defaults: defaults)
+            from: source, to: blocked, defaults: defaults, photos: .inline)
 
         XCTAssertFalse(report.isComplete)
         XCTAssertFalse(defaults.bool(forKey: SharedContainer.migrationDoneKey),
                        "a partial move must be retried, so the marker stays clear")
+    }
+
+    /// A directory that will not say what is in it must not read as an empty
+    /// one. Otherwise the whole move answers `Report()`, the marker is set on a
+    /// run that moved nothing, and every file is stranded in Documents forever
+    /// — done recorded where owed was the truth.
+    ///
+    /// A plain file standing in for the directory is the deterministic way to
+    /// make `contentsOfDirectory` fail; on a phone the cause is a protected
+    /// data class or a volume that went away, and the code path is the same one.
+    func testASourceThatWillNotEnumerateIsOwedNotDone() throws {
+        let defaults: UserDefaults = try scratchDefaults()
+        let unreadable: URL = try write("not a directory", to: root, named: "DocumentsBlocked")
+
+        let report: ContainerMigration.Report = SharedContainer.prepareOnLaunch(
+            from: unreadable, to: destination, defaults: defaults, photos: .inline)
+
+        XCTAssertFalse(report.isComplete,
+                       "an unreadable Documents is a run that did not happen")
+        XCTAssertFalse(defaults.bool(forKey: SharedContainer.migrationDoneKey))
+    }
+
+    /// The same distinction one level down: `photos/` is there and will not
+    /// enumerate. Nothing is copied, and — the point — nothing is recorded.
+    func testAPhotoDirectoryThatWillNotEnumerateIsOwedNotDone() throws {
+        let defaults: UserDefaults = try scratchDefaults()
+        try write("{}", to: source, named: Store.settingsFile)
+        try write("not a directory", to: source, named: PhotoStore.directoryName)
+
+        let report: ContainerMigration.Report = SharedContainer.prepareOnLaunch(
+            from: source, to: destination, defaults: defaults, photos: .inline)
+
+        XCTAssertEqual(report, ContainerMigration.Report(copied: 1, skipped: 0, failed: 1))
+        XCTAssertFalse(defaults.bool(forKey: SharedContainer.migrationDoneKey))
+    }
+
+    /// The photo half runs off the main thread (`PhotoPhase.deferred`), so the
+    /// marker is set from there. Until it lands, nothing is remembered — which
+    /// is what keeps a launch killed mid-copy re-runnable.
+    func testTheDeferredPhotoHalfStillFinishesTheJobAndRemembersIt() throws {
+        let defaults: UserDefaults = try scratchDefaults()
+        try write("{}", to: source, named: Store.settingsFile)
+        try write("jpeg", to: source.appendingPathComponent(PhotoStore.directoryName),
+                  named: "a.jpg")
+
+        let immediate: ContainerMigration.Report = SharedContainer.prepareOnLaunch(
+            from: source, to: destination, defaults: defaults, photos: .deferred)
+
+        // The JSON half is done by the time this returns — `AppState()` reads
+        // it a few lines later and cannot wait for a queue.
+        XCTAssertEqual(immediate, ContainerMigration.Report(copied: 1, skipped: 0, failed: 0))
+        XCTAssertEqual(read(destination, Store.settingsFile), "{}")
+
+        let landed = expectation(description: "the photo half finishes and sets the marker")
+        let poll = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { timer in
+            guard defaults.bool(forKey: SharedContainer.migrationDoneKey) else { return }
+            timer.invalidate()
+            landed.fulfill()
+        }
+        addTeardownBlock { poll.invalidate() }
+        wait(for: [landed], timeout: 5)
+
+        XCTAssertEqual(read(destination.appendingPathComponent(PhotoStore.directoryName),
+                            "a.jpg"), "jpeg")
+    }
+
+    // MARK: - Erasure reaches every copy
+
+    /// PURE. Reading has one answer; deleting has as many as there are copies.
+    func testTheEraseSetIsBothHomesWheneverTheyDiffer() {
+        let group = URL(fileURLWithPath: "/group", isDirectory: true)
+        let documents = URL(fileURLWithPath: "/documents", isDirectory: true)
+
+        XCTAssertEqual(SharedContainer.erasableDirectories(live: group, fallback: documents),
+                       [group, documents])
+        XCTAssertEqual(SharedContainer.erasableDirectories(live: documents, fallback: documents),
+                       [documents],
+                       "the fallback build must never do everything twice")
+        XCTAssertEqual(
+            SharedContainer.erasableDirectories(
+                live: documents, fallback: URL(fileURLWithPath: documents.path + "/.")),
+            [documents],
+            "the same directory spelled two ways is still one directory")
+    }
+
+    /// And what `Store` actually resolved to, whichever machine this is running
+    /// on: the live directory leads, and Documents is in there exactly when it
+    /// is somewhere else.
+    func testStoreErasesWhereverItAlsoReads() {
+        XCTAssertEqual(Store.allDirectories.first, Store.directory,
+                       "reads and writes use the live directory; it has to lead")
+        XCTAssertEqual(Store.allDirectories.contains(Store.documentsDirectory),
+                       !ContainerMigration.sameDirectory(Store.directory,
+                                                         Store.documentsDirectory))
+        XCTAssertEqual(Set(Store.allDirectories.map(\.path)).count, Store.allDirectories.count,
+                       "no directory is visited twice")
+    }
+
+    /// The major failure this whole erase-set exists for, exercised against the
+    /// real `Store.allDirectories`: a photo the user deleted has to be gone from
+    /// every copy, or an owed migration copies it back on the next launch and
+    /// `resetAllData` leaves a photo library behind.
+    func testDeletingAPhotoReachesEveryCopyOfIt() throws {
+        let name = "v5-erase-probe-\(UUID().uuidString).jpg"
+        var written: [URL] = []
+        for directory in Store.allDirectories {
+            let photos: URL = directory.appendingPathComponent(PhotoStore.directoryName,
+                                                                isDirectory: true)
+            try FileManager.default.createDirectory(at: photos, withIntermediateDirectories: true)
+            let url: URL = photos.appendingPathComponent(name)
+            try Data("jpeg".utf8).write(to: url, options: .atomic)
+            written.append(url)
+        }
+        addTeardownBlock {
+            for url in written { try? FileManager.default.removeItem(at: url) }
+        }
+
+        PhotoStore.delete(name)
+
+        for url in written {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: url.path),
+                           "a copy in \(url.deletingLastPathComponent().lastPathComponent) "
+                           + "that the app cannot erase is one it cannot honour a delete for")
+        }
+    }
+
+    /// Same for a JSON file — `Store.delete` is what "leave the circle",
+    /// "clear the outbox" and "reset all data" are all built out of.
+    func testDeletingAStoreFileReachesEveryCopyOfIt() throws {
+        let name = "v5-erase-probe-\(UUID().uuidString).json"
+        let written: [URL] = Store.allDirectories.map { $0.appendingPathComponent(name) }
+        for url in written { try Data("{}".utf8).write(to: url, options: .atomic) }
+        addTeardownBlock {
+            for url in written { try? FileManager.default.removeItem(at: url) }
+        }
+
+        Store.delete(name)
+
+        for url in written {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+        }
+    }
+
+    /// The read side of the same seam: while the photo half of the migration is
+    /// still in flight, the file is only in Documents — and the grid still has
+    /// to draw it. `candidates` is live-first, so this also pins that a photo
+    /// present in both is read from the container.
+    func testAPhotoStillCrossingIntoTheContainerIsStillReadable() throws {
+        let name = "v5-read-probe-\(UUID().uuidString).jpg"
+        let fallback: URL = try XCTUnwrap(Store.allDirectories.last)
+        let photos: URL = fallback.appendingPathComponent(PhotoStore.directoryName,
+                                                          isDirectory: true)
+        try FileManager.default.createDirectory(at: photos, withIntermediateDirectories: true)
+        let url: URL = photos.appendingPathComponent(name)
+        let bytes: Data = try XCTUnwrap(
+            PhotoStore.demoImage(seed: 5).jpegData(compressionQuality: 0.7))
+        try bytes.write(to: url, options: .atomic)
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+
+        XCTAssertNotNil(PhotoStore.load(name),
+                        "the first launch after an update must not render a wall of blanks")
+    }
+
+    /// SPEC-V5 §7 for the disposable half: the sweep is what keeps a cached
+    /// face from outliving the 30-day retention it mirrors, so it has to visit
+    /// every directory the cache can be in — including the one an owed
+    /// migration has not emptied yet.
+    func testTheSweepReachesEveryCopyOfACachedBuddyPhoto() throws {
+        let name = "\(String(repeating: "a", count: 64)).jpg"
+        let ancient: Date = epoch.addingTimeInterval(-40 * 24 * 60 * 60)
+        var written: [URL] = []
+        for directory in BuddyPhotoCache.allDirectories {
+            try FileManager.default.createDirectory(at: directory,
+                                                    withIntermediateDirectories: true)
+            let url: URL = directory.appendingPathComponent(name)
+            try Data("bytes".utf8).write(to: url, options: .atomic)
+            try FileManager.default.setAttributes([.modificationDate: ancient],
+                                                  ofItemAtPath: url.path)
+            written.append(url)
+        }
+        addTeardownBlock {
+            for url in written { try? FileManager.default.removeItem(at: url) }
+        }
+
+        // `now` is just past THIS file's expiry, so nothing else that happens to
+        // be in the real cache is old enough to be swept by this test.
+        let removed: Int = BuddyPhotoCache.sweepEverywhere(now: ancient.addingTimeInterval(
+            BuddyPhotoCache.maxAge + 60))
+
+        XCTAssertEqual(removed, written.count)
+        for url in written {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+        }
+    }
+
+    /// The report path (§7: "a hidden photo reappearing is worse than it never
+    /// having been hideable"). `CircleService.hide` calls this one.
+    func testHidingABuddyPhotoReachesEveryCopyOfIt() throws {
+        let remotePath = "circle/user/\(UUID().uuidString).jpg"
+        var written: [URL] = []
+        for directory in BuddyPhotoCache.allDirectories {
+            try FileManager.default.createDirectory(at: directory,
+                                                    withIntermediateDirectories: true)
+            let url: URL = BuddyPhotoCache.url(forRemotePath: remotePath, in: directory)
+            try Data("bytes".utf8).write(to: url, options: .atomic)
+            written.append(url)
+        }
+        addTeardownBlock {
+            for url in written { try? FileManager.default.removeItem(at: url) }
+        }
+
+        BuddyPhotoCache.removeEverywhere(forRemotePath: remotePath)
+
+        for url in written {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+        }
+    }
+
+    /// And the wipe — leaving a circle, signing out, deleting the account,
+    /// reset-all-data. Asserted through the directory list it deletes rather
+    /// than by calling it, because `deleteAll` removes the whole directory and
+    /// this suite is not the only thing in the test host that has one.
+    func testTheBuddyCacheWipeCoversEveryDirectoryTheCacheCanBeIn() {
+        XCTAssertEqual(BuddyPhotoCache.allDirectories.map(\.path),
+                       Store.allDirectories.map {
+                           $0.appendingPathComponent(BuddyPhotoCache.directoryName,
+                                                     isDirectory: true).path
+                       })
+        XCTAssertEqual(BuddyPhotoCache.allDirectories.first?.path,
+                       BuddyPhotoCache.directory.path)
     }
 }

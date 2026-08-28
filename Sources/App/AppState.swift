@@ -2143,8 +2143,16 @@ final class AppState: ObservableObject {
         circleSnapshot = .empty
         CircleSnapshot.clear()
         CircleOutbox.clear()
+        // v5 §2: BEFORE the fresh settings are written, not after. `Store.delete`
+        // reaches every directory the file could be in (see
+        // `Store.allDirectories`) — including the copy the container migration
+        // leaves in Documents — and everything else here is a delete, so this
+        // is the one file that would otherwise keep its old shadow while the
+        // live one was replaced.
+        Store.delete(Store.settingsFile)
         settings = AppSettings()       // didSet persists + refreshes
         PhotoStore.deleteAll()
+        BuddyPhotoCache.deleteAll()
         Store.delete(Store.logsFile)
         Store.delete(Store.profileFile)
         persist()

@@ -23,12 +23,17 @@ final class SessionKeychainTests: XCTestCase {
     private final class FakeSessionStore: SessionStore {
         var items: [String: Data]
         var writable: Bool
+        /// `SecItemDelete` failing is the whole of the retry story — a Keychain
+        /// still locked before first unlock is the ordinary cause, and it
+        /// leaves the item exactly where it was.
+        var deletable: Bool
         private(set) var writes: Int = 0
         private(set) var deletes: Int = 0
 
-        init(_ items: [String: Data] = [:], writable: Bool = true) {
+        init(_ items: [String: Data] = [:], writable: Bool = true, deletable: Bool = true) {
             self.items = items
             self.writable = writable
+            self.deletable = deletable
         }
 
         func read(_ key: String) -> Data? { items[key] }
@@ -42,6 +47,7 @@ final class SessionKeychainTests: XCTestCase {
 
         func delete(_ key: String) {
             deletes += 1
+            guard deletable else { return }
             items.removeValue(forKey: key)
         }
     }
@@ -121,6 +127,82 @@ final class SessionKeychainTests: XCTestCase {
         XCTAssertNil(legacy.read(key),
                      "the old copy is a refresh token that would outlive its own sign-out")
         XCTAssertTrue(defaults.bool(forKey: SessionKeychain.adoptedKey))
+        XCTAssertTrue(defaults.bool(forKey: SessionKeychain.legacyClearedKey),
+                      "the v4 item is confirmed gone, so nothing is owed")
+    }
+
+    /// The delete is fallible, and a v4 item that survives is not cosmetic: it
+    /// is a live rotating refresh token, and `signOut()` will never reach it —
+    /// the client only knows the shared group. So it is retried, and the
+    /// adoption is not called finished until a re-read says the item is gone.
+    func testAV4ItemThatSurvivesTheDeleteIsRetriedUntilItIsActuallyGone() throws {
+        let defaults: UserDefaults = try scratchDefaults()
+        let legacy = FakeSessionStore([key: session], deletable: false)
+        let shared = FakeSessionStore()
+
+        XCTAssertEqual(SessionKeychain.adopt(key: key, legacy: legacy, shared: shared,
+                                             defaults: defaults), .adopted)
+        XCTAssertEqual(shared.read(key), session)
+        XCTAssertTrue(defaults.bool(forKey: SessionKeychain.adoptedKey),
+                      "the session is home; that half must be recorded or the next launch "
+                      + "signs a signed-out user back in")
+        XCTAssertEqual(legacy.read(key), session, "the delete did not take")
+        XCTAssertFalse(defaults.bool(forKey: SessionKeychain.legacyClearedKey),
+                       "a token still on the device is owed work, not a finished migration")
+
+        // Next launch, Keychain unlocked. Same call, and this time it lands.
+        legacy.deletable = true
+        XCTAssertEqual(SessionKeychain.adopt(key: key, legacy: legacy, shared: shared,
+                                             defaults: defaults), .alreadyRun)
+
+        XCTAssertNil(legacy.read(key), "the duplicate credential is gone for good")
+        XCTAssertEqual(shared.read(key), session, "and the session was never at risk")
+        XCTAssertTrue(defaults.bool(forKey: SessionKeychain.legacyClearedKey))
+    }
+
+    /// The same retry, for someone who signed OUT in between. The leftover is
+    /// exactly the item that must not survive — and clearing it must not put
+    /// them back in.
+    func testALeftoverIsClearedAfterASignOutWithoutSigningAnyoneBackIn() throws {
+        let defaults: UserDefaults = try scratchDefaults()
+        let legacy = FakeSessionStore([key: session], deletable: false)
+        let shared = FakeSessionStore()
+        XCTAssertEqual(SessionKeychain.adopt(key: key, legacy: legacy, shared: shared,
+                                             defaults: defaults), .adopted)
+
+        // …they sign out. `signOut()` clears the shared item, which is the only
+        // storage the client knows about; the v4 item is untouched by it.
+        shared.items.removeValue(forKey: key)
+        legacy.deletable = true
+
+        let outcome: SessionKeychain.Outcome = SessionKeychain.adopt(
+            key: key, legacy: legacy, shared: shared, defaults: defaults)
+
+        XCTAssertEqual(outcome, .alreadyRun)
+        XCTAssertNil(shared.read(key), "signed out is signed out")
+        XCTAssertNil(legacy.read(key),
+                     "a refresh token that outlives the sign-out that was supposed to end it")
+        XCTAssertTrue(defaults.bool(forKey: SessionKeychain.legacyClearedKey))
+    }
+
+    /// A retry that cannot tell one Keychain from two must still not sign
+    /// anyone out. Same belt as the adoption itself, on the later launch.
+    func testARetriedDeleteThatSpillsAcrossGroupsStillCannotStrandTheUser() throws {
+        let defaults: UserDefaults = try scratchDefaults()
+        let old = FakeSessionStore([key: session])
+        let shared = FakeSessionStore([key: session])
+        let spilling = SpillingSessionStore(own: old, alsoDeletesFrom: shared)
+        // The session is already home; only the clean-up is owed.
+        defaults.set(true, forKey: SessionKeychain.adoptedKey)
+
+        let outcome: SessionKeychain.Outcome = SessionKeychain.adopt(
+            key: key, legacy: spilling, shared: shared, defaults: defaults)
+
+        XCTAssertEqual(outcome, .alreadyRun)
+        XCTAssertEqual(shared.read(key), session,
+                       "the copy the app is about to read must survive the tidy-up")
+        XCTAssertTrue(defaults.bool(forKey: SessionKeychain.legacyClearedKey),
+                      "one item seen twice has no old copy to chase; stop asking")
     }
 
     /// Read-once. Sign-out removes the shared item; without the marker the very
@@ -133,8 +215,9 @@ final class SessionKeychainTests: XCTestCase {
         XCTAssertEqual(SessionKeychain.adopt(key: key, legacy: legacy, shared: shared,
                                              defaults: defaults), .adopted)
 
-        // …they sign out, which clears the shared item. And a leftover survives
-        // under the old group, because the delete above is best-effort.
+        // …they sign out, which clears the shared item. And something is under
+        // the old group again — a re-plant here, a Keychain restored from a
+        // backup in the real world. It is not a session this app may use.
         shared.items.removeValue(forKey: key)
         legacy.items[key] = session
 
@@ -222,9 +305,14 @@ final class SessionKeychainTests: XCTestCase {
 
     /// The Simulator, which ignores access groups and keeps one Keychain for
     /// everything — so the two stores are literally the same item. The session
-    /// is already visible to the "shared" reader, so there is nothing to move
-    /// and nothing is deleted.
-    func testOneKeychainSeenTwiceIsLeftExactlyAsItWas() throws {
+    /// is already visible to the "shared" reader, so there is nothing to move.
+    ///
+    /// The clean-up still probes, because there is no non-destructive way to
+    /// ask "are these two groups the same one": it deletes, sees the shared
+    /// copy vanish with it, and writes it straight back. What matters is the
+    /// state afterwards — the session is there, and the app stops asking, so
+    /// this cannot become a delete-and-restore on every launch.
+    func testOneKeychainSeenTwiceEndsUpExactlyAsItWas() throws {
         let defaults: UserDefaults = try scratchDefaults()
         let backing = FakeSessionStore([key: session])
 
@@ -235,8 +323,17 @@ final class SessionKeychainTests: XCTestCase {
             defaults: defaults)
 
         XCTAssertEqual(outcome, .alreadyShared)
+        XCTAssertEqual(backing.read(key), session, "the one item there is survives")
+        XCTAssertTrue(defaults.bool(forKey: SessionKeychain.legacyClearedKey))
+
+        // And the launch after it touches nothing at all.
+        let deletesSoFar: Int = backing.deletes
+        XCTAssertEqual(SessionKeychain.adopt(key: key,
+                                             legacy: AliasedSessionStore(backing),
+                                             shared: AliasedSessionStore(backing),
+                                             defaults: defaults), .alreadyRun)
+        XCTAssertEqual(backing.deletes, deletesSoFar)
         XCTAssertEqual(backing.read(key), session)
-        XCTAssertEqual(backing.deletes, 0)
     }
 
     /// An empty value is not a session. A Keychain item truncated to zero bytes

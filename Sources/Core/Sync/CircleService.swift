@@ -1084,9 +1084,13 @@ final class PhotoReports: ObservableObject {
         if let path: String = post.photoPath, !path.isEmpty {
             hiddenPaths.insert(path)
             // The bytes go too. They are a disposable cache entry (§4), and
-            // leaving them on disk would mean a reported photo sitting in
-            // Documents until retention swept the path that no longer renders.
-            if persists { BuddyPhotoCache.remove(forRemotePath: path) }
+            // leaving them on disk would mean a reported photo still sitting in
+            // the cache until retention swept the path that no longer renders.
+            // Everywhere, not just the live directory: while the v5 migration
+            // is owed there is a second copy in Documents, and SPEC-V5 §7 is
+            // explicit that a hidden photo coming back is worse than it never
+            // having been hideable.
+            if persists { BuddyPhotoCache.removeEverywhere(forRemotePath: path) }
         }
         guard let reporter: UUID = currentUserID() else {
             // No session, no report: `reporter_id = auth.uid()` is the insert

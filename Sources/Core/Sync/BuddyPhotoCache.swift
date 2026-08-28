@@ -45,6 +45,24 @@ enum BuddyPhotoCache {
         return dir
     }
 
+    /// Every directory a cached buddy photo could be in, the live one first.
+    ///
+    /// v5 §2/§7. The container migration deletes `Documents/circlephotos/` the
+    /// moment it has copied it, precisely because a second copy of somebody
+    /// else's face in a directory nothing enumerates is a photo the poster
+    /// believes is gone. But the migration can be OWED — a copy that ran out of
+    /// disk retries next launch — and while it is, the old directory is still
+    /// full. So the three paths that make a cached photo stop existing (the
+    /// sweep, the report-hide, the wipe) visit both.
+    ///
+    /// One entry whenever there is no container, and nothing here creates a
+    /// directory: these are erase paths.
+    static var allDirectories: [URL] {
+        Store.allDirectories.map {
+            $0.appendingPathComponent(directoryName, isDirectory: true)
+        }
+    }
+
     // MARK: - Keys (pure)
 
     /// The on-disk filename for a remote Storage path.
@@ -120,13 +138,28 @@ enum BuddyPhotoCache {
         try? FileManager.default.removeItem(at: target)
     }
 
+    /// The same drop, from every directory the photo could be in — the call for
+    /// a report (SPEC-V5 §7: "a hidden photo reappearing is worse than it never
+    /// having been hideable") and for a buddy's undo. See `allDirectories`.
+    static func removeEverywhere(forRemotePath remotePath: String) {
+        guard !remotePath.isEmpty else { return }
+        for directory in BuddyPhotoCache.allDirectories {
+            BuddyPhotoCache.remove(forRemotePath: remotePath, in: directory)
+        }
+    }
+
     /// Deletes the whole cache — leaving a circle, signing out, deleting the
     /// account, reset-all-data. Mirrors `PhotoStore.deleteAll()` in name so the
     /// two are obviously siblings, and in nothing else: this one is called on
     /// paths where `PhotoStore` must be left completely alone.
+    ///
+    /// Every directory, not just the live one: an ex-member of a circle keeping
+    /// every face in it, in a copy the app no longer looks at, is the worst
+    /// version of the bug this whole type exists to avoid.
     static func deleteAll() {
-        let dir: URL = Store.directory.appendingPathComponent(directoryName, isDirectory: true)
-        try? FileManager.default.removeItem(at: dir)
+        for directory in BuddyPhotoCache.allDirectories {
+            try? FileManager.default.removeItem(at: directory)
+        }
     }
 
     // MARK: - Eviction
@@ -238,6 +271,22 @@ enum BuddyPhotoCache {
             }
         }
         return removed
+    }
+
+    /// The sweep, over every directory the cache could be in. This is what the
+    /// app calls; `sweep(in:)` is the rule applied to one of them.
+    ///
+    /// The extra directory only exists while the v5 migration is still owed
+    /// (see `allDirectories`), and a photo aging out in a directory nothing
+    /// enumerates is exactly the retention breach §7 names.
+    @discardableResult
+    static func sweepEverywhere(now: Date = AppClock.now,
+                                maxAge: TimeInterval = BuddyPhotoCache.maxAge,
+                                maxCount: Int = BuddyPhotoCache.maxCount) -> Int {
+        BuddyPhotoCache.allDirectories.reduce(0) { total, directory in
+            total + BuddyPhotoCache.sweep(in: directory, now: now,
+                                          maxAge: maxAge, maxCount: maxCount)
+        }
     }
 
     // MARK: - Internals
