@@ -28,6 +28,11 @@ targets:
       - { package: Adhan }
       - { package: Supabase, product: Supabase }
       - { package: GoogleSignIn, product: GoogleSignIn }
+      # v5 §3 (P2): the widget. An app-extension dependency is EMBEDDED by
+      # XcodeGen (Embed App Extensions → PlugIns/), which is the whole of what
+      # "ships with the app" means for a widget — and it means the app's
+      # scheme builds it, so `build-for-testing` compiles it too.
+      - { target: SalahBuddyWidget }
     info:
       path: Sources/Info.plist
       properties:
@@ -78,6 +83,48 @@ targets:
         # so P2's widget extension brings its OWN file rather than editing this
         # one (an extension must not claim Sign in with Apple or aps-environment).
         CODE_SIGN_ENTITLEMENTS: SalahBuddy.entitlements
+  # v5 §3 (P2) — the widget process.
+  #
+  # It compiles FOUR things and nothing else: its own `Widget/` sources, the
+  # shared `widget.json` contract, `Models.swift` (pure value types — so the
+  # extension speaks the app's `Prayer` and `LogTier` rather than a second copy
+  # of them that could drift) and `Theme.swift` (the palette, for the same
+  # reason). No `GameEngine`, no Adhan, no Supabase, no `Store`, no `AppClock`:
+  # §3 says the widget re-derives nothing, and the surest way to keep a rule
+  # like that is to not give the target the files it would need to break it.
+  SalahBuddyWidget:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: Widget
+      - path: Sources/Shared
+      - path: Sources/Core/Models.swift
+      - path: Sources/UI/Theme.swift
+    info:
+      path: Widget/Info.plist
+      properties:
+        CFBundleDisplayName: SalahBuddy
+        # Same trap the app's Info.plist documents: a literal here WINS over
+        # the build setting, so an extension pinned to "1.0 (1)" would be
+        # rejected at upload for disagreeing with the app it ships inside —
+        # App Store Connect requires the two versions to match exactly, and
+        # ci_post_clone.sh stamps CURRENT_PROJECT_VERSION in this file's
+        # settings.base where BOTH targets inherit it.
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        # The app's id plus a suffix — an extension's bundle id MUST be
+        # prefixed by its host app's, and this one needs its own App ID in the
+        # portal with the App Group (and, for P4, keychain sharing) enabled.
+        PRODUCT_BUNDLE_IDENTIFIER: org.amacvoters.salahbuddymock.widget
+        TARGETED_DEVICE_FAMILY: "1"
+        # Its OWN entitlements file: the App Group it shares with the app, and
+        # nothing the app claims that an extension may not (Sign in with Apple,
+        # aps-environment). See the comments in the file.
+        CODE_SIGN_ENTITLEMENTS: SalahBuddyWidget.entitlements
   SalahBuddyTests:
     type: bundle.unit-test
     platform: iOS

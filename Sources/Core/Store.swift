@@ -23,6 +23,11 @@ enum Store {
     // no network renders the circle and still owes the server the same writes.
     static let circleFile = "circle.json"
     static let outboxFile = "outbox.json"
+    // v5 §3: what the widget reads, and the only file in here another PROCESS
+    // opens. Written through `WidgetFile`'s own coder rather than `save` below,
+    // because the decoder on the other side is a separately compiled binary and
+    // the two have to be defined together — see `WidgetFile`.
+    static let widgetFile = WidgetFile.name
 
     /// Where everything lived before v5, and where it still lives when the App
     /// Group container is unavailable.

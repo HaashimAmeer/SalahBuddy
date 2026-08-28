@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- v5 §2/§3: the widget's half of the shared container.
+
+	     This is the EXTENSION's file, deliberately separate from
+	     SalahBuddy.entitlements. An extension must not claim Sign in with Apple
+	     or aps-environment — those belong to the app, and an extension that
+	     copied them would be asking for capabilities its App ID does not have.
+	     What it does need is the one directory the app writes `widget.json`
+	     into, because a widget is a different process with its own sandbox and
+	     can read nothing else of the app's. -->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.org.amacvoters.salahbuddymock</string>
+	</array>
+	<!-- DORMANT UNTIL P4, and here now because it costs one checkbox in the
+	     portal today and a second visit later.
+
+	     §4's nudge button runs its intent inside THIS process, and it has to
+	     authenticate: `Supa.client` used the Supabase SDK's default
+	     `KeychainLocalStorage()` with no access group, which is invisible to
+	     any process but the app's. The shared group is what makes the session
+	     readable from here. Nothing in P2 opens the Keychain at all.
+
+	     ORDER IS LOAD-BEARING, exactly as it is in the app's file: the first
+	     entry is this process's DEFAULT access group — where an item written
+	     with no group named lands — so the extension's own app-identifier group
+	     stays first and the shared one is additive.
+
+	     §2 teeth #3: whatever P4 builds here must NEVER refresh the session.
+	     Two processes rotating one refresh token invalidate each other; an
+	     expired token in the extension means "deep-link into the app", not
+	     "refresh it myself". -->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)org.amacvoters.salahbuddymock.widget</string>
+		<string>$(AppIdentifierPrefix)group.org.amacvoters.salahbuddymock</string>
+	</array>
+</dict>
+</plist>

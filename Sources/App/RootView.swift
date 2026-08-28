@@ -107,6 +107,14 @@ struct RootView: View {
                     NotificationManager.shared.reschedule()
                     Task { await foregroundCircleSync() }
                 } else if phase == .background {
+                    // v5 §3/§5-A: the moment the app leaves the screen is the
+                    // moment the widget becomes the thing the person is looking
+                    // at — and the only moment worth spending one of the day's
+                    // ~40–70 reloads on. The file itself is already current
+                    // (every mutation rewrites it); this republishes anyway
+                    // because it costs nothing when nothing changed, and asks
+                    // WidgetKit to come and read it.
+                    state.publishWidgetSnapshot(reloadTimelines: true)
                     Task { await backgroundCircleSync() }
                 }
             }

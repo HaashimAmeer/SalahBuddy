@@ -909,6 +909,11 @@ final class AppState: ObservableObject {
     /// last sync left on disk. That is the seam being in place, not wired.
     func applyCircleSnapshot(_ snapshot: CircleSnapshot) {
         circleSnapshot = snapshot
+        // v5 §3: a pull that brought in a friend's post is exactly the change
+        // the home screen exists to show. The file is rewritten here; the
+        // reload it deserves is P3's push-driven one (§5-B) — for now the next
+        // backgrounding, or a window boundary, picks it up.
+        publishWidgetSnapshot()
     }
 
     /// v3.6: the circle as the user shaped it (removals + accepted invites).
@@ -1055,6 +1060,10 @@ final class AppState: ObservableObject {
     /// so it never reaches the network.
     func sendNudge(to member: CircleMember, prayer: Prayer, dayKey: String) {
         nudgesSent.insert(nudgeKey(member: member, prayer: prayer, dayKey: dayKey))
+        // v5 §3: `waiting[].nudgedThisWindow` is what P4's widget button reads
+        // to know it has already been spent. Nudges are session-scoped and
+        // never touch `persist()`, so this is their only way into the file.
+        publishWidgetSnapshot()
         Task { await PushRegistrar.shared.nudge(member: member, dayKey: dayKey, prayer: prayer) }
     }
 
@@ -1879,6 +1888,12 @@ final class AppState: ObservableObject {
         reconcileStreakIfNeeded(now: now, calendar: calendar)
         awardNewlyCompletedChallenges()
 
+        // v5 §3, LAST: the schedule this just recomputed is what decides which
+        // window the home screen is about, and refresh() is the one call that
+        // runs on launch, on foreground, on a day change and on a settings
+        // change. Everything above it may have moved what the widget says.
+        publishWidgetSnapshot()
+
         if settings.useDeviceLocation {
             location.refreshLocation()
         }
@@ -1979,10 +1994,93 @@ final class AppState: ObservableObject {
     private func persist() {
         Store.save(profile, to: Store.profileFile)
         Store.save(logs, to: Store.logsFile)
+        publishWidgetSnapshot()
     }
 
     private func persistProfile() {
         Store.save(profile, to: Store.profileFile)
+        publishWidgetSnapshot()
+    }
+
+    // MARK: - The home screen (v5 §3)
+
+    /// The last thing written to `widget.json`, so an unchanged state costs no
+    /// disk write. Every mutation in this class ends in `persist()` or
+    /// `persistProfile()` and most of them — a tasbih tap, a saved place, a
+    /// settings toggle — move nothing the home screen shows.
+    private var publishedWidgetSnapshot: WidgetSnapshot?
+
+    /// v5 §3: rewrite `widget.json` from the current state.
+    ///
+    /// The widget is a separate process that re-derives NOTHING: no Adhan, no
+    /// `GameEngine`, no simulator, no network. Everything it draws is decided
+    /// here and handed over as a file in the shared container, which is why
+    /// this is called from `persist()`/`persistProfile()` (every local change),
+    /// from `applyCircleSnapshot` (every synced change) and from `refresh()`
+    /// (the clock, the schedule and the day rolling over).
+    ///
+    /// `gridEntries` is the same call the Today grid makes, through the same
+    /// `CircleDataSource` seam — that is §9-03's "demo renders too", and it is
+    /// structural rather than remembered: by the time the builder sees them, a
+    /// simulated buddy and a real friend are the same value type.
+    ///
+    /// `reloadTimelines` is FALSE by default and true from exactly one caller
+    /// (backgrounding, in `RootView`). Writing is cheap; a reload is rationed —
+    /// §5-A's budget is ~40–70 a day — and while the app is on screen the
+    /// widget behind it has nothing to show anybody.
+    func publishWidgetSnapshot(reloadTimelines: Bool = false) {
+        let now: Date = AppClock.now
+        let target: (window: PrayerWindow, dayKey: String)? =
+            WidgetSnapshotBuilder.window(in: todaySchedule, carryOver: liveCarryOverIsha(), now: now)
+
+        var entries: [GridEntry] = []
+        var photoPaths: [String: String] = [:]
+        var nudged: Set<String> = []
+        if let target {
+            let prayer: Prayer = target.window.prayer
+            entries = gridEntries(for: prayer, dayKey: target.dayKey)
+            let source: any CircleDataSource = circleSource
+            for member in source.members {
+                if let path: String = source.photoPath(forMember: member.id, prayer: prayer,
+                                                       dayKey: target.dayKey, asOf: now) {
+                    photoPaths[member.id] = path
+                }
+                if nudgesSent.contains(nudgeKey(member: member, prayer: prayer,
+                                                dayKey: target.dayKey)) {
+                    nudged.insert(member.id)
+                }
+            }
+        }
+
+        let snapshot: WidgetSnapshot = WidgetSnapshotBuilder.make(
+            writtenAt: now,
+            mode: settings.circleMode,
+            streak: profile.streak,
+            window: target,
+            entries: entries,
+            photoPaths: photoPaths,
+            nudgedMemberIDs: nudged,
+            // SPEC-V5 §7: the report hide is applied HERE, as the file is
+            // written, so a photo somebody reported can never surface on their
+            // home screen. See `WidgetSnapshotBuilder.thumb`.
+            hiddenPhotoPaths: PhotoReports.shared.hiddenPaths)
+
+        if publishedWidgetSnapshot?.hasSameContent(as: snapshot) != true {
+            publishedWidgetSnapshot = snapshot
+            WidgetFile.write(snapshot, to: Store.url(for: Store.widgetFile))
+        }
+        if reloadTimelines { WidgetBridge.reloadAllTimelines() }
+    }
+
+    /// Yesterday's isha while it is still the block you are standing in — the
+    /// one window whose schedule day is not today's. `targetWindow` owns that
+    /// decision (it also weighs whether the prayer has been logged), so it is
+    /// asked rather than re-derived; this only names the answer.
+    private func liveCarryOverIsha() -> (window: PrayerWindow, dayKey: String)? {
+        guard let target = targetWindow(for: .isha), target.dayKey == previousDayKey else {
+            return nil
+        }
+        return target
     }
 
     // MARK: - Profile edits
@@ -2150,6 +2248,12 @@ final class AppState: ObservableObject {
         // is the one file that would otherwise keep its old shadow while the
         // live one was replaced.
         Store.delete(Store.settingsFile)
+        // v5 §3: and the home screen, which is the one surface a reset cannot
+        // reach by redrawing. `Store.delete` visits every directory the file
+        // could be in; the memo goes with it so the republish below is not
+        // skipped as "unchanged".
+        Store.delete(Store.widgetFile)
+        publishedWidgetSnapshot = nil
         settings = AppSettings()       // didSet persists + refreshes
         PhotoStore.deleteAll()
         BuddyPhotoCache.deleteAll()
@@ -2157,5 +2261,8 @@ final class AppState: ObservableObject {
         Store.delete(Store.profileFile)
         persist()
         refresh()
+        // The file is current by now (`persist` wrote it), but the tile on the
+        // home screen is still drawing the circle this just erased.
+        WidgetBridge.reloadAllTimelines()
     }
 }

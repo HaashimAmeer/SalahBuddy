@@ -102,6 +102,18 @@ Two consequences that bite if you forget them:
 
 The Supabase session moved with it, into the shared keychain access group (`SessionKeychain`); the old item is read once and re-stored so nobody is signed out by the update, and its removal is confirmed by a re-read behind a second marker (`legacyClearedKey`) so a failed delete cannot leave a live refresh token `signOut()` will never reach.
 
+### The widget — `Widget/` (v5 §3, P2)
+
+A second target, `SalahBuddyWidget` (declared in `project.yml`, embedded in the app because it is listed as a target dependency), with its own bundle id (`…mock.widget`) and its own `SalahBuddyWidget.entitlements`. It ships systemSmall, systemMedium and accessoryRectangular.
+
+**It re-derives nothing.** The app writes `widget.json` into the App Group container and the extension renders it — no `GameEngine`, no Adhan, no `BuddySimulator`, no Supabase, no `Store`, no `AppClock`. That is enforced by what the target compiles, which is only: `Widget/`, `Sources/Shared/WidgetSnapshot.swift` (the file's shape, plus the encoder/decoder pair the two processes must agree on), `Sources/Core/Models.swift` (value types, so the widget speaks the app's `Prayer`/`LogTier`) and `Sources/UI/Theme.swift` (the palette). Adding anything else to that list is the thing to argue about, not to do quietly.
+
+- **The writer** is `AppState.publishWidgetSnapshot()`, called from `persist()`/`persistProfile()` (every local change), `applyCircleSnapshot` (every synced change), `refresh()` and `sendNudge`. It skips the disk write when the content is unchanged (`hasSameContent`).
+- **The shape** is decided by `WidgetSnapshotBuilder` — PURE, in the `GameEngine` sense, and app-side only so the extension cannot call it. Its input is `AppState.gridEntries`, the same call the Today grid makes through the same `CircleDataSource` seam, which is how §9-03 ("the widget renders the demo circle too") is kept structurally rather than by remembering.
+- **§7 lands at write time.** `PhotoReports`' local hide is applied as the file is written (`WidgetSnapshotBuilder.thumb`), so a reported photo's name never reaches the extension; `breakReason` has no field to travel in and `Tests/WidgetSnapshotTests.swift` asserts the file's key set to keep it that way; a person on a break appears in neither `posts` nor `waiting`.
+- **Staying current** is `WidgetSnapshot.timelineDates`/`reloadDate`: entries at the window's boundaries (free re-renders) and one `.after(…)` reload at the last of them, clamped so a time-travelled file cannot park the home screen. `WidgetBridge.reloadAllTimelines()` — the app's only `WidgetKit` import — is spent once per backgrounding. There is NO way for a friend's post to reach a home-screen widget by itself; that is P3's notification service extension.
+- **Time in the extension** comes from the timeline entry's `date`, never a clock: the debug offset lives in the app's `UserDefaults`, which is another process's.
+
 ### The simulated circle — `BuddySimulator` (Sources/Core/BuddySimulator.swift)
 There are no real friends. A fixed pool of buddies has outcomes derived as a **pure function of `(buddyName, dayKey, prayer)`** via FNV-1a seeding + `SplitMix64` (a deterministic PRNG, defined here). A buddy's post only becomes visible once `AppClock.now >= its derived loggedAt`, so the circle "fills in live" and time-travel reproduces it exactly. Buddy photos are never real images — they're seeded SwiftUI illustrations (`PostContent.illustration(seed:)`). `member(for:)` converts a buddy to a `CircleMember`.
 

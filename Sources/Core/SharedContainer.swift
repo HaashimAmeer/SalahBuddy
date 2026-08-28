@@ -26,10 +26,17 @@ enum SharedContainer {
 
     // MARK: - Identifiers
 
-    /// The App Group the app claims today and the widget extension will claim
-    /// in P2. Declared in `SalahBuddy.entitlements` and — the part no build can
-    /// do for itself — toggled on for the App ID in the developer portal.
-    static let appGroupID: String = "group.org.amacvoters.salahbuddymock"
+    /// The App Group the app and the widget extension both claim. Declared in
+    /// `SalahBuddy.entitlements` and `SalahBuddyWidget.entitlements` and — the
+    /// part no build can do for itself — toggled on for both App IDs in the
+    /// developer portal.
+    ///
+    /// v5 §3: spelled in `WidgetFile`, not here, because the widget target
+    /// cannot compile this file (it reaches `PhotoStore` and `BuddyPhotoCache`
+    /// through `ContainerMigration`, and the extension has no business with
+    /// either) — and two spellings of this string is a widget that reads an
+    /// empty sandbox and a bug nobody can see.
+    static let appGroupID: String = WidgetFile.appGroupID
 
     /// The shared keychain access group (SPEC-V5 §2: `<TeamID>.group.…`).
     ///
