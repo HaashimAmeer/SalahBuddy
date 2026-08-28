@@ -1,6 +1,33 @@
 import Foundation
 import SwiftUI
 
+/// What one tap on Post would actually write — see `AppState.postOutlook`.
+///
+/// File scope rather than nested in `AppState` so it stays a plain value with
+/// a plain `==`, usable from anywhere without borrowing the main actor.
+struct PostOutlook: Equatable {
+    /// The prayers the tap appends, in the order they are named: one, or both
+    /// halves of a travel pair posted together. Never empty — a tap that would
+    /// write nothing is `nil`, not an empty outlook.
+    let prayers: [Prayer]
+    /// The tier every one of them lands at. A pair is judged as a pair, against
+    /// the combined window, exactly as `logCombined` judges it.
+    let tier: LogTier
+
+    /// How many logs land — 2 for a travel pair.
+    var count: Int { prayers.count }
+    /// How the camera screens name it: "Asr", or "Dhuhr + Asr".
+    var name: String { GameEngine.postName(prayers) }
+    /// What this same tap earns once the window has closed: a make-up EACH, so
+    /// 10 for a pair. The number the countdown card quotes.
+    var makeUpXP: Int { LogTier.qada.xp * count }
+    /// What it earns right now, jamaat included — a per-prayer tier applied to
+    /// every prayer the tap writes.
+    func xp(jamaat: Bool) -> Int {
+        count * GameEngine.prayerXP(tier: tier, jamaat: jamaat)
+    }
+}
+
 @MainActor
 final class AppState: ObservableObject {
 
@@ -208,11 +235,57 @@ final class AppState: ObservableObject {
         return GameEngine.tier(for: target.window, at: AppClock.now)
     }
 
-    /// The window + schedule-day a log of `prayer` right now would attach to.
+    /// What tapping Post would actually WRITE at `when` — which prayers, at
+    /// which tier — or `nil` when the tap would be refused and nothing at all
+    /// would land.
+    ///
+    /// v4.1: the camera confirm screen's one seam, asked twice — at `now` for
+    /// what the next tap does, and at the window's end for what it will do once
+    /// the deadline passes. Two things depend on it being ONE seam:
+    ///
+    /// - A travel pair is judged against the COMBINED window, exactly the way
+    ///   `logCombined` judges it. The XP line used to read the LEAD prayer's own
+    ///   window while the countdown beside it read the pair's, so at the lead
+    ///   window's end the line vanished ("nothing") while the tap it described
+    ///   still paid in-window XP on the pair.
+    /// - `nil` is REFUSAL, and the screen must never promise a make-up for one.
+    ///   Past the end of a PRE-FAJR yesterday-isha block the live target flips
+    ///   to TONIGHT's isha, which has not opened, so `log` appends nothing at
+    ///   all: no log, no XP, no photo. A card reading "+5 XP, it still counts"
+    ///   over that is worse than the silence it replaced.
+    ///
+    /// It mirrors `logCombined` step for step — including its fallback to `log`
+    /// when the pair cannot be formed — because a second opinion about what a
+    /// tap does is precisely the bug it exists to prevent.
+    func postOutlook(prayer: Prayer, combinedLead: Prayer? = nil,
+                     at when: Date = AppClock.now) -> PostOutlook? {
+        if let lead = combinedLead,
+           let follow = TravelPairs.partner(of: lead),
+           TravelPairs.lead(of: lead) == lead,
+           let combined = combinedWindow(lead: lead),
+           let tier = GameEngine.tier(for: combined, at: when) {
+            let dayKey = todaySchedule?.dayKey ?? todayKey
+            let landing = [lead, follow].filter { !hasLog(prayer: $0, dayKey: dayKey) }
+            return landing.isEmpty ? nil : PostOutlook(prayers: landing, tier: tier)
+        }
+        // Single prayer — and the same fallback `logCombined` itself takes.
+        let single = combinedLead ?? prayer
+        guard let target = targetWindow(for: single, at: when),
+              !hasLog(prayer: single, dayKey: target.dayKey),
+              let tier = GameEngine.tier(for: target.window, at: when) else { return nil }
+        return PostOutlook(prayers: [single], tier: tier)
+    }
+
+    /// The window + schedule-day a log of `prayer` at `now` would attach to.
     /// Handles isha crossing midnight: before today's fajr, an unlogged
     /// yesterday-isha is the live target with YESTERDAY's dayKey.
-    private func targetWindow(for prayer: Prayer) -> (window: PrayerWindow, dayKey: String)? {
-        let now = AppClock.now
+    ///
+    /// v4.1: `now` is a parameter (defaulted to the clock, so every existing
+    /// caller is unchanged) because `postOutlook` has to ask this question
+    /// about a moment that has not arrived yet — what the tap will do once the
+    /// window closes — and the answer is not always "a make-up".
+    private func targetWindow(for prayer: Prayer,
+                              at now: Date = AppClock.now) -> (window: PrayerWindow, dayKey: String)? {
         if prayer == .isha,
            let prev = previousIshaWindow,
            now >= prev.start, now < prev.end,

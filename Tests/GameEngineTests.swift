@@ -1149,15 +1149,59 @@ final class GameEngineTests: XCTestCase {
     }
 
     /// v3.3 travel: one tap, two logs, and the window that lapsed was the
-    /// PAIR's. Both sides land as make-ups, so the notice is owed once and the
-    /// XP it names is the pair's 10 — not 5.
+    /// PAIR's. Both sides land as make-ups, so the notice is owed once.
     func testATravelPairLapsesTogether() {
         let key = "2026-08-22"
         let added = [log(.dhuhr, .qada, dayKey: key), log(.asr, .qada, dayKey: key)]
 
         XCTAssertTrue(GameEngine.lapsedIntoQada(added: added, startedInWindow: true))
-        XCTAssertEqual(added.reduce(0) { $0 + $1.xp }, 2 * LogTier.qada.xp,
-                       "what the notice tells them they earned")
+    }
+
+    /// WHAT THE NOTICE SAYS, which is the half a test can actually get wrong.
+    /// `LapseSummary` is the only thing deciding the name and the number on the
+    /// after-screen, so it is asserted directly: revert it to `added.first`
+    /// and a traveller is told "Dhuhr" and "+5" for two prayers worth 10.
+    func testTheLapseNoticeNamesAndPricesThePairItWrote() {
+        let key = "2026-08-22"
+        let summary = GameEngine.LapseSummary(added: [log(.dhuhr, .qada, dayKey: key),
+                                                      log(.asr, .qada, dayKey: key)])
+
+        XCTAssertEqual(summary.name, "Dhuhr + Asr")
+        XCTAssertEqual(summary.xp, 2 * LogTier.qada.xp, "two make-ups from one tap")
+    }
+
+    /// The ordinary lapse, and the shape the pair case must not break: one
+    /// prayer, its own name, its own 5.
+    func testTheLapseNoticeNamesASinglePrayerPlainly() {
+        let summary = GameEngine.LapseSummary(added: [log(.asr, .qada, dayKey: "2026-08-22")])
+
+        XCTAssertEqual(summary.name, "Asr")
+        XCTAssertEqual(summary.xp, LogTier.qada.xp)
+    }
+
+    /// `logCombined`'s FALLBACK: a pair it could not form posts only its lead,
+    /// and the notice has to describe what landed rather than what was asked
+    /// for — "Dhuhr", 5 — which is exactly why it reads the logs and not the
+    /// camera target.
+    func testTheLapseNoticeDescribesWhatLandedNotWhatWasAskedFor() {
+        let summary = GameEngine.LapseSummary(added: [log(.dhuhr, .qada, dayKey: "2026-08-22")])
+
+        XCTAssertEqual(summary.name, "Dhuhr")
+        XCTAssertEqual(summary.xp, LogTier.qada.xp)
+    }
+
+    /// The BEFORE card and the AFTER screen name the same tap with the same
+    /// joiner, because they call the same function. A pair that reads
+    /// "Dhuhr + Asr" while it is closing must not become "Dhuhr, Asr" the
+    /// moment it has closed.
+    func testTheTwoNoticesNameATapTheSameWay() {
+        let key = "2026-08-22"
+        let landing = GameEngine.postName([.dhuhr, .asr])
+        let landed = GameEngine.LapseSummary(added: [log(.dhuhr, .qada, dayKey: key),
+                                                     log(.asr, .qada, dayKey: key)])
+
+        XCTAssertEqual(landing, landed.name)
+        XCTAssertEqual(GameEngine.postName([.maghrib]), "Maghrib")
     }
 
     // MARK: - What a square draws

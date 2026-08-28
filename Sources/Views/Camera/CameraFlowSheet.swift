@@ -14,6 +14,12 @@ import UIKit
 /// sheet stops dismissing itself and says what happened (`LapsedWindowNotice`).
 /// Capture never warns: there is nothing to lose yet, and a countdown over the
 /// viewfinder would only rush the photo.
+///
+/// Everything the confirm stage promises is asked of ONE seam,
+/// `AppState.postOutlook` — which prayers a tap writes, at which tier, and
+/// whether it writes anything at all. The XP line, the countdown card and the
+/// Post button each read it themselves, on the clock, so they cannot disagree
+/// with each other or with the log that follows.
 struct CameraFlowSheet: View {
     let target: CameraTarget
 
@@ -23,21 +29,9 @@ struct CameraFlowSheet: View {
     @State private var captured: UIImage?
     /// Set ONLY when the window lapsed under this flow and the log landed as a
     /// make-up. On the success path it stays nil and nothing here changes.
-    @State private var lapse: LapseOutcome?
-
-    /// What actually landed, read off the logs rather than off the target, so
-    /// the notice can name it: a travel pair posts two make-ups from one tap
-    /// and is worth 10, not 5 — and a pair that `logCombined` could not form
-    /// after all posted just the one, which this still gets right.
-    private struct LapseOutcome: Equatable {
-        let name: String
-        let xp: Int
-
-        init(_ added: [PrayerLog]) {
-            name = added.map(\.prayer.displayName).joined(separator: " + ")
-            xp = added.reduce(0) { $0 + $1.xp }
-        }
-    }
+    @State private var lapse: GameEngine.LapseSummary?
+    /// One tap is all this screen gets. See `post`.
+    @State private var hasPosted = false
 
     var body: some View {
         ZStack {
@@ -47,6 +41,7 @@ struct CameraFlowSheet: View {
                 LapsedWindowNotice(name: lapse.name, xp: lapse.xp, onDone: { dismiss() })
             } else if let image = captured {
                 PostConfirmView(prayer: target.prayer,
+                                combinedLead: target.combinedLead,
                                 image: image,
                                 windowEnd: target.windowEnd,
                                 onPost: { jamaat, place, placeName in
@@ -86,7 +81,17 @@ struct CameraFlowSheet: View {
     /// exactly the logs this tap wrote — ask them their tier, and a `.qada` out
     /// of a flow that started in-window (`GameEngine.lapsedIntoQada`) holds the
     /// sheet open for one short explanation instead of vanishing on 5 XP.
+    ///
+    /// v4.1: and ONE tap is all it gets. The swap to `LapsedWindowNotice` runs
+    /// under `Theme.spring`, so for the length of that animation the Post
+    /// button is still on screen fading out — and a second tap used to run all
+    /// of this again: another JPEG written, the log refused this time (already
+    /// logged), the JPEG deleted as an orphan, `added` empty, and the `guard`
+    /// below dismissing the very explanation the first tap had just earned.
+    /// Harmless before this screen existed; the whole point of it now.
     private func post(_ image: UIImage, jamaat: Bool, place: PlaceTag?, placeName: String?) {
+        guard !hasPosted else { return }
+        hasPosted = true
         // Photo-save failure (disk) must never lose the prayer: an empty
         // filename from PhotoStore.save is treated as "no photo".
         let saved = PhotoStore.save(image, dayKey: target.dayKey, prayer: target.prayer)
@@ -108,7 +113,7 @@ struct CameraFlowSheet: View {
             dismiss()
             return
         }
-        withAnimation(Theme.spring) { lapse = LapseOutcome(added) }
+        withAnimation(Theme.spring) { lapse = GameEngine.LapseSummary(added: added) }
     }
 }
 
@@ -118,6 +123,11 @@ struct CameraFlowSheet: View {
 /// one-tap place tag + post CTA. Tagging is never required — skipping is fine.
 struct PostConfirmView: View {
     let prayer: Prayer
+    /// v4.1: set when this post is a travel pair (jam'), mirroring
+    /// `CameraTarget.combinedLead`. Both strips below need it: what the tap
+    /// writes is two logs judged against the COMBINED window, and neither the
+    /// XP it promises nor the make-up it warns about is the single-prayer one.
+    let combinedLead: Prayer?
     let image: UIImage
     /// v4.1: when this screen's window closes — see `WindowClosingNotice`.
     let windowEnd: Date
@@ -149,16 +159,16 @@ struct PostConfirmView: View {
 
                 placePicker
 
-                PotentialXPLine(prayer: prayer, jamaat: jamaat, windowEnd: windowEnd)
+                PotentialXPLine(prayer: prayer, combinedLead: combinedLead, jamaat: jamaat)
 
                 // v4.1: sits directly under the XP line because it is that line
                 // that expires. Renders nothing at all until the window is
                 // nearly out, so an ordinary post never sees it.
-                WindowClosingNotice(prayer: prayer, windowEnd: windowEnd)
+                WindowClosingNotice(prayer: prayer, combinedLead: combinedLead,
+                                    windowEnd: windowEnd)
 
                 // v3.9: no circle yet → nowhere to post it "to".
-                ChunkyButton(title: state.isSoloMode ? "Post your prayer 🎉" : "Post to your circle 🎉",
-                             color: Theme.green, isEnabled: true) {
+                PostCTA(prayer: prayer, combinedLead: combinedLead, solo: state.isSoloMode) {
                     onPost(jamaat, place, resolvedPlaceName)
                 }
 
@@ -320,8 +330,8 @@ struct PostConfirmView: View {
 
 // MARK: - Before: the window is about to close (v4.1)
 
-/// The "+30 XP — On time! ⚡" line, unchanged in every pixel — but now on a
-/// clock.
+/// The "+30 XP — On time! ⚡" line, in the same place and the same paint — but
+/// now on a clock, and now quoting the tap it is actually attached to.
 ///
 /// It was a snapshot before: nothing here read the time, so the line kept
 /// promising whatever tier was current when the screen was built. Left alone
@@ -331,24 +341,56 @@ struct PostConfirmView: View {
 /// through the quarters as they pass, and the line leaves the screen at the
 /// same instant `WindowClosingNotice` starts saying the window is gone.
 ///
-/// The tier still comes from `AppState` (it owns the window and the isha
-/// midnight case); `now` is what makes the question get asked again.
+/// It asks `AppState.postOutlook`, the same seam the notice below it asks, and
+/// that is the point: a travel pair used to be priced off the LEAD prayer's own
+/// window while the countdown beside it ran on the pair's, so at Dhuhr's end
+/// the line vanished on a tap that still paid in-window XP for three more
+/// hours. One seam, one window, and the number is the whole tap — 30 for a pair
+/// posting two prayers, not 15 with the other half unmentioned.
 private struct PotentialXPLine: View {
     let prayer: Prayer
+    let combinedLead: Prayer?
     let jamaat: Bool
-    let windowEnd: Date
 
     @EnvironmentObject private var state: AppState
     @Environment(\.appNow) private var now
 
     var body: some View {
-        if GameEngine.lapseNotice(windowEnd: windowEnd, now: now) != .closed,
-           let tier = state.potentialTier(for: prayer), tier.isInWindow {
-            Text("+\(GameEngine.prayerXP(tier: tier, jamaat: jamaat)) XP — \(jamaat ? "Jamaat 🕌" : tier.label)")
+        if let outlook = state.postOutlook(prayer: prayer, combinedLead: combinedLead, at: now),
+           outlook.tier.isInWindow {
+            Text("+\(outlook.xp(jamaat: jamaat)) XP — \(jamaat ? "Jamaat 🕌" : outlook.tier.label)")
                 .font(Theme.sans(15, .bold))
                 .foregroundStyle(Theme.gold)
                 .animation(Theme.spring, value: jamaat)
         }
+    }
+}
+
+/// The Post button — the third small strip on its own clock, for the same
+/// reason as the two above it.
+///
+/// It is off exactly when the tap would be REFUSED: `postOutlook` returning nil
+/// is `AppState.log` appending nothing, and a tap that writes no log, no XP and
+/// no photo must not look like a tap that saves a prayer. Today the one way to
+/// reach that is a pre-fajr yesterday-isha block whose end passed while this
+/// screen was open, and the card directly above says so in words — this is the
+/// button agreeing with it. Every ordinary post sees a live green button, on
+/// every frame, and never learns any of this exists.
+private struct PostCTA: View {
+    let prayer: Prayer
+    let combinedLead: Prayer?
+    let solo: Bool
+    let onPost: () -> Void
+
+    @EnvironmentObject private var state: AppState
+    @Environment(\.appNow) private var now
+
+    var body: some View {
+        ChunkyButton(title: solo ? "Post your prayer 🎉" : "Post to your circle 🎉",
+                     color: Theme.green,
+                     isEnabled: state.postOutlook(prayer: prayer, combinedLead: combinedLead,
+                                                  at: now) != nil,
+                     action: onPost)
     }
 }
 
@@ -361,25 +403,80 @@ private struct PotentialXPLine: View {
 /// minutes this renders EMPTY, so an ordinary post is untouched — it never
 /// even learns the screen had a deadline.
 ///
-/// `GameEngine.lapseNotice` decides; this only draws. Amber, because amber is
-/// how this app raises its voice (`Theme.mist` for missed, never red).
+/// `GameEngine.lapseNotice` decides WHEN; `AppState.postOutlook` decides what
+/// it is allowed to promise. This only draws. Amber, because amber is how this
+/// app raises its voice (`Theme.mist` for missed, never red).
+///
+/// The make-up it names is asked for, never assumed. Two reasons, and the
+/// second one is why this card is worth its complexity:
+///
+/// - A travel pair posts TWO make-ups from one tap, so the number is 10.
+///   Hard-coding `qada.xp` had this card saying 5 and `LapsedWindowNotice`
+///   saying 10 about the same tap, thirty seconds apart.
+/// - Sometimes there is no make-up at all. Past the end of a PRE-FAJR
+///   yesterday-isha block, `AppState.log` refuses outright — tonight's isha has
+///   not opened — and nothing whatsoever is written. Promising "+5 XP, it still
+///   counts" there would be a false confirmation of a save on the one screen
+///   this exists to make honest, so `postOutlook` is asked at the deadline (for
+///   the countdown's tail) and at `now` (for the closed card), and when the
+///   answer is `nil` the copy says what really happens instead.
 private struct WindowClosingNotice: View {
     let prayer: Prayer
+    let combinedLead: Prayer?
     let windowEnd: Date
 
+    @EnvironmentObject private var state: AppState
     @Environment(\.appNow) private var now
 
     var body: some View {
+        let landing = outlook(at: now)
         switch GameEngine.lapseNotice(windowEnd: windowEnd, now: now) {
         case .none:
             EmptyView()
         case .closingSoon:
-            notice(headline: "\(prayer.displayName) closes in \(HomeTimeFormat.countdown(to: windowEnd, from: now))",
-                   detail: "Post before then to keep this XP. After that it saves as a make-up (+\(LogTier.qada.xp) XP) and the photo isn't kept.")
+            notice(headline: "\(name(landing)) closes in \(HomeTimeFormat.countdown(to: windowEnd, from: now))",
+                   detail: detail(afterTheDeadline: outlook(at: windowEnd)))
         case .closed:
-            notice(headline: "\(prayer.displayName)'s window has closed",
-                   detail: "Posting now saves it as a make-up (+\(LogTier.qada.xp) XP), and the photo isn't kept. It still counts 💙")
+            notice(headline: "\(name(landing))'s window has closed",
+                   detail: closedDetail(landing))
         }
+    }
+
+    /// What a tap at `when` would actually write, or nil if it would be refused.
+    private func outlook(at when: Date) -> PostOutlook? {
+        state.postOutlook(prayer: prayer, combinedLead: combinedLead, at: when)
+    }
+
+    /// What is closing. The outlook names it when there is one (a pair reads
+    /// "Dhuhr + Asr"); past a refusal there is no outlook left to ask, so fall
+    /// back to what the flow set out to post.
+    private func name(_ landing: PostOutlook?) -> String {
+        landing?.name ?? GameEngine.postName(pairOrSingle)
+    }
+
+    private var pairOrSingle: [Prayer] {
+        guard let lead = combinedLead, let follow = TravelPairs.partner(of: lead) else {
+            return [prayer]
+        }
+        return [lead, follow]
+    }
+
+    /// The countdown's second line: what the NEXT tap does once the clock runs
+    /// out — a make-up, or nothing at all.
+    private func detail(afterTheDeadline after: PostOutlook?) -> String {
+        guard let after, after.tier == .qada else {
+            return "Post before then — once it closes there's nothing left here to save it to."
+        }
+        return "Post before then to keep this XP. After that it saves as a make-up (+\(after.makeUpXP) XP) and the photo isn't kept."
+    }
+
+    /// The closed card. `landing` is what a tap right now would write, so the
+    /// promise is not a prediction at all — it is the current answer.
+    private func closedDetail(_ landing: PostOutlook?) -> String {
+        guard let landing, landing.tier == .qada else {
+            return "It closed before this was posted, so there's nothing left here to save it to and the photo isn't kept. You can still mark it made up from that day in Journey 💙"
+        }
+        return "Posting now saves it as a make-up (+\(landing.makeUpXP) XP), and the photo isn't kept. It still counts 💙"
     }
 
     private func notice(headline: String, detail: String) -> some View {
@@ -419,6 +516,10 @@ private struct WindowClosingNotice: View {
 ///
 /// It is deliberately a dead end with one way out: dismissing itself after a
 /// beat would put it back in the category of things you can miss.
+///
+/// Both numbers come from `GameEngine.LapseSummary`, which reads the logs that
+/// landed — pure, and tested, because a summed XP living beside its own label
+/// in a view file is exactly where "+10" quietly goes back to being "+5".
 private struct LapsedWindowNotice: View {
     /// The prayer, or the travel pair posted as one.
     let name: String

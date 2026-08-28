@@ -619,6 +619,39 @@ enum GameEngine {
         return added.contains { $0.tier == .qada }
     }
 
+    /// How the camera screens name what ONE tap writes: "Asr", or "Dhuhr + Asr"
+    /// for a travel pair posted together.
+    ///
+    /// One joiner, used by the notice that warns BEFORE the window closes and
+    /// by the one that explains it AFTER, so the two can never name the same
+    /// tap differently.
+    static func postName(_ prayers: [Prayer]) -> String {
+        prayers.map(\.displayName).joined(separator: " + ")
+    }
+
+    /// What the AFTER notice says landed: the prayer — or the travel pair
+    /// posted as one — and the XP it actually earned.
+    ///
+    /// Read off the logs `AppState.log`/`logCombined` APPENDED rather than off
+    /// the camera target, so a pair reads "Dhuhr + Asr" and 10 rather than
+    /// "Dhuhr" and 5, and a pair that `logCombined` could not form after all
+    /// (it falls back to posting just the lead) reads the one it wrote.
+    ///
+    /// Pure, and HERE rather than in the view file it is rendered from, because
+    /// a summed number living beside its own label is exactly where a "+5" that
+    /// should say "+10" goes back to being wrong with nothing to catch it.
+    struct LapseSummary: Equatable {
+        /// The prayer, or the pair, named the way the confirm screen names it.
+        let name: String
+        /// The sum of what landed — 5 for one make-up, 10 for a pair.
+        let xp: Int
+
+        init(added: [PrayerLog]) {
+            name = GameEngine.postName(added.map(\.prayer))
+            xp = added.reduce(0) { $0 + $1.xp }
+        }
+    }
+
     /// The log that REPRESENTS `(prayer, dayKey)` in a view of a PAST day — a
     /// week-grid cell, a memory, a day sheet.
     ///
