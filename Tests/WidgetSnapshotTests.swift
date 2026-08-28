@@ -285,7 +285,8 @@ final class WidgetSnapshotTests: XCTestCase {
                              hidden: Set<String> = [],
                              extraPosts: [RemotePost] = [],
                              excused: [RemoteExcusedDay] = [],
-                             nudged: Set<String> = []) -> WidgetSnapshot {
+                             nudged: Set<String> = [],
+                             isCarryOver: Bool = false) -> WidgetSnapshot {
         let day = fixedDay()
         let window: PrayerWindow = day.schedule.window(for: .asr)!
         let me = UUID(), mina = UUID(), harun = UUID(), zayd = UUID()
@@ -308,6 +309,7 @@ final class WidgetSnapshotTests: XCTestCase {
             window: (window, day.dayKey),
             entries: entries(source: source, you: you(), yourState: yourState,
                              prayer: .asr, dayKey: day.dayKey, window: window, now: now),
+            isCarryOverWindow: isCarryOver,
             photoPaths: photoPaths(source: source, prayer: .asr, dayKey: day.dayKey, now: now),
             nudgedMemberIDs: nudged,
             hiddenPhotoPaths: hidden)
@@ -411,6 +413,81 @@ final class WidgetSnapshotTests: XCTestCase {
         XCTAssertEqual(built.circle.waiting.map { $0.name }, ["Zayd"])
         XCTAssertEqual(built.circle.waiting.first?.emoji, "🎧")
         XCTAssertFalse(built.circle.waiting[0].nudgedThisWindow)
+    }
+
+    /// The case the name above always claimed and never checked.
+    ///
+    /// `window(in:carryOver:now:)` answers the NEXT window when nothing is
+    /// open — the tile has to say "Dhuhr, opens 1:00 PM" — and both seams call
+    /// a friend `.waiting` for a window that has not started (`.missed` only
+    /// arrives at `window.end`). Fold those together without a gate and the
+    /// medium tile reads "Waiting on Mina, Harun, Zayd" two hours before
+    /// Dhuhr, and P4's button, which spends `waiting[]` verbatim, sends three
+    /// people a push asking whether they have prayed a prayer whose time has
+    /// not come in.
+    func testNobodyIsWaitingOnAWindowThatHasNotOpened() {
+        let day = fixedDay()
+        let window = day.schedule.window(for: .asr)!
+        let built = realFixture(now: window.start.addingTimeInterval(-30 * 60))
+
+        XCTAssertTrue(built.circle.waiting.isEmpty,
+                      "named as outstanding: \(built.circle.waiting.map { $0.name })")
+        // And the rest of the tile is still true about the window ahead.
+        XCTAssertEqual(built.circle.memberCount, 4)
+        XCTAssertEqual(built.circle.prayedCount, 0)
+        XCTAssertEqual(built.window?.prayer, .asr)
+    }
+
+    /// SPEC v3.6's rule, which the Today screen has always applied
+    /// (`TodayBlocks.nudgeEligible`): praying five minutes into Asr is not
+    /// late. The home screen offers the same nudges or it offers wrong ones.
+    func testTheFirstHalfHourOfAWindowHasNoNudgeTargets() {
+        let day = fixedDay()
+        let window = day.schedule.window(for: .asr)!
+
+        let early = realFixture(now: window.start.addingTimeInterval(29 * 60))
+        XCTAssertTrue(early.circle.waiting.isEmpty)
+        // Mina, who posted five minutes in, is on the tile the whole time —
+        // the gate is about who is LATE, not about what the window shows.
+        XCTAssertEqual(early.circle.prayedCount, 1)
+
+        let onTheGrace = realFixture(now: window.start.addingTimeInterval(30 * 60))
+        XCTAssertEqual(onTheGrace.circle.waiting.map { $0.name }, ["Harun", "Zayd"])
+    }
+
+    /// Between midnight and fajr the live window is yesterday's isha, and the
+    /// app refuses to nudge in it (`!block.isYesterdayIsha`). 1 AM is nobody's
+    /// reminder hour, and the home screen is the surface where a person cannot
+    /// even see what is being offered on their behalf.
+    func testTheCarryOverIshaHasNoNudgeTargetsEither() {
+        let day = fixedDay()
+        let window = day.schedule.window(for: .asr)!
+        let now = window.start.addingTimeInterval(80 * 60)
+
+        XCTAssertEqual(realFixture(now: now).circle.waiting.map { $0.name }, ["Zayd"])
+        XCTAssertTrue(realFixture(now: now, isCarryOver: true).circle.waiting.isEmpty)
+    }
+
+    /// The gate itself, at its four edges.
+    func testTheNudgeGateItself() {
+        let day = fixedDay()
+        let window = day.schedule.window(for: .asr)!
+        let grace: TimeInterval = WidgetSnapshotBuilder.nudgeGrace
+        XCTAssertEqual(grace, 30 * 60)
+
+        func allowed(_ offset: TimeInterval, carryOver: Bool = false) -> Bool {
+            WidgetSnapshotBuilder.nudgesAllowed(window: window, isCarryOver: carryOver,
+                                                now: window.start.addingTimeInterval(offset))
+        }
+        XCTAssertFalse(allowed(-1))                       // not open
+        XCTAssertFalse(allowed(0))                        // open, nobody is late yet
+        XCTAssertFalse(allowed(grace - 1))
+        XCTAssertTrue(allowed(grace))
+        XCTAssertTrue(allowed(window.end.timeIntervalSince(window.start) - 1))
+        XCTAssertFalse(allowed(window.end.timeIntervalSince(window.start)))   // closed
+        XCTAssertFalse(allowed(grace, carryOver: true))
+        XCTAssertFalse(WidgetSnapshotBuilder.nudgesAllowed(window: nil, isCarryOver: false,
+                                                           now: window.start))
     }
 
     func testAMissedWindowIsNotANudgeTarget() {
@@ -693,8 +770,13 @@ final class WidgetSnapshotTests: XCTestCase {
     }
 
     /// A DEBUG clock that has time-travelled forward writes boundaries days
-    /// away. Without the clamp the home screen would freeze until the next
-    /// launch.
+    /// away, and the home screen must not freeze until the next launch.
+    ///
+    /// Note WHICH mechanism answers: `timelineDates` drops a boundary past the
+    /// `maxWait` horizon, so `reloadDate` falls through to `stalePeriod` and
+    /// asks again in an hour — that is the hour asserted below. The clamp is
+    /// the backstop under it and is tested on its own (`clampedReload`), since
+    /// nothing reaching this path can exercise its upper end.
     func testATimeTravelledFileCannotParkTheWidgetForever() {
         let now = date(2026, 6, 10, 12, 0)
         let snapshot = WidgetSnapshot(
@@ -731,6 +813,27 @@ final class WidgetSnapshotTests: XCTestCase {
         XCTAssertEqual(snapshot.timelineDates(from: now), [now])
         XCTAssertEqual(snapshot.reloadDate(from: now),
                        now.addingTimeInterval(WidgetSnapshot.stalePeriod))
+    }
+
+    /// The clamp on its own, both ends.
+    ///
+    /// The upper end cannot be reached through `reloadDate` today — the
+    /// horizon filter in `timelineDates` gets there first — which is exactly
+    /// why it is asserted here instead of being trusted. If that filter is
+    /// ever relaxed, this is the thing standing between a widget and a reload
+    /// date days away.
+    func testTheReloadClampHoldsBothEnds() {
+        let now = date(2026, 6, 10, 12, 0)
+
+        XCTAssertEqual(WidgetSnapshot.clampedReload(now.addingTimeInterval(1), from: now),
+                       now.addingTimeInterval(WidgetSnapshot.minWait))
+        XCTAssertEqual(WidgetSnapshot.clampedReload(now.addingTimeInterval(-86_400), from: now),
+                       now.addingTimeInterval(WidgetSnapshot.minWait))
+        XCTAssertEqual(WidgetSnapshot.clampedReload(now.addingTimeInterval(4 * 86_400), from: now),
+                       now.addingTimeInterval(WidgetSnapshot.maxWait))
+        // In between, the target is its own answer.
+        let inBand: Date = now.addingTimeInterval(2 * 3600)
+        XCTAssertEqual(WidgetSnapshot.clampedReload(inBand, from: now), inBand)
     }
 
     // MARK: - Writing only when something changed

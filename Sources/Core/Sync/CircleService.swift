@@ -1059,6 +1059,20 @@ final class PhotoReports: ObservableObject {
 
     func isHidden(_ path: String) -> Bool { hiddenPaths.contains(path) }
 
+    #if DEBUG
+    /// Tests only: forget one hide again.
+    ///
+    /// The app has no unhide and must not grow one — a report is meant to
+    /// stick, and §7 is explicit that a hidden photo coming back is the worst
+    /// outcome here. But `shared` is process-wide, so a test that files a
+    /// report leaves it in place for every test that runs after it. Same
+    /// reasoning, and the same DEBUG fence, as `LocationProvider`'s
+    /// `simulateDeviceFix`.
+    func forgetHideForTesting(_ path: String) {
+        hiddenPaths.remove(path)
+    }
+    #endif
+
     /// Reports still owed to the server — for tests, and for anything that
     /// wants to know the queue is empty.
     var pendingCount: Int { pending.count }

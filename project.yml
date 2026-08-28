@@ -119,6 +119,12 @@ targets:
         # The app's id plus a suffix — an extension's bundle id MUST be
         # prefixed by its host app's, and this one needs its own App ID in the
         # portal with the App Group (and, for P4, keychain sharing) enabled.
+        #
+        # THAT PORTAL STEP GATES THE MERGE, not the other way round: every
+        # automated check here builds unsigned for the simulator and stays
+        # green without it, and the first thing to notice is Xcode Cloud's
+        # Archive failing on `staging` with no build reaching TestFlight. See
+        # "A new TARGET is a portal step" in XCODE-CLOUD.md.
         PRODUCT_BUNDLE_IDENTIFIER: org.amacvoters.salahbuddymock.widget
         TARGETED_DEVICE_FAMILY: "1"
         # Its OWN entitlements file: the App Group it shares with the app, and

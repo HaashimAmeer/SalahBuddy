@@ -2030,8 +2030,15 @@ final class AppState: ObservableObject {
     /// widget behind it has nothing to show anybody.
     func publishWidgetSnapshot(reloadTimelines: Bool = false) {
         let now: Date = AppClock.now
+        let carryOver: (window: PrayerWindow, dayKey: String)? = liveCarryOverIsha()
         let target: (window: PrayerWindow, dayKey: String)? =
-            WidgetSnapshotBuilder.window(in: todaySchedule, carryOver: liveCarryOverIsha(), now: now)
+            WidgetSnapshotBuilder.window(in: todaySchedule, carryOver: carryOver, now: now)
+        // Whether the window we landed on is yesterday's isha. The builder
+        // cannot tell from the tuple (a dayKey is not a provenance) and the
+        // nudge gate has to know: the Today screen refuses to nudge in that
+        // block, so the home screen must too.
+        let isCarryOver: Bool = target != nil && carryOver != nil
+            && target?.dayKey == carryOver?.dayKey
 
         var entries: [GridEntry] = []
         var photoPaths: [String: String] = [:]
@@ -2058,6 +2065,7 @@ final class AppState: ObservableObject {
             streak: profile.streak,
             window: target,
             entries: entries,
+            isCarryOverWindow: isCarryOver,
             photoPaths: photoPaths,
             nudgedMemberIDs: nudged,
             // SPEC-V5 §7: the report hide is applied HERE, as the file is
@@ -2066,8 +2074,15 @@ final class AppState: ObservableObject {
             hiddenPhotoPaths: PhotoReports.shared.hiddenPaths)
 
         if publishedWidgetSnapshot?.hasSameContent(as: snapshot) != true {
-            publishedWidgetSnapshot = snapshot
-            WidgetFile.write(snapshot, to: Store.url(for: Store.widgetFile))
+            // The memo records what is ON DISK, so it is only earned by a write
+            // that succeeded. Set it first and a single failure (no space, or
+            // `widget.json` replaced by something that is not a file) would be
+            // permanent: every later publish of the same content would take the
+            // unchanged early-out and the home screen would keep drawing the
+            // previous file until something else moved.
+            if WidgetFile.write(snapshot, to: Store.url(for: Store.widgetFile)) {
+                publishedWidgetSnapshot = snapshot
+            }
         }
         if reloadTimelines { WidgetBridge.reloadAllTimelines() }
     }

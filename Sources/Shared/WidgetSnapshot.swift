@@ -57,11 +57,19 @@ struct WidgetSnapshot: Codable, Equatable, Sendable {
         var memberCount: Int
         /// Newest first, capped at `WidgetSnapshot.postCap`.
         var posts: [Post]
-        /// Whose window is still open and still empty — the §4 nudge targets,
-        /// which is why this one carries an id and the posts do not. Never you
-        /// (you cannot nudge yourself) and never somebody resting (§7: a rest
-        /// day syncs as a bare flag, and nudging a person who has told you they
-        /// cannot pray is the exact wrong thing to do with that flag).
+        /// The §4 nudge targets, which is why this one carries an id and the
+        /// posts do not — and why it is NOT simply "everybody who has not
+        /// posted". It is empty until the window has been open for half an
+        /// hour, and it stays empty for the carry-over isha; the app applies
+        /// exactly those gates on the Today screen and this file is where they
+        /// reach the home screen (`WidgetSnapshotBuilder.nudgesAllowed`).
+        /// Never you (you cannot nudge yourself) and never somebody resting
+        /// (§7: a rest day syncs as a bare flag, and nudging a person who has
+        /// told you they cannot pray is the exact wrong thing to do with it).
+        ///
+        /// A window with nobody nudgeable is not a window with nobody left to
+        /// pray: `prayedCount`/`memberCount` are the honest count from the
+        /// first second.
         var waiting: [Waiting]
     }
 
@@ -123,6 +131,11 @@ struct WidgetSnapshot: Codable, Equatable, Sendable {
     /// are timeline ENTRIES rather than reloads: WidgetKit draws them from the
     /// snapshot it already has, and the reload budget stays for the reloads
     /// that need fresh data.
+    /// The horizon drop is what actually handles a time-travelled file: a
+    /// boundary four days out is not scheduled at all, so `reloadDate` falls
+    /// through to `stalePeriod` and asks again in an hour rather than parking
+    /// until then. `clampedReload` is the backstop under that, not the thing
+    /// doing the work — see its note.
     func timelineDates(from now: Date) -> [Date] {
         var dates: [Date] = [now]
         guard let window else { return dates }
@@ -134,14 +147,30 @@ struct WidgetSnapshot: Codable, Equatable, Sendable {
         return dates
     }
 
-    /// When WidgetKit should come back for a NEW timeline — i.e. re-read the
-    /// file. The next boundary, clamped at both ends (see the constants above).
-    func reloadDate(from now: Date) -> Date {
-        let upcoming: [Date] = timelineDates(from: now).dropFirst().sorted()
-        let target: Date = upcoming.last ?? now.addingTimeInterval(WidgetSnapshot.stalePeriod)
+    /// Hold a reload target inside the band a widget may wait: never sooner
+    /// than `minWait` (a boundary one second away is still a whole reload out
+    /// of §5-A's budget), never later than `maxWait`.
+    ///
+    /// **Honest about which half is load-bearing.** Today only the lower clamp
+    /// can bind through `reloadDate`, because `timelineDates` has already
+    /// dropped every boundary past the same horizon — the upper one is the
+    /// guard that keeps `maxWait` true if that filter is ever relaxed (say to
+    /// schedule an entry at a distant window open). A backstop nothing can
+    /// reach is a backstop nothing can test, so it is a function of its own and
+    /// tested directly rather than only through its caller.
+    static func clampedReload(_ target: Date, from now: Date) -> Date {
         let earliest: Date = now.addingTimeInterval(WidgetSnapshot.minWait)
         let latest: Date = now.addingTimeInterval(WidgetSnapshot.maxWait)
         return min(max(target, earliest), latest)
+    }
+
+    /// When WidgetKit should come back for a NEW timeline — i.e. re-read the
+    /// file. The last boundary worth waiting for, or an hour when there is
+    /// nothing to wait for, clamped (see the constants above).
+    func reloadDate(from now: Date) -> Date {
+        let upcoming: [Date] = timelineDates(from: now).dropFirst().sorted()
+        let target: Date = upcoming.last ?? now.addingTimeInterval(WidgetSnapshot.stalePeriod)
+        return WidgetSnapshot.clampedReload(target, from: now)
     }
 
     /// Whether this says the same thing as `other`, ignoring when it was said.

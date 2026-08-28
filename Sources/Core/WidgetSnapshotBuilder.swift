@@ -49,6 +49,43 @@ enum WidgetSnapshotBuilder {
         return (last, schedule.dayKey)
     }
 
+    // MARK: - Who can be nudged (SPEC-V5 §3/§4)
+
+    /// How long a window has to have been open before the people still in it
+    /// count as outstanding.
+    ///
+    /// v3.6's rule, and it lives here so the home screen and the Today screen
+    /// cannot offer different nudges: `TodayBlocks.nudgeEligible` reads this
+    /// same number. Praying five minutes into Asr is not late, and a push that
+    /// says otherwise is the fastest way to make somebody delete a widget.
+    static let nudgeGrace: TimeInterval = 30 * 60
+
+    /// Whether this window's still-empty friends are nudge targets YET.
+    ///
+    /// `waiting` is not "everyone who has not posted" — §3 calls it the nudge
+    /// list and P4's button spends it verbatim, so it carries the app's own
+    /// gate rather than a looser one. Three conditions, all of them the Today
+    /// screen's (`TodayBlocks.nudgeRow`):
+    ///
+    /// 1. **The window is OPEN.** `window(in:carryOver:now:)` deliberately
+    ///    answers the NEXT window when nothing is open, because the tile still
+    ///    has to say "Dhuhr, opens 1:00 PM". Naming three people as outstanding
+    ///    for a prayer whose time has not come in is a different claim, and a
+    ///    wrong one.
+    /// 2. **Thirty minutes in** (`nudgeGrace`).
+    /// 3. **Not the carry-over isha.** Between midnight and fajr the live
+    ///    window belongs to yesterday; the app refuses to nudge there
+    ///    (`!block.isYesterdayIsha`) and so does this — 1 AM is nobody's
+    ///    reminder hour.
+    ///
+    /// A person who is merely still to pray remains visible in the counts —
+    /// "2 of 5 prayed" is true from the first second of the window.
+    static func nudgesAllowed(window: PrayerWindow?, isCarryOver: Bool, now: Date) -> Bool {
+        guard let window, !isCarryOver else { return false }
+        guard now < window.end else { return false }
+        return now >= window.start.addingTimeInterval(nudgeGrace)
+    }
+
     // MARK: - Photos (SPEC-V5 §7, reports)
 
     /// The `thumb` a post gets: the buddy-photo cache key for its Storage path,
@@ -80,8 +117,14 @@ enum WidgetSnapshotBuilder {
     /// Fold one window's grid entries into the file the widget reads.
     ///
     /// - Parameters:
+    ///   - writtenAt: `AppClock.now`. It is the file's timestamp AND the
+    ///     moment every time-dependent decision here is made against — there
+    ///     is no clock in this file to read instead, which is the point.
     ///   - entries: `AppState.gridEntries` for this window — buddies through
     ///     the seam, you last.
+    ///   - isCarryOverWindow: whether `window` is yesterday's isha, still open
+    ///     before today's fajr. Only `AppState` can tell (the tuple carries a
+    ///     dayKey, not a provenance), and only the nudge gate cares.
     ///   - photoPaths: member id → the Storage path behind that member's post,
     ///     from `CircleDataSource.photoPath`. Absent for demo buddies (their
     ///     posts are seeded illustrations) and for you.
@@ -92,6 +135,7 @@ enum WidgetSnapshotBuilder {
                      streak: Int,
                      window: (window: PrayerWindow, dayKey: String)?,
                      entries: [GridEntry],
+                     isCarryOverWindow: Bool = false,
                      photoPaths: [String: String] = [:],
                      nudgedMemberIDs: Set<String> = [],
                      hiddenPhotoPaths: Set<String> = []) -> WidgetSnapshot {
@@ -100,6 +144,9 @@ enum WidgetSnapshotBuilder {
         var waiting: [WidgetSnapshot.Waiting] = []
         var prayedCount: Int = 0
         var youLogged: Bool = false
+        let canNudge: Bool = nudgesAllowed(window: window?.window,
+                                           isCarryOver: isCarryOverWindow,
+                                           now: writtenAt)
 
         for entry in entries {
             let member: CircleMember = entry.member
@@ -117,12 +164,15 @@ enum WidgetSnapshotBuilder {
                 posts.append(post(member: member, tier: .qada, at: at,
                                   photoPaths: photoPaths, hiddenPhotoPaths: hiddenPhotoPaths))
             case .waiting:
-                // A nudge target is somebody whose window is still OPEN and
-                // still empty. You are never one (`.isYou`), and neither is a
-                // person resting — `.excused` falls through below, and it must,
-                // because §7's break flag exists to be gentle with and a nudge
-                // is the opposite of gentle.
-                guard !member.isYou else { continue }
+                // A nudge target is somebody whose window has been OPEN long
+                // enough to be late in, and is still empty (`canNudge`, above —
+                // the seams answer `.waiting` for a window that has not opened
+                // yet, which is a person with nothing to answer for). You are
+                // never one (`.isYou`), and neither is a person resting —
+                // `.excused` falls through below, and it must, because §7's
+                // break flag exists to be gentle with and a nudge is the
+                // opposite of gentle.
+                guard canNudge, !member.isYou else { continue }
                 waiting.append(WidgetSnapshot.Waiting(
                     userID: member.id,
                     name: displayName(member),

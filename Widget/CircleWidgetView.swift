@@ -161,11 +161,21 @@ private struct SmallCircleView: View {
 /// §3: the same window, plus this window's posts as a 4-up row. The photos and
 /// the nudge button that finish this family arrive in P3 and P4; what is here
 /// is names, tiers and counts, which is the whole of P2.
+///
+/// **The width budget, because a widget cannot scroll and silently clips
+/// instead.** A systemMedium tile is 321pt wide on the narrowest phone iOS 18
+/// runs on (375pt class) and the system takes 16pt of margin each side, so the
+/// content is 289pt — not the 329/364 of the bigger phones. Four chips is the
+/// case §3 asks for and therefore the case that has to fit: 104 (left column)
+/// + 10 (gap) leaves 175, and four chips with three 6pt gaps come to 39pt
+/// each. `PostChip` is capped rather than fixed so that arithmetic is the
+/// worst case and not the only one — on a 430pt phone the same four chips draw
+/// at their full 44 and the row simply stops there.
 private struct MediumCircleView: View {
     let model: CircleWidgetModel
 
     var body: some View {
-        HStack(alignment: .top, spacing: 14) {
+        HStack(alignment: .top, spacing: 10) {
             VStack(alignment: .leading, spacing: 0) {
                 WindowHeader(model: model)
                 Spacer(minLength: 4)
@@ -185,7 +195,7 @@ private struct MediumCircleView: View {
                         .padding(.top, 6)
                 }
             }
-            .frame(width: 116, alignment: .leading)
+            .frame(width: 104, alignment: .leading)
 
             VStack(alignment: .leading, spacing: 6) {
                 if model.posts.isEmpty {
@@ -195,11 +205,16 @@ private struct MediumCircleView: View {
                         .foregroundStyle(WidgetTheme.inkMuted)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 } else {
-                    HStack(alignment: .top, spacing: 8) {
+                    // No trailing `Spacer` on purpose: a spacer is a subview
+                    // and takes an equal share of a crowded row, which would
+                    // squeeze four chips to make room for nothing. Under-full
+                    // the stack is simply narrower than the column and the
+                    // enclosing `.leading` alignment packs it left; over-full
+                    // every chip gives up the same width.
+                    HStack(alignment: .top, spacing: 6) {
                         ForEach(Array(model.posts.enumerated()), id: \.offset) { _, post in
                             PostChip(post: post)
                         }
-                        Spacer(minLength: 0)
                     }
                 }
                 Spacer(minLength: 0)
@@ -283,19 +298,38 @@ private struct CountTrack: View {
 }
 
 /// The circle as a row of faces: who has prayed, then — dimmed — who has not.
+///
+/// Capped, for the same reason the medium row is: a systemSmall tile is 141pt
+/// on the narrowest supported phone, so 109pt of content, and an emoji at 14pt
+/// costs about 17 of them. Four faces and an overflow count come to ~95pt; the
+/// seven a full circle could offer come to ~140pt and the last three would be
+/// drawn straight off the edge of the tile, because a widget has no scroll view
+/// to put them in.
 private struct FaceRow: View {
     let model: CircleWidgetModel
 
-    private var prayed: [String] { model.posts.map { $0.emoji } }
-    private var pending: [String] { model.waiting.prefix(3).map { $0.emoji } }
+    private static let maxFaces: Int = 4
+
+    /// Prayed first, then whoever is still to pray — the reading order of the
+    /// count above it.
+    private var faces: [(emoji: String, dimmed: Bool)] {
+        model.posts.map { ($0.emoji, false) } + model.waiting.map { ($0.emoji, true) }
+    }
 
     var body: some View {
+        let all: [(emoji: String, dimmed: Bool)] = faces
+        let shown: [(emoji: String, dimmed: Bool)] = Array(all.prefix(FaceRow.maxFaces))
+        let more: Int = all.count - shown.count
         HStack(spacing: 3) {
-            ForEach(Array(prayed.enumerated()), id: \.offset) { _, emoji in
-                Text(emoji).font(.system(size: 15))
+            ForEach(Array(shown.enumerated()), id: \.offset) { _, face in
+                Text(face.emoji)
+                    .font(.system(size: 14))
+                    .opacity(face.dimmed ? 0.32 : 1)
             }
-            ForEach(Array(pending.enumerated()), id: \.offset) { _, emoji in
-                Text(emoji).font(.system(size: 15)).opacity(0.32)
+            if more > 0 {
+                Text("+\(more)")
+                    .font(Theme.sans(10, .semibold))
+                    .foregroundStyle(WidgetTheme.inkMuted)
             }
             Spacer(minLength: 0)
         }
@@ -305,8 +339,18 @@ private struct FaceRow: View {
 
 /// One post: emoji, name, and the grid's tier colour underneath it. The photo
 /// this chip will carry is P3's; the tier bar is what says "on time" today.
+///
+/// **Capped, never fixed.** A hard `.frame(width:)` here is what clipped the
+/// fourth friend off the medium tile: four of them plus the left column came to
+/// 338pt against a content width of 289–332, and a widget has no way to say so
+/// — it just draws past its own rounded corner. Everything below is either
+/// flexible or scales, so the row fits by giving up a few points per chip
+/// instead.
 private struct PostChip: View {
     let post: WidgetSnapshot.Post
+
+    /// The chip at its most comfortable, on a tile with room for it.
+    static let maxWidth: CGFloat = 44
 
     var body: some View {
         VStack(spacing: 3) {
@@ -314,21 +358,25 @@ private struct PostChip: View {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .fill(WidgetTheme.surface)
                 Text(post.emoji)
-                    .font(.system(size: 20))
+                    .font(.system(size: 19))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
             }
-            .frame(width: 44, height: 44)
+            .frame(height: 42)
             .overlay(alignment: .bottom) {
                 Capsule()
                     .fill(WidgetTheme.tier(post.tier))
-                    .frame(width: 22, height: 3)
+                    .frame(height: 3)
+                    .frame(maxWidth: 22)
                     .padding(.bottom, 4)
             }
             Text(post.name)
                 .font(Theme.sans(9, .semibold))
                 .foregroundStyle(WidgetTheme.inkMuted)
                 .lineLimit(1)
-                .frame(width: 46)
+                .minimumScaleFactor(0.7)
         }
+        .frame(maxWidth: PostChip.maxWidth)
     }
 }
 

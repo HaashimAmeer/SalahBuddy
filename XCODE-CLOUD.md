@@ -32,6 +32,21 @@ so one repo costs one CI run per change, not two.
   free tier covers ~100 builds/month. Keeping the workflow scoped to
   `staging` (not every branch) preserves that budget.
 
+### A new TARGET is a portal step, and it gates the merge
+
+Adding an app extension adds a second thing to sign. `make test`, `ios.yml` and
+the pre-push hook all build for the simulator **unsigned**, so they stay green
+and tell you nothing; the first signal is a red *Archive* on `staging` and no
+build reaching TestFlight.
+
+So before merging a branch that adds a target, its bundle id needs an explicit
+**App ID in the developer portal** carrying every capability its
+`.entitlements` file names. v5 §3's `SalahBuddyWidget` is the live example:
+`org.amacvoters.salahbuddymock.widget`, with **App Groups**
+(`group.org.amacvoters.salahbuddymock`) and **Keychain Sharing** enabled — the
+same two the app's own App ID gained in v5 §2. Only Haashim can do this, and it
+is a toggle on a new identity rather than any code change.
+
 ## One-time setup (needs the Mac + Xcode, ~10 minutes)
 
 1. Open `SalahBuddy.xcodeproj` → **Integrate ▸ Create Workflow…** (or the
