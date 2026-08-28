@@ -15,8 +15,10 @@
 // The journey behind the numbers is one circle: Yusuf logs Fajr at 05:00 in
 // Seattle. Amina is beside him. Bilal is in Mumbai, where it is 17:30 on the
 // SAME CALENDAR DATE — the case a date-only rule waves through and a comparison
-// of local clock readings catches (SPEC-V4 §7 item 3, §6). Hanif's iPad
-// registered before the offset column existed and has never said where it is.
+// of local clock readings catches (SPEC-V4 §6, and `STALE_AFTER_SECONDS` in
+// `_shared/zones.ts`, which is where the four-hour tolerance and the reason it
+// is one-directional are written down). Hanif's iPad registered before the
+// offset column existed and has never said where it is.
 //
 // APNs is deliberately unconfigured here (no key, and no --allow-env to read
 // one), so nothing leaves the process: `deliverToDevices` counts the devices it
@@ -31,7 +33,7 @@ import {
 } from "../../supabase/functions/notify/handlers.ts";
 import type { NotifyRequest } from "../../supabase/functions/_shared/validate.ts";
 import { parseNotifyRequest } from "../../supabase/functions/_shared/validate.ts";
-import { FakeSupabase, type Row } from "./fake_supabase.ts";
+import { FakeSupabase, type RecordedQuery, type Row } from "./fake_supabase.ts";
 
 // Real uuids, because the nudge request goes through the real `parseNotifyRequest`
 // rather than being hand-built — the handler should be fed what the endpoint
@@ -41,7 +43,7 @@ const YUSUF = "a1000000-0000-4000-8000-000000000001"; // the poster, in Seattle
 const AMINA = "a1000000-0000-4000-8000-000000000002"; // Seattle too
 const BILAL = "a1000000-0000-4000-8000-000000000003"; // Mumbai, +5:30
 const HANIF = "a1000000-0000-4000-8000-000000000004"; // an iPad with no offset
-const MARYAM = "a1000000-0000-4000-8000-000000000005"; // Seattle, friend-activity off
+const SALMA = "a1000000-0000-4000-8000-000000000005"; // Seattle, friend activity OFF
 const POST = "b1000000-0000-4000-8000-000000000001";
 
 const SEATTLE = -7 * 3600; // PDT
@@ -62,26 +64,34 @@ interface Phone {
   token: string;
   /// Seconds east of UTC, or null for a device that has never said.
   zone: number | null;
+  /// §6's friend-activity opt-in, off by default in the DB and set from
+  /// `AppSettings`. On for every phone but SALMA_PHONE, so that in the tests
+  /// about zones the relevance rule is the only thing that can move a count.
+  friendActivity: boolean;
 }
 
-function phone(user: string, token: string, zone: number | null): Phone {
-  return { user, token, zone };
+function phone(
+  user: string,
+  token: string,
+  zone: number | null,
+  friendActivity = true,
+): Phone {
+  return { user, token, zone, friendActivity };
 }
 
 const AMINA_PHONE = phone(AMINA, "amina-phone", SEATTLE);
 const BILAL_PHONE = phone(BILAL, "bilal-phone", MUMBAI);
 const HANIF_IPAD = phone(HANIF, "hanif-ipad", null);
-const MARYAM_PHONE = phone(MARYAM, "maryam-phone", SEATTLE);
+/// Beside the poster, so nothing about WHERE she is can drop her — the only
+/// thing that can is the toggle.
+const SALMA_PHONE = phone(SALMA, "salma-phone", SEATTLE, false);
 
 /// Yusuf's circle, his 05:00 Fajr already in `posts`, and one device row per
 /// phone. `posterZone` is the post's own `utc_offset` — nullable forever, and
 /// null there means "filter nobody".
 function circleWith(
   phones: readonly Phone[],
-  opts: {
-    posterZone?: number | null;
-    friendActivityOff?: readonly string[];
-  } = {},
+  opts: { posterZone?: number | null } = {},
 ): FakeSupabase {
   const members = [YUSUF, ...new Set(phones.map((p) => p.user))];
   return new FakeSupabase({
@@ -107,11 +117,7 @@ function circleWith(
       user_id: p.user,
       apns_token: p.token,
       environment: "production",
-      // The friend-activity toggle is a separate opt-in (§6). It defaults ON
-      // so that in most tests the only thing that can move these counts is
-      // the relevance rule; the one test ABOUT the toggle turns it off by
-      // token.
-      notify_friend_activity: !(opts.friendActivityOff ?? []).includes(p.token),
+      notify_friend_activity: p.friendActivity,
       utc_offset: p.zone,
       updated_at: `2026-08-22T00:00:0${index}Z`,
     })),
@@ -189,6 +195,13 @@ function fanOutSize(args: unknown[]): number | null {
   }
 }
 
+/// Every `devices` lookup a call made, in order. Both §6 opt-ins are applied in
+/// the QUERY rather than to its answer, so which of them a handler asked for is
+/// visible here and not only in the counts.
+function deviceLookups(db: FakeSupabase): RecordedQuery[] {
+  return db.queries.filter((q) => q.table === "devices" && q.op === "select");
+}
+
 function nudgeFor(
   recipientId: string,
   prayer: string,
@@ -259,39 +272,6 @@ Deno.test("a post whose poster never said where they were filters nobody", async
   assert.equal(pushedTo, 3);
 });
 
-Deno.test("a post respects the friend-activity opt-out; a join is not gated by it", async () => {
-  // Maryam is beside the poster — same zone, same morning — so relevance
-  // cannot be what drops her: only the toggle can. Delete `friendActivityOnly`
-  // from `notifyPost`'s fan-out and the first half of this test goes to two.
-  // The join half pins the other edge: the toggle gates friend ACTIVITY, and a
-  // member arriving is not activity, so her phone still hears that.
-  const opts = { friendActivityOff: [MARYAM_PHONE.token] };
-
-  const posted = await send(
-    FAJR,
-    () =>
-      notifyPost(
-        circleWith([AMINA_PHONE, MARYAM_PHONE], opts).asClient(),
-        CALLER,
-        POST,
-      ),
-  );
-  assert.equal(posted.body.devices, 1, "Amina only — Maryam opted out");
-  assert.equal(posted.body.outOfZone, 0, "and not because of any window");
-  assert.equal(posted.pushedTo, 1);
-
-  const joined = await send(
-    FAJR,
-    () =>
-      notifyJoin(
-        circleWith([AMINA_PHONE, MARYAM_PHONE], opts).asClient(),
-        CALLER,
-      ),
-  );
-  assert.equal(joined.body.devices, 2, "the opt-out gates posts, not joins");
-  assert.equal(joined.pushedTo, 2);
-});
-
 // -------------------------------------------------------------------- joins
 
 Deno.test("a join reaches the whole circle, including the phone a post was stale for", async () => {
@@ -309,6 +289,41 @@ Deno.test("a join reaches the whole circle, including the phone a post was stale
   assert.equal(body.devices, 3);
   assert.equal(body.outOfZone, 0, "nothing was judged, so nothing was dropped");
   assert.equal(pushedTo, 3);
+});
+
+// ------------------------------------------- the other call-site-only rule
+
+Deno.test("the friend-activity toggle is a post's business, and not a join's", async () => {
+  // §6's SECOND opt-in, and it lives in the same object literal as `relevance`,
+  // set by the same one call site and by no type: `notifyPost` passes
+  // `friendActivityOnly: true` to `fanOut` and `notifyJoin` deliberately does
+  // not. "Yusuf posted first for Fajr" is friend activity; "Yusuf joined your
+  // circle" is a circle event, which is why the same phone answers differently
+  // to the two.
+  //
+  // Salma is standing beside the poster, so nothing about WHERE she is can
+  // account for her being dropped. Delete `friendActivityOnly` from
+  // `notifyPost` and the post below goes to two — which in production means
+  // pushing friend activity to somebody who turned it off, and iOS cannot
+  // suppress an alert it has already been handed.
+  const db = circleWith([AMINA_PHONE, SALMA_PHONE]);
+
+  const post = await send(FAJR, () => notifyPost(db.asClient(), CALLER, POST));
+  assert.equal(post.body.devices, 1, "Amina only — Salma opted out");
+  assert.equal(post.body.outOfZone, 0, "and not for being in the wrong hour");
+  assert.equal(post.pushedTo, 1);
+
+  const join = await send(FAJR, () => notifyJoin(db.asClient(), CALLER));
+  assert.equal(join.body.devices, 2, "a join is not friend activity");
+  assert.equal(join.pushedTo, 2, "Salma's phone included");
+
+  // The toggle is a WHERE clause, so an opted-out device is never fetched at
+  // all — it cannot be counted as out-of-zone, or handed to APNs by a later
+  // edit that forgets why the list was short.
+  assert.deepEqual(deviceLookups(db).map((q) => q.filters), [
+    [`user_id=in.(${AMINA},${SALMA})`, "notify_friend_activity=eq.true"],
+    [`user_id=in.(${AMINA},${SALMA})`],
+  ]);
 });
 
 // ------------------------------------------------------------------- nudges
@@ -342,14 +357,12 @@ Deno.test("a nudge reaches the one person it was aimed at, however far past thei
   assert.equal("outOfZone" in body, false);
   assert.equal("delivered" in body, false);
 
-  // ...and the shape of the traffic says the same thing the count does: the
-  // devices lookup was scoped to Bilal, and the circle was never enumerated for
-  // a fan-out (`user_id=neq.` is `circleMemberIds` excluding the sender, which
-  // only `fanOut` issues).
-  const deviceLookups = db.queries.filter((q) =>
-    q.table === "devices" && q.op === "select"
-  );
-  assert.deepEqual(deviceLookups.map((q) => q.filters), [[
+  // ...and the shape of the traffic says the same thing the count does: one
+  // devices lookup, scoped to Bilal and carrying no `notify_friend_activity`
+  // clause (a nudge is a person, not friend activity), and the circle was never
+  // enumerated for a fan-out (`user_id=neq.` is `circleMemberIds` excluding the
+  // sender, which only `fanOut` issues).
+  assert.deepEqual(deviceLookups(db).map((q) => q.filters), [[
     `user_id=in.(${BILAL})`,
   ]]);
   assert.equal(

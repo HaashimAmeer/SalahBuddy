@@ -17,6 +17,16 @@
 //   * `.order()` really sorts. A fake that silently ignores it is a fake that
 //     lies, and `devicesFor` orders for a reason (the newest registration wins
 //     the 80-row cap).
+//   * `.select()` really PROJECTS — a column the caller did not ask for does not
+//     come back. This one is load-bearing rather than decorative: the relevance
+//     filter reads `devices.utc_offset` and `posts.logged_at`, and dropping
+//     either from its select list in db.ts turns the filter off in production
+//     while every row still carries the value in memory here. A fake that hands
+//     back the whole row cannot see that, and it is the other realistic way §6
+//     dies quietly — the call-site argument notify_test.ts pins is only half of
+//     it. Ordering and the row cap are applied to the STORED rows before the
+//     projection, because PostgREST sorts on a column whether or not it was
+//     selected, and `devicesFor` orders by `updated_at` without selecting it.
 //
 // There is no `auth`. `resolveCallerId` is only ever reached from `handle()`,
 // which builds its own client out of the environment and so cannot be driven
@@ -57,6 +67,34 @@ function clone(row: Row): Row {
   return { ...row };
 }
 
+/// A PostgREST select list — `"id,user_id,day_key"` — as a column array, or
+/// null for "everything" (`*`, or no list at all).
+///
+/// Only the flat comma-separated form is understood, because that is the only
+/// form db.ts issues. Embedded resources (`posts(*)`) and renames (`a:b`) would
+/// need real parsing; if one ever appears, this returns a column name that
+/// matches nothing and the test fails loudly rather than quietly widening.
+function columnsOf(list: string | undefined): string[] | null {
+  if (list === undefined) return null;
+  const columns = list.split(",").map((name) => name.trim()).filter(Boolean);
+  if (columns.length === 0 || columns.includes("*")) return null;
+  return columns;
+}
+
+/// One row, narrowed to what was asked for.
+///
+/// An absent key becomes `null`, not `undefined`: a real table always HAS the
+/// column and answers NULL when it is unset, and the seeded fixtures omit keys
+/// only as shorthand for that. Note this is the only place `null` is
+/// manufactured — `.is(col, null)` still matches against the stored row, before
+/// any projection.
+function project(row: Row, columns: string[] | null): Row {
+  if (columns === null) return clone(row);
+  const out: Row = {};
+  for (const column of columns) out[column] = row[column] ?? null;
+  return out;
+}
+
 function compare(a: unknown, b: unknown): number {
   if (typeof a === "number" && typeof b === "number") return a - b;
   return String(a).localeCompare(String(b));
@@ -74,6 +112,7 @@ class FakeQuery implements PromiseLike<Result<Row[] | null>> {
     private readonly op: "select" | "update" | "delete",
     private readonly patch: Row | null,
     private returning: boolean,
+    private columns: string[] | null = null,
   ) {}
 
   eq(column: string, value: unknown): this {
@@ -112,9 +151,11 @@ class FakeQuery implements PromiseLike<Result<Row[] | null>> {
     return this;
   }
 
-  /// `update(...).select()` — "and hand back what you changed".
-  select(_columns?: string): this {
+  /// `update(...).select("id")` — "and hand back what you changed, these
+  /// columns of it".
+  select(columns?: string): this {
     this.returning = true;
+    this.columns = columnsOf(columns);
     return this;
   }
 
@@ -155,7 +196,10 @@ class FakeQuery implements PromiseLike<Result<Row[] | null>> {
     );
     switch (this.op) {
       case "select": {
-        let out = matched.map(clone);
+        // Sort and cap the STORED rows, then narrow. The other order would make
+        // `.order("updated_at")` a silent no-op for `devicesFor`, which does not
+        // select the column it orders by.
+        let out = [...matched];
         if (this.sort) {
           const { column, ascending } = this.sort;
           out.sort((a, b) =>
@@ -163,12 +207,17 @@ class FakeQuery implements PromiseLike<Result<Row[] | null>> {
           );
         }
         if (this.cap !== null) out = out.slice(0, this.cap);
-        return { data: out, error: null };
+        return {
+          data: out.map((row) => project(row, this.columns)),
+          error: null,
+        };
       }
       case "update": {
         for (const row of matched) Object.assign(row, this.patch ?? {});
         return {
-          data: this.returning ? matched.map(clone) : null,
+          data: this.returning
+            ? matched.map((row) => project(row, this.columns))
+            : null,
           error: null,
         };
       }
@@ -178,7 +227,9 @@ class FakeQuery implements PromiseLike<Result<Row[] | null>> {
           rows.filter((row) => !matched.includes(row)),
         );
         return {
-          data: this.returning ? matched.map(clone) : null,
+          data: this.returning
+            ? matched.map((row) => project(row, this.columns))
+            : null,
           error: null,
         };
       }
@@ -220,8 +271,8 @@ export class FakeSupabase {
 
   from(table: string) {
     return {
-      select: (_columns?: string) =>
-        new FakeQuery(this, table, "select", null, true),
+      select: (columns?: string) =>
+        new FakeQuery(this, table, "select", null, true, columnsOf(columns)),
       update: (patch: Row) =>
         new FakeQuery(this, table, "update", patch, false),
       delete: () => new FakeQuery(this, table, "delete", null, false),

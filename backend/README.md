@@ -51,6 +51,8 @@ backend/
     run_sql_tests.sh                # scratch DB -> shim -> migrations -> assertions
     deno/*_test.ts                  # unit tests for the function helpers (offline, no permissions)
     deno/fake_supabase.ts           # PostgREST-shaped fake client, so db.ts runs against real rows
+                                    #   (it PROJECTS `.select()` — a column db.ts stops asking for
+                                    #    comes back missing, the way it would from Postgres)
 ```
 
 Migrations are named `<timestamp>_name.sql` because `supabase db push` applies
@@ -474,6 +476,16 @@ preferences.
     why the work lives in `notify/handlers.ts` and `notify/index.ts` is a bare
     `Deno.serve`: a module with a top-level serve cannot be imported by a test
     that runs with no permissions.
+
+    The friend-activity toggle below is the SECOND rule set only by a call-site
+    argument, in the same object literal, and it is pinned in the same file by a
+    fourth phone (Salma, standing beside the poster with the toggle off): the
+    post skips her, the join reaches her. Both rules can also die one layer
+    down, by `db.ts` quietly dropping a column from a `.select()` list, which is
+    why `fake_supabase.ts` projects — select `user_id,apns_token,environment`
+    without `utc_offset` and every recipient reads as unknown-offset, so nobody
+    anywhere is ever filtered, and a fake that handed back whole rows would stay
+    green through it.
   `register_device()` gained `p_utc_offset int default null` here, and the
   three-argument function was DROPPED rather than left beside it — two
   overloads differing only by a defaulted trailing parameter make every
@@ -483,11 +495,13 @@ preferences.
   registration.
 - **Push is opt-in and first-only.** §6's friend-activity alert is
   `devices.notify_friend_activity`, which mirrors `AppSettings` and defaults to
-  **false**; the fan-out filters on it, because iOS cannot suppress an alert it
-  has already been handed. `notify` announces a post only when no earlier post
-  exists for that `(circle, day, prayer)` and claims `posts.notified_at` as a
-  one-shot lease, so a circle of 12 produces one alert per window rather than 11
-  — and the same `postId` can never be re-announced. `{kind:"join"}` claims
+  **false**; the POST fan-out filters on it (a join and a nudge do not — neither
+  is friend activity — and `tests/deno/notify_test.ts` pins all three), because
+  iOS cannot suppress an alert it has already been handed. `notify` announces a
+  post only when no earlier post exists for that `(circle, day, prayer)` and
+  claims `posts.notified_at` as a one-shot lease, so a circle of 12 produces one
+  alert per window rather than 11 — and the same `postId` can never be
+  re-announced. `{kind:"join"}` claims
   `circle_members.announced_at` the same way.
 - **Realtime publishes `posts` and `custom_challenges` — and deliberately not
   `circle_members` or `excused_days`.** Realtime cannot apply RLS to DELETE
