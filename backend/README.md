@@ -41,7 +41,8 @@ backend/
     functions/
       _shared/                      # apns.ts, auth.ts, db.ts, http.ts, messages.ts, sweep.ts,
                                     #   util.ts, validate.ts, zones.ts
-      notify/index.ts               # post / join / nudge push fan-out (APNs, signed in-function)
+      notify/index.ts               # Deno.serve, and nothing else
+      notify/handlers.ts            # post / join / nudge push fan-out (APNs, signed in-function)
       retention/index.ts            # the ~30-day photo sweep
       sweep-orphans/index.ts        # deletes the auth.users shells delete_account() cannot
   tests/
@@ -49,6 +50,7 @@ backend/
     sql/01..29_*.sql                # assertion tests — RLS, caps, privacy, constraints
     run_sql_tests.sh                # scratch DB -> shim -> migrations -> assertions
     deno/*_test.ts                  # unit tests for the function helpers (offline, no permissions)
+    deno/fake_supabase.ts           # PostgREST-shaped fake client, so db.ts runs against real rows
 ```
 
 Migrations are named `<timestamp>_name.sql` because `supabase db push` applies
@@ -173,7 +175,20 @@ deno test tests/deno/
 
 No permission flags: the helpers are pure and every test injects its own
 `fetch`, so APNs signing and payload building are covered with zero network. If
-a test suddenly needs `--allow-net`, it stopped being a unit test.
+a test suddenly needs `--allow-net`, it stopped being a unit test. `notify_test.ts`
+reaches further — it runs the real `_shared/db.ts` helpers against
+`fake_supabase.ts` — and still needs nothing: the handlers take their client as a
+parameter, and APNs being unconfigured (no key, and no `--allow-env` to read one)
+is exactly the log-and-skip path the fan-out counts are read from.
+
+One local gotcha, and it is not the repo's fault: `deno test` now loads
+`npm:@supabase/supabase-js` (via `db.ts`), and Deno searches PARENT directories
+for a `package.json`. If it finds one — `~/package.json` is enough — it switches
+to node_modules resolution for this repo too and both commands fail with
+*"Could not find a matching package … in the node_modules directory"*. The fix
+is `deno install --entrypoint supabase/functions/notify/index.ts`, which
+installs into that ancestor's `node_modules`, or removing the stray file. CI
+checks out into a clean tree and never sees it.
 
 Only `npm:` and `node:` specifiers work in this sandbox — `jsr:`, `deno.land`
 and `esm.sh` are blocked. `@supabase/supabase-js` is therefore imported as
@@ -451,7 +466,14 @@ preferences.
     notified; a post with a NULL `utc_offset` filters nobody at all.
   - **only the post fan-out is filtered.** A nudge is aimed at one named person
     a human just picked out of a grid and never goes through `fanOut`;
-    `{kind:"join"}` is not about a day and passes no window.
+    `{kind:"join"}` is not about a day and passes no window. Nothing enforces
+    that but the absence of an argument at two call sites, so
+    `tests/deno/notify_test.ts` pins it: the same three phones — Seattle,
+    Mumbai at 17:30 on the same date, and an iPad that has never said where it
+    is — go through all three handlers, and only the post drops anybody. It is
+    why the work lives in `notify/handlers.ts` and `notify/index.ts` is a bare
+    `Deno.serve`: a module with a top-level serve cannot be imported by a test
+    that runs with no permissions.
   `register_device()` gained `p_utc_offset int default null` here, and the
   three-argument function was DROPPED rather than left beside it — two
   overloads differing only by a defaulted trailing parameter make every
