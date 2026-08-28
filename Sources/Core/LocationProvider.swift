@@ -60,4 +60,20 @@ final class LocationProvider: NSObject, ObservableObject, CLLocationManagerDeleg
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
         // Keep whatever we had; fallback coords cover us.
     }
+
+    // MARK: - Test seam (v4.1)
+
+    #if DEBUG
+    /// Stand in for a CoreLocation fix. TESTS ONLY — compiled out of Release.
+    ///
+    /// `deviceCoordinate` is `private(set)` on purpose: inside the app only the
+    /// delegate callback above may write it, and that stays true. But
+    /// `AppState.reanchorPlace` is *defined* by "where is the device right
+    /// now" — a saved place moves to the fix or the call fails — and there is
+    /// no way to unit-test either half without one. Deliberately not
+    /// `onUpdate`-firing: a test wants to set the world, not restart a refresh.
+    func simulateDeviceFix(_ coordinate: CLLocationCoordinate2D?) {
+        deviceCoordinate = coordinate
+    }
+    #endif
 }
