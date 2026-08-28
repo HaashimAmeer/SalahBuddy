@@ -853,9 +853,8 @@ itself, and dropping the pin fails "filed a report that named no member").
       sends no push, so the floor is what notices one MID-SESSION;
       `CircleService.pull()` also re-reads the roster at launch and on every
       foreground.)
-- [ ] **Add `backend/supabase/.temp/` to `.gitignore`.** The Supabase CLI
-      writes the linked project ref there; on a public repo that should never
-      be committed by accident.
+- [x] **Add `backend/supabase/.temp/` to `.gitignore`.** Done — `.gitignore`
+      line 8 has carried it for a while; this box was just never ticked.
 - [x] **Schedule `retention`.** Done: `.github/workflows/maintenance.yml` POSTs
       it nightly (see "Scheduled maintenance"). `pg_cron` + `pg_net` was the
       other option and lost — it can only be configured, and only verified,
