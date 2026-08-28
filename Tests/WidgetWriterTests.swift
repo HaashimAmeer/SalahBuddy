@@ -399,6 +399,17 @@ final class WidgetWriterTests: XCTestCase {
     /// tonight would fail on those nights only.
     func testAfterMidnightTheFileIsYesterdaysIshaAndYesterdaysEntries() throws {
         prepareDisk()
+        // The scenario needs the SCHEDULE's night to straddle this machine's
+        // calendar midnight. On a Pacific Mac the default Seattle coords do
+        // that by construction; on a UTC CI runner Seattle's isha window runs
+        // 04:31–11:49 UTC and nobody can ever have "prayed isha by 1 AM" — the
+        // premise is impossible, not merely unlucky. Align schedule to clock
+        // instead of assuming they agree: the longitude whose solar midnight
+        // is this timezone's midnight (offset hours × 15°).
+        var settings: AppSettings = Store.load(Store.settingsFile, default: AppSettings())
+        settings.fixedLatitude = 47.6
+        settings.fixedLongitude = Double(TimeZone.current.secondsFromGMT()) / 3600.0 * 15.0
+        Store.save(settings, to: Store.settingsFile)
         let state = AppState()
         let calendar = Calendar.current
 

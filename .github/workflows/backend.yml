@@ -309,18 +309,23 @@ jobs:
         id: guard
         run: |
           set -uo pipefail
-          CONFIG="Sources/Core/Sync/SupabaseConfig.swift"
+          # v5 moved the literals into Sources/Shared/SharedBackend.swift so the
+          # widget/NSE extensions can share them; the old path stays as a
+          # fallback so this step survives either layout. `|| true` because a
+          # no-match grep under errexit+pipefail would otherwise kill the step
+          # before the "could not resolve" explanation ever printed.
           url="${STAGING_URL:-}"
           key="${STAGING_PUBLISHABLE_KEY:-}"
           source="repo variable/secret"
 
-          if [ -z "$url" ] || [ -z "$key" ]; then
+          for CONFIG in "Sources/Shared/SharedBackend.swift" "Sources/Core/Sync/SupabaseConfig.swift"; do
+            [ -n "$url" ] && [ -n "$key" ] && break
             if [ -f "$CONFIG" ]; then
-              [ -n "$url" ] || url="$(grep -oE 'https://[a-z0-9]+\.supabase\.co' "$CONFIG" | head -1)"
-              [ -n "$key" ] || key="$(grep -oE 'sb_publishable_[A-Za-z0-9_-]+' "$CONFIG" | head -1)"
+              [ -n "$url" ] || url="$(grep -oE 'https://[a-z0-9]+\.supabase\.co' "$CONFIG" | head -1 || true)"
+              [ -n "$key" ] || key="$(grep -oE 'sb_publishable_[A-Za-z0-9_-]+' "$CONFIG" | head -1 || true)"
               source="$CONFIG (the config the app ships)"
             fi
-          fi
+          done
 
           if [ -n "$url" ] && [ -n "$key" ]; then
             echo "configured=true" >> "$GITHUB_OUTPUT"

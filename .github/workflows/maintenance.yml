@@ -95,13 +95,17 @@ jobs:
         id: guard
         run: |
           set -uo pipefail
-          CONFIG="Sources/Core/Sync/SupabaseConfig.swift"
+          # v5 moved the URL literal into Sources/Shared/SharedBackend.swift
+          # (the extensions share it); the old path stays as a fallback.
           url="${STAGING_URL:-}"
           source="repo variable/secret"
-          if [ -z "$url" ] && [ -f "$CONFIG" ]; then
-            url="$(grep -oE 'https://[a-z0-9]+\.supabase\.co' "$CONFIG" | head -1 || true)"
-            source="$CONFIG (the config the app ships)"
-          fi
+          for CONFIG in "Sources/Shared/SharedBackend.swift" "Sources/Core/Sync/SupabaseConfig.swift"; do
+            [ -n "$url" ] && break
+            if [ -f "$CONFIG" ]; then
+              url="$(grep -oE 'https://[a-z0-9]+\.supabase\.co' "$CONFIG" | head -1 || true)"
+              source="$CONFIG (the config the app ships)"
+            fi
+          done
 
           missing=()
           [ -n "${SERVICE_ROLE_KEY:-}" ] || missing+=("SUPABASE_STAGING_SERVICE_ROLE_KEY")
