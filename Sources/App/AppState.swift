@@ -928,7 +928,10 @@ final class AppState: ObservableObject {
         // itself, which reloads when a changed file lands in the background.
         publishWidgetSnapshot()
         // §3's photo fix. The file now NAMES this window's pictures; this is
-        // what puts them on the disk the extension reads.
+        // what puts them on the disk the extension reads. It runs AFTER the
+        // write on purpose (the list is read off the same state the file was
+        // built from) and carries its own reload, because the one above is
+        // spent long before a download finishes.
         prefetchWidgetPhotos()
     }
 
@@ -2112,8 +2115,7 @@ final class AppState: ObservableObject {
                 // (nobody is looking at a widget behind an open app), and so
                 // does the unchanged case (a reload that redraws the same
                 // numbers is a reload spent out of §5-A's ~40–70 a day).
-                if !reloadTimelines,
-                   UIApplication.shared.applicationState == .background {
+                if !reloadTimelines, isBackgrounded {
                     WidgetBridge.reloadAllTimelines()
                 }
             }
@@ -2136,9 +2138,23 @@ final class AppState: ObservableObject {
     /// reported photo is never re-downloaded and `.namesAndTier` costs no
     /// network at all.
     ///
-    /// ONE at a time. A burst of pulls (realtime, then the reconciling read)
-    /// must not stack four downloads each; the next pull re-asks, and anything
-    /// already cached is a `stat`.
+    /// **It reloads when a picture actually lands.** `publishWidgetSnapshot`
+    /// has already written the file and, in the background, already spent its
+    /// reload — a second or more before the download it names comes back. Draw
+    /// the tile at that instant and the newest face is an emoji, and nothing
+    /// else reloads until the window ENDS. See
+    /// `WidgetBridge.prefetchOwesReload` for the two conditions.
+    ///
+    /// ONE at a time, and it QUEUES rather than drops. A burst of pulls
+    /// (realtime, then the reconciling read moments later) must not stack four
+    /// downloads each — but the second of those pulls is usually the one
+    /// carrying the newest post, and simply returning would leave that post's
+    /// picture unfetched until some later pull. On a background wake there may
+    /// be no later pull for hours: the app is suspended again shortly after,
+    /// and the home screen is left naming a key with no file behind it. So a
+    /// request that arrives mid-flight is remembered and re-asked when the
+    /// current one finishes, with a FRESH list — anything the first pass
+    /// already cached costs a `stat` the second time.
     private func prefetchWidgetPhotos() {
         // The fence every outbound path in this class sits behind, and it has
         // to be here too: a prefetch is a network fetch. `circleSync` is
@@ -2148,7 +2164,11 @@ final class AppState: ObservableObject {
         // no Storage path at all) and every unit test reach nothing, exactly as
         // they do for every other call in here that would leave the device.
         guard mirrorsToCircle, circleSync != nil else { return }
-        guard widgetPhotoPrefetch == nil else { return }
+        guard widgetPhotoPrefetch == nil else {
+            widgetPhotoPrefetchOwed = true
+            return
+        }
+        widgetPhotoPrefetchOwed = false
         let paths: [String] = widgetPhotoPathsToCache()
         guard !paths.isEmpty else { return }
 
@@ -2156,8 +2176,20 @@ final class AppState: ObservableObject {
         // until the code that created it suspends — so the guard above cannot
         // be defeated by a prefetch that finished first.
         widgetPhotoPrefetch = Task { [weak self] in
-            await PhotoSync.prefetchWidgetPhotos(paths: paths)
-            self?.widgetPhotoPrefetch = nil
+            let written: Int = await PhotoSync.prefetchWidgetPhotos(paths: paths)
+            guard let self else { return }
+            self.widgetPhotoPrefetch = nil
+            // The picture the file already NAMES has only just arrived; the
+            // reload that would have drawn it was spent before the download
+            // started. See `WidgetBridge.prefetchOwesReload`.
+            if WidgetBridge.prefetchOwesReload(wrote: written,
+                                               backgrounded: self.isBackgrounded) {
+                WidgetBridge.reloadAllTimelines()
+            }
+            // Terminates: `widgetPhotoPrefetchOwed` is only ever set by a call
+            // that arrived while a task was running, and it is cleared above
+            // before the re-run starts.
+            if self.widgetPhotoPrefetchOwed { self.prefetchWidgetPhotos() }
         }
     }
 
@@ -2203,6 +2235,18 @@ final class AppState: ObservableObject {
 
     /// The one prefetch in flight, if any. See `prefetchWidgetPhotos`.
     private var widgetPhotoPrefetch: Task<Void, Never>?
+
+    /// A pull that landed while that one was running, owed a pass of its own.
+    private var widgetPhotoPrefetchOwed: Bool = false
+
+    /// Whether the app is off screen — so a widget reload has somebody who
+    /// could be looking at its result. Read by `publishWidgetSnapshot` and by
+    /// the photo prefetch, in one place so the two cannot come to different
+    /// answers about the same moment. §5-A's budget is ~40–70 reloads a day and
+    /// nobody is looking at a widget behind an open app.
+    private var isBackgrounded: Bool {
+        UIApplication.shared.applicationState == .background
+    }
 
     /// Yesterday's isha while it is still the block you are standing in — the
     /// one window whose schedule day is not today's. `targetWindow` owns that

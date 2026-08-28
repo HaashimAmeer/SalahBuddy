@@ -503,28 +503,45 @@ preferences.
   alert per window rather than 11 — and the same `postId` can never be
   re-announced. `{kind:"join"}` claims
   `circle_members.announced_at` the same way.
-- **v5 §5: every post after the first one in a window sends a QUIET reload
-  push.** The collapsed alert above is right for the tray and wrong for a
-  home-screen widget, which would otherwise sit on "3 of 5" for the rest of the
-  window. So a `not_first` post now fans out a second payload with **no alert in
-  it at all** — `content-available: 1`, `apns-push-type: background`,
-  `apns-priority: 5`, collapsed per *window* rather than per poster, 30-minute
-  TTL. Nothing reaches Notification Centre; the app wakes, pulls, rewrites
-  `widget.json` and reloads its timelines. Three properties, all pinned in
-  `tests/deno/notify_test.ts`: it obeys the SAME zone-relevance filter the alert
-  does, it is deliberately **not** gated on `notify_friend_activity` (that
-  toggle is about being *buzzed*, it is off by default, and gating a push that
-  shows nothing would leave almost every widget stale), and it spends the same
-  `posts.notified_at` lease — which is why the lease is now claimed *before* the
-  first-post check, so an unleased silent fan-out cannot be triggered in a loop.
-  Apple throttles background pushes and guarantees nothing: this is a bonus, and
-  the next foreground corrects the counts regardless.
+- **v5 §5: EVERY post sends a QUIET reload push, the first one included.** The
+  collapsed alert above is right for the tray and wrong for a home-screen
+  widget, which would otherwise sit on "3 of 5" for the rest of the window. So
+  every post fans out a payload with **no alert in it at all** —
+  `content-available: 1`, `apns-push-type: background`, `apns-priority: 5`,
+  collapsed per *window* rather than per poster, 30-minute TTL. Nothing reaches
+  Notification Centre; the app wakes, pulls, rewrites `widget.json` and reloads
+  its timelines. Four properties, all pinned in `tests/deno/notify_test.ts`: it
+  obeys the SAME zone-relevance filter the alert does; it is deliberately
+  **not** gated on `notify_friend_activity` (that toggle is about being
+  *buzzed*, it is off by default, and gating a push that shows nothing would
+  leave almost every widget stale); both APNs headers move with the payload
+  shape (a `content-available` payload at priority 10 is rejected 400
+  /BadPriority, which `sendAPNs` records as an ordinary delivery failure while
+  the reply still says 200 — total, silent, and indistinguishable from
+  throttling); and it spends the same `posts.notified_at` lease — which is why
+  the lease is claimed *before* the first-post check, so an unleased silent
+  fan-out cannot be triggered in a loop. Apple throttles background pushes and
+  guarantees nothing: this is a bonus, and the next foreground corrects the
+  counts regardless.
+- **A first post therefore makes TWO fan-outs**, the reload and then the alert,
+  and answers with the announcement's counts plus a nested `reload: {devices,
+  delivered, outOfZone}`. It reads like one push too many until you check which
+  API each half reaches: `mutable-content: 1` launches the notification service
+  extension, and iOS calls `didReceiveRemoteNotification` on a *suspended* app
+  only for a payload carrying `content-available: 1`. An alert alone meant the
+  extension ran, called `WidgetCenter.reloadAllTimelines()`, and the provider
+  re-read a `widget.json` nobody had been woken to rewrite. Compounded by the
+  alert being opt-in: for the first post most recipients got no push at all,
+  while every later post reached everybody — so the 0→1 transition was the one
+  that never propagated.
 - **The first-post alert carries `mutable-content: 1`.** It runs the app's
   notification service extension (`NotificationService/`, target
   `SalahBuddyNotify`), whose only job is `WidgetCenter.reloadAllTimelines()`.
   It changes nothing a person sees — the extension hands `request.content`
   straight back — and a device running an older build without the extension
-  simply ignores the key.
+  simply ignores the key. It is the RELIABLE half of the pair above: an alert
+  is delivered where a background push is throttled, so the extension gives the
+  fast reload and the quiet push gives it something new to read.
 - **Realtime publishes `posts` and `custom_challenges` — and deliberately not
   `circle_members` or `excused_days`.** Realtime cannot apply RLS to DELETE
   events (there is no row left to test a policy against), so a delete is

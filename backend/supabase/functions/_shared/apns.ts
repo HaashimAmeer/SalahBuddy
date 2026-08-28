@@ -270,6 +270,10 @@ export function buildSilentAPNsPayload(
 /// (`BadPriority`), which would make the §5 reload look like a silent no-op.
 export const APNS_BACKGROUND_PUSH_TYPE = "background";
 export const APNS_BACKGROUND_PRIORITY = 5;
+/// What everything else goes out at, and `sendAPNs`' default. Named so the
+/// header and the skip log below read it from the same place — a log that
+/// reported a priority the request did not carry would be worse than no log.
+export const APNS_ALERT_PRIORITY = 10;
 
 // ------------------------------------------------------------------- delivery
 
@@ -407,7 +411,7 @@ export async function sendAPNs(opts: SendAPNsOptions): Promise<APNsSendResult> {
       authorization: `bearer ${jwt}`,
       "apns-topic": creds.bundleId,
       "apns-push-type": opts.pushType ?? "alert",
-      "apns-priority": String(opts.priority ?? 10),
+      "apns-priority": String(opts.priority ?? APNS_ALERT_PRIORITY),
       "content-type": "application/json",
     };
     if (opts.collapseId) {
@@ -545,18 +549,22 @@ export async function deliverToDevices(
   if (!creds) {
     // One line, not one per device — an unconfigured environment is normal.
     //
-    // The two fields beyond the count are the two v5 §5 decisions, and they are
+    // The three fields beyond the count are the v5 §5 decisions, and they are
     // here because they answer the same operational question: "why is nobody's
     // widget updating". A push that went as an `alert` when it should have been
-    // a `background`, and an alert that did not ask for the notification
-    // service extension, both look exactly like Apple throttling from the
-    // outside — silent, intermittent, and about somebody else's phone. This is
-    // the line that says which. (`notify_test.ts` reads it for the same
-    // reason, and the shape is one object with named keys rather than a
-    // message, so rewording the sentence does not break it.)
+    // a `background`, a background push sent at the alert priority (Apple
+    // answers 400/BadPriority and NOTHING is delivered — not a dead token, not
+    // an unregistered device, just a failure the reply still reports 200 over),
+    // and an alert that did not ask for the notification service extension all
+    // look exactly like Apple throttling from the outside — silent,
+    // intermittent, and about somebody else's phone. This is the line that says
+    // which. (`notify_test.ts` reads it for the same reason, and the shape is
+    // one object with named keys rather than a message, so rewording the
+    // sentence does not break it.)
     log("apns: not configured — skipping fan-out", {
       devices: devices.length,
       pushType: opts.pushType ?? "alert",
+      priority: opts.priority ?? APNS_ALERT_PRIORITY,
       mutableContent: mutableContentOf(payload),
     });
     summary.skipped = devices.length;

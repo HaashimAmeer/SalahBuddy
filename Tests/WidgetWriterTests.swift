@@ -355,6 +355,36 @@ final class WidgetWriterTests: XCTestCase {
         XCTAssertEqual(state.widgetPhotoPathsToCache(), [])
     }
 
+    /// The reload the prefetch owes, and the two things that ration it.
+    ///
+    /// The race is the whole point: `applyCircleSnapshot` writes `widget.json`
+    /// and — in the background — spends its reload IMMEDIATELY, while the
+    /// download the file's new `thumb` names is still in flight. Nothing else
+    /// reloads before the window ends, so without this the newest post's face
+    /// is an emoji for the rest of the window, on exactly the app-closed path
+    /// §3 and §5 exist to serve.
+    ///
+    /// Pinned here rather than through `prefetchWidgetPhotos` for the reason
+    /// that function's neighbour test gives: it sits behind the `circleSync`
+    /// fence, so a unit test reaches no network and can never watch a thumbnail
+    /// land. What a test CAN hold still is the rule — and the rule is where the
+    /// two mistakes live (reloading on a pass that cached nothing, and
+    /// reloading with the app in front of the person).
+    func testAPrefetchReloadsOnlyWhenAPictureActuallyLanded() {
+        // The failure this exists for: a thumbnail arrives after the reload.
+        XCTAssertTrue(WidgetBridge.prefetchOwesReload(wrote: 1, backgrounded: true))
+        XCTAssertTrue(WidgetBridge.prefetchOwesReload(wrote: 4, backgrounded: true))
+
+        // Nothing new on disk is nothing new to draw. A reload here would redraw
+        // the identical tile out of §5-A's ~40–70 a day.
+        XCTAssertFalse(WidgetBridge.prefetchOwesReload(wrote: 0, backgrounded: true))
+
+        // ...and while the app is on screen, nobody is looking at the widget
+        // behind it. Backgrounding reloads unconditionally and picks it up.
+        XCTAssertFalse(WidgetBridge.prefetchOwesReload(wrote: 1, backgrounded: false))
+        XCTAssertFalse(WidgetBridge.prefetchOwesReload(wrote: 0, backgrounded: false))
+    }
+
     // MARK: - The dayKey the entries are fetched for
 
     /// After midnight the live window is YESTERDAY's isha (it ends at today's

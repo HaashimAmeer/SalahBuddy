@@ -147,8 +147,9 @@ export async function notifyPost(
   }
 
   // §6 is "X posted FIRST for Fajr", not "X posted": a circle of 8 gets one
-  // ALERT per window, not 7. What the rest of them get is v5 §5's quiet reload
-  // push, below — so this is now which KIND of push, not whether there is one.
+  // ALERT per window, not 7. Every post, this one included, ALSO gets v5 §5's
+  // quiet reload push — so this decides whether there is a banner, not whether
+  // there is a push. See `reloadForPost`.
   const first = await isFirstPostInWindow(admin, post);
   // The lease: one notification per post, ever, whichever kind it turned out to
   // be. Nothing else in this function is stateful, so without it the same
@@ -198,7 +199,14 @@ export async function notifyPost(
     prayer: post.prayer,
   };
 
-  if (!first) return await reloadForPost(admin, caller, post, { relevance, now, data });
+  // FIRST, and for every post — see `reloadForPost` for why the first one is
+  // not the exception it used to be.
+  const reload = await reloadForPost(admin, caller, post, {
+    relevance,
+    now,
+    data,
+  });
+  if (!first) return reply(reload, { kind: "post", reason: "not_first" });
 
   const alert = postAlert({
     name: caller.senderName,
@@ -219,23 +227,59 @@ export async function notifyPost(
     // v5 §5-B: wake the app's notification service extension before the banner,
     // so `reloadAllTimelines()` runs and the home screen is current about a
     // second after a friend posts. It changes nothing a person sees.
+    //
+    // It is the FAST half, not the whole of it: the extension cannot pull, so
+    // what it reloads is whatever the app last wrote. The quiet push above is
+    // the half that wakes the app to write a newer file, and an alert is
+    // delivered where a background push is throttled — which is why this phase
+    // sends both rather than choosing.
     mutableContent: true,
     expiration: expiresIn(POST_TTL_SECONDS),
+    // Both fan-outs, in one reply. `sent`/`devices` stay the ANNOUNCEMENT's, as
+    // they have always been — the quiet push reaches phones that deliberately
+    // get no banner, and folding the two counts together would answer "did
+    // anybody hear about this" with a number about widgets.
+    reload: {
+      devices: reload.devices,
+      delivered: reload.delivered,
+      outOfZone: reload.outOfZone,
+    },
     data,
   });
 }
 
-/// v5 §5 — the `not_first` wrinkle, as its own push.
+/// v5 §5 — the reload push. EVERY post, first or not.
 ///
 /// §6 only ever announced the FIRST post in a window, and that is right for the
 /// tray: one banner per prayer per friend, collapsed, is what somebody asked
 /// for when they turned friend activity on. It is wrong for a widget, which
 /// then sits on "3 of 5" for the rest of the window while the fourth and fifth
-/// people pray. So the alert is untouched and the rest of the window gets a
+/// people pray. So the alert is untouched and every post ALSO fans out a
 /// SEPARATE push carrying no alert at all.
 ///
-/// Three deliberate differences from the announcement above, each of which a
-/// test pins:
+/// **Why the first post is not the exception it looks like.** P3 sent this only
+/// when `!first`, on the reading that the announcement already covered the
+/// 0→1 transition. It does not, twice over:
+///
+/// 1. `mutable-content: 1` launches the notification SERVICE EXTENSION, not the
+///    app. iOS calls `didReceiveRemoteNotification` on a suspended app only for
+///    a payload carrying `content-available: 1` — so the extension ran, called
+///    `reloadAllTimelines()`, and the provider re-read a `widget.json` nobody
+///    had been woken to rewrite. The tile re-rendered the same bytes.
+/// 2. The alert is `friendActivityOnly`, and that toggle is OFF by default. So
+///    the one push the first post did send reached almost nobody, while every
+///    LATER post reached everybody — the transition that matters most was the
+///    one least likely to propagate, and in a circle where one person prays a
+///    given window it never propagated at all.
+///
+/// Two pushes to the same phone is the price, and only for the first post of a
+/// window, only for the minority who opted into the banner. The alert keeps
+/// `mutable-content` because it is the RELIABLE half: an alert is delivered
+/// where a background push is throttled, so the extension's reload is the fast
+/// path and this is the one that makes it worth reloading.
+///
+/// Three deliberate differences from the announcement, each of which a test
+/// pins:
 ///
 /// - **No alert, no sound, no badge, no thread, no category.** Nothing reaches
 ///   Notification Centre, nothing collapses onto (or replaces) the banner that
@@ -251,6 +295,11 @@ export async function notifyPost(
 ///   past this window has nothing to redraw, and waking it would be worse than
 ///   the alert it was already spared.
 ///
+/// Sent BEFORE the announcement, in the first-post case, for one reason: the
+/// extension reloads whatever the app last wrote, so the app is better off
+/// woken first. Neither ordering is a guarantee — APNs makes none — and nothing
+/// breaks if they arrive the other way round.
+///
 /// Best-effort by nature: Apple throttles background pushes and promises
 /// nothing. §5 calls it a bonus, never the mechanism, and the counts on the
 /// tile are still corrected by the next foreground either way.
@@ -263,8 +312,8 @@ async function reloadForPost(
     now: number;
     data: Record<string, unknown>;
   },
-): Promise<Response> {
-  return await fanOut(admin, caller, null, {
+): Promise<DeliveredCounts> {
+  return await fanOutTo(admin, caller, null, {
     relevance: ctx.relevance,
     relevanceAt: ctx.now,
     // Keyed on the WINDOW rather than the poster, unlike the alert's: five
@@ -277,9 +326,6 @@ async function reloadForPost(
     // forever, which here would mean waking a phone tomorrow to redraw
     // yesterday.
     expiration: expiresIn(RELOAD_TTL_SECONDS),
-    // Reported so the reply is legible: `sent` is about a push nobody will ever
-    // see, and `not_first` is what tells a reader which one it was.
-    reason: "not_first",
     data: ctx.data,
   });
 }
@@ -431,6 +477,12 @@ export interface PushOptions {
   /// (`"not_first"`), because that is the one push whose `sent: true` describes
   /// something nobody will ever see.
   reason?: string;
+  /// v5 §5 (review): the quiet reload fan-out that went ALONGSIDE this alert.
+  /// Echoed into the reply so "the banner reached 1 phone and the reload
+  /// reached 5" is answerable from one call — the two counts differ by design
+  /// (the alert is friend-activity gated, the reload is not) and a reply that
+  /// showed only the first would read as a fan-out that had mostly failed.
+  reload?: { devices: number; delivered: number; outOfZone: number };
   /// The span of local days this alert is still current news on
   /// (`_shared/zones.ts`). Set for POSTS only: a post is about one prayer
   /// window on one schedule day, so a circle-mate whose own day has already
@@ -450,6 +502,17 @@ export interface PushOptions {
   data?: Record<string, unknown>;
 }
 
+/// What one fan-out actually reached. Counts rather than a `Response`, because
+/// a FIRST post makes two fan-outs (v5 §5, `reloadForPost`) and can answer only
+/// once — so the reply had to stop being the only thing a delivery produces.
+export interface DeliveredCounts {
+  devices: number;
+  delivered: number;
+  skipped: number;
+  dropped: number;
+  outOfZone: number;
+}
+
 /// Everyone in the circle except the caller — minus anyone the alert has
 /// already gone stale for.
 ///
@@ -457,12 +520,12 @@ export interface PushOptions {
 /// entry point so that the relevance filter, the friend-activity clause and the
 /// per-device partition are literally the same code for both — the quiet push
 /// respecting the same zone rule as the loud one is a property, not a habit.
-export async function fanOut(
+export async function fanOutTo(
   admin: Client,
   caller: Caller,
   alert: Alert | null,
   opts: PushOptions,
-): Promise<Response> {
+): Promise<DeliveredCounts> {
   const recipients = await circleMemberIds(
     admin,
     caller.circleId,
@@ -480,11 +543,18 @@ export async function fanOut(
     opts.relevance ?? null,
     opts.relevanceAt ?? Date.now(),
   );
-  return await push(admin, current, alert, {
-    ...opts,
-    kind: opts.kind ?? String(opts.data?.kind ?? "post"),
-    outOfZone: stale.length,
-  });
+  const counts = await deliver(admin, current, alert, opts);
+  return { ...counts, outOfZone: stale.length };
+}
+
+/// `fanOutTo`, plus the reply — the shape every handler but `notifyPost` wants.
+export async function fanOut(
+  admin: Client,
+  caller: Caller,
+  alert: Alert | null,
+  opts: PushOptions,
+): Promise<Response> {
+  return reply(await fanOutTo(admin, caller, alert, opts), opts);
 }
 
 export async function push(
@@ -493,6 +563,18 @@ export async function push(
   alert: Alert | null,
   opts: PushOptions & { outOfZone?: number },
 ): Promise<Response> {
+  const counts = await deliver(admin, devices, alert, opts);
+  return reply({ ...counts, outOfZone: opts.outOfZone ?? 0 }, opts);
+}
+
+/// Build the payload, send it, count what happened. The one place the payload
+/// SHAPE and the two headers that must match it are decided together.
+async function deliver(
+  admin: Client,
+  devices: DeviceRow[],
+  alert: Alert | null,
+  opts: PushOptions,
+): Promise<Omit<DeliveredCounts, "outOfZone">> {
   // v5 §5: no alert means the reload-only payload, and it is chosen by the
   // ABSENCE of copy rather than by a flag — there is no way to hand this
   // function an alert and have it silently not send one, or the other way
@@ -521,21 +603,33 @@ export async function push(
     onEnvironmentChanged: (token, environment) =>
       setDeviceEnvironment(admin, token, environment),
   });
-  if (opts.countsPrivate) {
-    return json({ ok: true, kind: opts.kind, sent: summary.delivered > 0 });
-  }
-  return json({
-    ok: true,
-    kind: opts.kind,
-    sent: summary.delivered > 0,
-    ...(opts.reason ? { reason: opts.reason } : {}),
+  return {
     devices: summary.attempted,
     delivered: summary.delivered,
     skipped: summary.skipped,
     dropped: summary.unregistered.length,
+  };
+}
+
+/// The 200 a handler answers with. `NotifyReply` on the Swift side decodes
+/// unknown fields tolerantly, so this can gain a field without a client change.
+function reply(counts: DeliveredCounts, opts: PushOptions): Response {
+  const kind = opts.kind ?? String(opts.data?.kind ?? "post");
+  if (opts.countsPrivate) {
+    return json({ ok: true, kind, sent: counts.delivered > 0 });
+  }
+  return json({
+    ok: true,
+    kind,
+    sent: counts.delivered > 0,
+    ...(opts.reason ? { reason: opts.reason } : {}),
+    devices: counts.devices,
+    delivered: counts.delivered,
+    skipped: counts.skipped,
+    dropped: counts.dropped,
     // Devices whose local day had already moved past this post. Reported so a
-    // "why did nobody get it" question has an answer that is not a guess;
-    // `NotifyReply` on the Swift side decodes unknown fields tolerantly.
-    outOfZone: opts.outOfZone ?? 0,
+    // "why did nobody get it" question has an answer that is not a guess.
+    outOfZone: counts.outOfZone,
+    ...(opts.reload ? { reload: opts.reload } : {}),
   });
 }
