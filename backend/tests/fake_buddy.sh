@@ -26,21 +26,35 @@
 # -----------------------------
 # `new` is where you start, and it gives the buddy a circle of ITS OWN, then
 # prints the invite code for your phone to join. Everything else — post, rest,
-# status — works exactly the same in there, and nothing you would miss is in
-# it, so there is no cleanup you can forget.
+# status — works exactly the same in there, and nothing of yours is in it.
+#
+# The cost of `new` is not on this side of the wire, and you must know it before
+# you run it: a person is in ONE circle at a time (join_circle raises SB410), so
+# YOUR PHONE HAS TO LEAVE YOUR REAL CIRCLE before it can join the buddy's.
+# WRITE YOUR OWN INVITE CODE DOWN FIRST. The moment you are out, `circles_select`
+# stops matching that row, the app clears it from the mirror, and neither the app
+# nor the server will ever show you that code again — and circles have no DELETE
+# policy, so if you were its only member it just sits there, unreachable, with
+# you outside it. Copy the code off the Circle tab, THEN leave.
 #
 # `join` is the other direction: it drops a throwaway account into YOUR real
-# circle, next to real people, and it is the only command here that does. That
-# is a legitimate thing to want — it is the shortest path to the Phase C check
-# against a circle that already has your history in it — but it is no longer
-# the path of least resistance, because "Test Buddy" turning up mid-demo is how
-# we learned the difference. So: it asks first, it refuses to abandon a buddy
-# that is still checked out (the state file is the ONLY copy of its password —
-# overwrite that and the account is marooned in your circle for good), and
-# `leave` walks it back out without destroying it.
+# circle, next to real people, and it is the only command here that does. It
+# costs your phone nothing — you stay where you are — and it is the shortest
+# path to the Phase C check against a circle that already has your history in
+# it. What it costs instead is that "Test Buddy" turns up on the roster next to
+# real people, which is how we learned to write this paragraph. So: it asks
+# first, it refuses to abandon a buddy that is still checked out (the state file
+# is the ONLY copy of its password — overwrite that and the account is marooned
+# in your circle for good), and `leave` walks it back out without destroying it.
+#
+# Neither one is the free one. `new` keeps your circle untouched and asks your
+# phone to step out of it; `join` leaves your phone where it is and puts a
+# stranger on your roster until you take them off. Pick by which of the two you
+# can afford for the thing you are actually testing.
 #
 # USAGE
 #   ./backend/tests/fake_buddy.sh new  [display-name]    # a circle of its own — start here
+#        (to join it, your phone must leave YOUR circle — save your code first)
 #   ./backend/tests/fake_buddy.sh join <INVITE_CODE> [display-name]   # YOUR circle; asks first
 #   ./backend/tests/fake_buddy.sh post <prayer> <tier> [jamaat]
 #   ./backend/tests/fake_buddy.sh rest
@@ -135,8 +149,29 @@ JWT=$(q "${JWT:-}")
 EOF
 }
 
+# One message for every way the state file can be unusable, because from the
+# operator's chair they are one situation: the account it described is now
+# unreachable, and this file was the only copy of its password.
+die_unusable_state() {
+  die "the state file is unusable — it was written half-way, and the password it
+     held is gone with it: $STATE
+     '$0 forget' drops it and you start again with '$0 new'. If that buddy was
+     in one of YOUR circles, remove them from the app first — nothing here can
+     sign in as them any more."
+}
+
 load_state() {
   [ -f "$STATE" ] || die "no buddy yet — run: $0 new    (or, for YOUR circle: $0 join <INVITE_CODE>)"
+  # Source it in a subshell FIRST, then for real. `save_state` truncates before
+  # it writes, so an interrupt mid-write can cut the file in the middle of an
+  # identifier — and a bare word is a COMMAND, not an assignment, so sourcing it
+  # says "BUDDY_PASS: command not found" and exits 127 out of whatever the
+  # operator actually typed. A cut inside a quote is worse: that is a SYNTAX
+  # error, which on bash 3.2 kills the whole script however the source call is
+  # wrapped. A subshell contains both, and re-running eight assignments to find
+  # out costs nothing.
+  # shellcheck disable=SC1090
+  ( . "$STATE" ) >/dev/null 2>&1 || die_unusable_state
   # shellcheck disable=SC1090
   . "$STATE"
   # Tolerant of a file an older copy of this script wrote, for the same reason
@@ -144,6 +179,16 @@ load_state() {
   # exist yet takes a default instead of exploding under `set -u`. CIRCLE_OWNED
   # missing therefore reads as "joined", which is the cautious half.
   CIRCLE_ID="${CIRCLE_ID:-}"; CIRCLE_CODE="${CIRCLE_CODE:-}"; CIRCLE_OWNED="${CIRCLE_OWNED:-}"
+  BUDDY_NAME="${BUDDY_NAME:-the buddy}"
+  # Tolerant of an OLD file is not the same as tolerant of a BROKEN one, and a
+  # truncation that happens to land on a line boundary — or a zero-byte file —
+  # sources perfectly cleanly and then dies on the first reference instead:
+  # `refresh_jwt: BUDDY_EMAIL: unbound variable`, a raw bash trace, out of every
+  # command including `leave` and `cleanup`, the two that undo things. Catch it
+  # here. (`forget` deliberately does not come through load_state, so it stays
+  # runnable when this refuses.)
+  [ -n "${BUDDY_EMAIL:-}" ] && [ -n "${BUDDY_PASSWORD:-}" ] && [ -n "${BUDDY_ID:-}" ] \
+    || die_unusable_state
 }
 
 # Access tokens expire (1h by default), so every command re-signs in rather
@@ -232,11 +277,23 @@ cmd_new() {
 
   echo "✓ '$BUDDY_NAME' is sitting in a circle of their own"
   echo
-  echo "    invite code:  $CIRCLE_CODE"
+  echo "    invite code:  $CIRCLE_CODE     ('$0 status' prints it again)"
   echo
-  echo "Join it from your phone (Circle tab > join with a code) and you have two"
-  echo "real members, two devices' worth of rows, and none of it anywhere near"
-  echo "your own circle. Leaving from the app when you are done is all it takes."
+  echo "STOP before you join it from your phone. A person is in ONE circle at a"
+  echo "time, so your phone has to leave YOUR circle first — and once it is out,"
+  echo "neither the app nor the server will show you your own code again (RLS"
+  echo "hides the row from non-members, and circles cannot be deleted). In order:"
+  echo
+  echo "    1. Circle tab > invite > copy YOUR code and put it somewhere safe."
+  echo "    2. Circle tab > gear > Leave this circle."
+  echo "    3. Circle tab > join with a code > $CIRCLE_CODE"
+  echo
+  echo "That gives you two real members and two devices' worth of rows, with none"
+  echo "of it anywhere near your own circle. When you are done, leave from the app"
+  echo "and re-join your own with the code from step 1 — which is why you saved it."
+  echo
+  echo "If stepping your phone out of your circle is not a trade you want, this is"
+  echo "the wrong command: '$0 join <YOUR CODE>' brings the buddy to you instead."
   echo
   echo "Then give them something to do:"
   echo "    $0 post fajr onTime"
@@ -283,12 +340,33 @@ cmd_join() {
 
   # Order matters: shape, then the state check, then the confirmation, and only
   # then a signup. Every way of saying no must leave nothing behind.
+  local prior="" prior_circle="" prior_code="" reentry=false
   if [ -f "$STATE" ]; then
-    ( load_state; [ -z "$CIRCLE_ID" ] ) \
+    # Read it in a subshell: load_state refuses a half-written file, and this
+    # command has to be able to answer for itself rather than inherit that exit
+    # before it has said anything. Neither field can contain a space — a uuid
+    # and six characters from a fixed alphabet — so one line carries both.
+    prior="$( load_state >/dev/null 2>&1; printf '%s %s' "$CIRCLE_ID" "$CIRCLE_CODE" )" || prior=""
+    # The printf always emits at least the separating space, so an empty result
+    # here can only mean load_state refused the file. Say so NOW rather than
+    # after walking someone through a confirmation that was never going to run.
+    [ -n "$prior" ] || die_unusable_state
+    prior_circle="${prior%% *}"; prior_code="${prior#* }"
+    [ -z "$prior_circle" ] \
       || die "there is already a buddy in a circle. '$0 leave' takes them out,
      '$0 cleanup' purges them; then join again."
   fi
-  confirm_join "$invite" "$name"
+
+  # A code that outlives a `leave` can only be a circle of the buddy's OWN —
+  # that is the single case cmd_leave keeps one for. Walking them back into it
+  # is not the surprise the confirmation exists to prevent, so it does not ask,
+  # and it does not claim afterwards that this circle is yours.
+  if [ -n "$prior_code" ] && [ "$prior_code" = "$invite" ]; then
+    reentry=true
+    echo "note: $invite is the circle this buddy already had — going straight back in"
+  else
+    confirm_join "$invite" "$name"
+  fi
 
   ensure_buddy "$name"
 
@@ -302,8 +380,16 @@ cmd_join() {
       *) die "join_circle failed (HTTP $CODE): $(jqr '.message // .msg // "unknown"')" ;;
     esac
   fi
-  CIRCLE_CODE="$invite"; CIRCLE_OWNED=false
+  CIRCLE_CODE="$invite"; CIRCLE_OWNED="$reentry"
   save_state
+
+  if [ "$reentry" = true ]; then
+    echo "✓ '$BUDDY_NAME' is back in their own circle ($CIRCLE_CODE)"
+    echo
+    echo "Nothing of yours is in it. Give them something to do:"
+    echo "    $0 post fajr onTime"
+    return 0
+  fi
 
   echo "✓ '$BUDDY_NAME' joined YOUR circle"
   echo
@@ -364,7 +450,13 @@ cmd_rest() {
 cmd_status() {
   load_state; refresh_jwt
   echo "buddy   : $BUDDY_NAME  ($BUDDY_EMAIL)"
-  if [ -z "$CIRCLE_ID" ]; then
+  if [ -z "$CIRCLE_ID" ] && [ -n "$CIRCLE_CODE" ]; then
+    # A code with no circle id means cmd_leave kept it, which it only does for
+    # one of their own — so this is the copy of record for a circle no server
+    # will hand back.
+    echo "circle  : none — they left their own, which is still there:"
+    echo "          '$0 join $CIRCLE_CODE' re-enters it, '$0 new' makes a fresh one."
+  elif [ -z "$CIRCLE_ID" ]; then
     echo "circle  : none — they left. '$0 new' or '$0 join <CODE>' puts them back in one."
   elif [ "$CIRCLE_OWNED" = "true" ]; then
     echo "circle  : $CIRCLE_ID"
@@ -397,9 +489,9 @@ cmd_status() {
   echo "differently — which is the failure the criterion exists to catch."
 }
 
-# The undo for `join`. Deliberately NOT delete_account: the account survives, so
-# a buddy you pulled out of your circle mid-demo can walk straight back in
-# afterwards without minting another permanent auth.users row.
+# The undo for both `join` and `new`. Deliberately NOT delete_account: the
+# account survives, so a buddy you pulled out of a circle mid-demo can walk
+# straight back in afterwards without minting another permanent auth.users row.
 cmd_leave() {
   load_state
   [ -n "$CIRCLE_ID" ] || die "'$BUDDY_NAME' is not in a circle — nothing to leave"
@@ -410,30 +502,56 @@ cmd_leave() {
     *) die "leave_circle failed (HTTP $CODE): $(jqr '.message // .msg // "unknown"')" ;;
   esac
   local was_owned="$CIRCLE_OWNED"
-  CIRCLE_ID=""; CIRCLE_CODE=""; CIRCLE_OWNED=""
+  CIRCLE_ID=""; CIRCLE_OWNED=""
+  # Keep the code for a circle of their OWN, and only for that one. The moment
+  # they are out, `circles_select` stops matching the row for everybody and
+  # there is no DELETE policy either — so that circle is now reachable by code
+  # alone, and this file is the only place the code still exists. Remembering it
+  # is what makes "you can join again later" true rather than a nice sentence
+  # over a lost circle. YOUR code is not kept: your phone is still in your
+  # circle and can still read it off the Circle tab.
+  [ "$was_owned" = "true" ] || CIRCLE_CODE=""
   save_state
 
-  echo "✓ $BUDDY_NAME left the circle — the account is kept, so you can join again later"
-  if [ "$was_owned" != "true" ]; then
-    echo
-    echo "  Their roster row is gone. Their POSTS are not: leaving only starts the"
-    echo "  purge clock, and the circle keeps seeing that week until retention"
-    echo "  sweeps it (SPEC-V4 §2). If you need the board clean NOW — a demo in ten"
-    echo "  minutes — '$0 cleanup' deletes the rows outright."
+  echo "✓ $BUDDY_NAME left the circle — the account is kept"
+  if [ "$was_owned" = "true" ]; then
+    echo "  and so is the code, so they can walk back into the SAME circle:"
+    echo "      $0 join $CIRCLE_CODE"
+    echo "  Nothing else can give you that code back — once they are out, the row"
+    echo "  is hidden from everyone, and circles cannot be deleted."
+  else
+    echo "  so '$0 join <CODE>' can put them back in later."
   fi
+  echo
+  echo "  Their roster row is gone. Their POSTS are not: leaving only starts the"
+  echo "  purge clock, so anyone still in that circle — your phone included, if it"
+  echo "  joined — keeps seeing that week until retention sweeps it (SPEC-V4 §2)."
+  echo "  If you need the board clean NOW — a demo in ten minutes — '$0 cleanup'"
+  echo "  deletes the rows outright."
 }
 
 cmd_cleanup() {
   load_state; refresh_jwt
-  local was_owned="$CIRCLE_OWNED"
+  # "A circle of their own is out there" is true both while they are sitting in
+  # it and after a `leave` that kept its code — delete_account leaves the row
+  # standing either way, so the paragraph below applies to both.
+  local own_code=""
+  if [ "$CIRCLE_OWNED" = "true" ] || { [ -z "$CIRCLE_ID" ] && [ -n "$CIRCLE_CODE" ]; }; then
+    own_code="$CIRCLE_CODE"
+  fi
   api POST "/rest/v1/rpc/delete_account" "$JWT" '{}'
   if [ "$CODE" = "200" ] || [ "$CODE" = "204" ]; then
     rm -f "$STATE"
     echo "✓ purged $BUDDY_NAME's rows — posts, photos, membership — and forgot the account"
     echo "  (the auth.users row itself needs service_role — see V4-PUNCHLIST.md §6)"
-    if [ "$was_owned" = "true" ]; then
-      echo "  Their own circle stays behind as an empty row: there is no DELETE"
-      echo "  policy on circles, by design. Nobody is in it and nobody can find it."
+    if [ -n "$own_code" ]; then
+      echo "  Their own circle ($own_code) stays behind: there is no DELETE policy"
+      echo "  on circles, by design, and delete_account() only removes THEIR rows."
+      echo "  So if you took your phone in there the way '$0 new' describes, your"
+      echo "  phone is STILL a member of it and still holds that code — leave from"
+      echo "  the app (Circle tab > gear), then re-join your own circle with the"
+      echo "  code you saved before you left it. If nothing else ever joined, the"
+      echo "  row sits there empty and unreachable, which is the intended end."
     fi
   else
     die "delete_account failed (HTTP $CODE): $(jqr '.message // "unknown"')"
@@ -445,19 +563,54 @@ cmd_cleanup() {
 # forgets; anything still in a circle stays there, which is why it says so.
 cmd_forget() {
   [ -f "$STATE" ] || die "there is no buddy to forget"
-  load_state
+  # Deliberately NOT load_state. This is the one command whose whole job is a
+  # file nothing else can read, so it must never be the command that refuses
+  # because the file cannot be read. Source it in a subshell, where even a
+  # syntax error only kills the subshell (bash 3.2 exits the whole script on
+  # one, `|| true` or not), and use whatever survived.
+  #
+  # The id comes FIRST on the line and the name last, because command
+  # substitution eats trailing newlines: a name-then-id order collapses to one
+  # field when the buddy is between circles, and the name would then be read as
+  # a circle id — this command would refuse to run over a display name. A uuid
+  # holds no space, a display name may, so one space splits them unambiguously.
+  local prior="" name="" circle="" readable=true
+  # shellcheck disable=SC1090
+  prior="$( . "$STATE" >/dev/null 2>&1; printf '%s %s' "${CIRCLE_ID:-}" "${BUDDY_NAME:-}" )" || prior=""
+  circle="${prior%% *}"; name="${prior#* }"
+  if [ -z "$name" ]; then
+    # save_state always writes a name, so an empty one means nothing came back
+    # at all and the membership check below is answering from no evidence.
+    readable=false; name="that buddy"
+    echo "! nothing could be read out of that file — it does not parse."
+    echo "  Whether it still holds a member of one of your circles is therefore"
+    echo "  unknowable from here. Check the roster on your phone afterwards; a"
+    echo "  stray member can only leave by themselves, and the only copy of their"
+    echo "  password is the file you are about to delete."
+  fi
+  BUDDY_NAME="$name"; CIRCLE_ID="$circle"
+  local prompt=""
   if [ -n "$CIRCLE_ID" ]; then
     echo "! '$BUDDY_NAME' is still a member of circle $CIRCLE_ID."
     echo "  Forgetting them here does NOT remove them from it, and this file is the"
     echo "  only copy of their password. Prefer '$0 leave' or '$0 cleanup'."
     if [ -t 0 ]; then
-      local typed=""
-      printf "Type 'forget' to drop the file anyway: "
-      read -r typed
-      [ "$typed" = "forget" ] || die "stopped — nothing was changed"
+      prompt="Type 'forget' to drop the file anyway: "
     else
       die "refusing to strand a member non-interactively — run this from a terminal"
     fi
+  elif [ "$readable" = false ] && [ -t 0 ]; then
+    # An unparseable file may or may not be stranding somebody, and nothing here
+    # can tell. Ask while there is anybody to ask — but do not refuse outright
+    # the way a KNOWN member does: this file is the one `forget` exists for, and
+    # a hard no would leave `rm` as the only way out of it.
+    prompt="Type 'forget' to drop it anyway: "
+  fi
+  if [ -n "$prompt" ]; then
+    local typed=""
+    printf '%s' "$prompt"
+    read -r typed
+    [ "$typed" = "forget" ] || die "stopped — nothing was changed"
   fi
   rm -f "$STATE"
   echo "✓ forgot $BUDDY_NAME (local file only)"
