@@ -29,6 +29,10 @@ struct SettingsView: View {
     @State private var showDeleteAccountConfirm = false
     @State private var isDeletingAccount = false
     @State private var deleteAccountFailed = false
+    // v4.1: saved places became a list you can name, move and prune one at a
+    // time, which needs a screen rather than the one-line summary that used to
+    // sit here with a single "forget everything" button.
+    @State private var showSavedPlaces = false
 
     var body: some View {
         ZStack {
@@ -89,6 +93,10 @@ struct SettingsView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Logs, XP, streak, and badges will be erased. This cannot be undone.")
+        }
+        .sheet(isPresented: $showSavedPlaces) {
+            SavedPlacesSheet()
+                .environmentObject(state)
         }
     }
 
@@ -423,27 +431,31 @@ struct SettingsView: View {
                 }
             }
 
-            if !state.savedPlaceTags.isEmpty {
+            if !state.settings.savedPlaces.isEmpty {
                 Divider()
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Saved places")
                             .font(Theme.sans(15, .semibold))
                             .foregroundStyle(Theme.inkDeep)
-                        Text(state.savedPlaceTags.map { "\($0.emoji) \($0.displayName)" }
+                        // v4.1: names, not just tags — once you have two
+                        // masjids "🕌 Masjid" twice says nothing.
+                        Text(state.settings.savedPlaces
+                                .map { "\($0.tag.emoji) \($0.displayName)" }
                                 .joined(separator: "  "))
                             .font(Theme.sans(12, .semibold))
                             .foregroundStyle(Theme.inkMuted)
+                            .lineLimit(2)
                     }
                     Spacer()
-                    Button("Forget") {
-                        state.clearSavedPlaces()
+                    Button("Manage") {
+                        showSavedPlaces = true
                     }
                     .font(Theme.sans(13, .bold))
-                    .foregroundStyle(Theme.amber)
+                    .foregroundStyle(Theme.green)
                     .buttonStyle(.plain)
                 }
-                Text("Remembered the first time you tagged each place — used to auto-suggest the tag when you post nearby.")
+                Text("Remembered when you tag a prayer somewhere new — used to auto-suggest the tag when you post nearby.")
                     .font(Theme.sans(11.5, .semibold))
                     .foregroundStyle(Theme.inkMuted)
             }

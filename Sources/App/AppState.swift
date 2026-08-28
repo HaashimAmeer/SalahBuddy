@@ -637,9 +637,14 @@ final class AppState: ObservableObject {
     /// (>80 km) from it. Manual toggle is always available regardless.
     func shouldSuggestTravel() -> Bool {
         guard !settings.isTraveling,
-              let home = settings.savedPlaces[PlaceTag.home.rawValue],
               let coord = location.deviceCoordinate else { return false }
-        return home.distanceMeters(latitude: coord.latitude, longitude: coord.longitude) > 80_000
+        let homes = SavedPlace.all(.home, in: settings.savedPlaces)
+        guard !homes.isEmpty else { return false }
+        // Far from EVERY home. With more than one saved (a second home, a
+        // parents' place) being near any of them means you are not travelling.
+        return homes.allSatisfy {
+            $0.distanceMeters(latitude: coord.latitude, longitude: coord.longitude) > 80_000
+        }
     }
 
     // MARK: - Excused days (v2) / "Can't pray" break mode (v3.2)
@@ -1129,30 +1134,77 @@ final class AppState: ObservableObject {
 
     // MARK: - Saved places (v3)
 
-    /// First time you tag Home/Masjid/Work with a device fix available, the
-    /// spot is remembered so future posts nearby can auto-suggest the tag.
-    /// On-the-go is never saved — it's by definition not a fixed place.
+    /// Tagging Home/Masjid/Work somewhere NEW remembers that spot, so future
+    /// posts nearby can auto-suggest the tag. On-the-go is never saved — it is
+    /// by definition not a fixed place.
+    ///
+    /// v4.1: this used to fire only on the FIRST ever tag of a kind
+    /// (`savedPlaces[tag] == nil`), which is why a second masjid could never be
+    /// recorded and why a Home saved at the wrong address stayed wrong forever.
+    /// The condition is now "not already inside a saved place of this tag", so
+    /// praying at a different masjid adds it and praying at the usual one does
+    /// nothing.
     private func rememberPlaceIfNeeded(_ tag: PlaceTag) {
-        guard tag != .onTheGo,
-              settings.savedPlaces[tag.rawValue] == nil,
-              let coord = location.deviceCoordinate else { return }
-        settings.savedPlaces[tag.rawValue] = SavedPlace(latitude: coord.latitude,
-                                                        longitude: coord.longitude)
+        guard tag != .onTheGo, let coord = location.deviceCoordinate else { return }
+        let existing = SavedPlace.all(tag, in: settings.savedPlaces)
+        let alreadyHere = existing.contains {
+            $0.distanceMeters(latitude: coord.latitude,
+                              longitude: coord.longitude) <= $0.radiusMeters
+        }
+        guard !alreadyHere else { return }
+        settings.savedPlaces.append(SavedPlace(tag: tag,
+                                               latitude: coord.latitude,
+                                               longitude: coord.longitude,
+                                               savedAt: AppClock.now))
     }
 
-    /// The saved place you're currently within ~250 m of, if any.
-    func suggestedPlaceTag() -> PlaceTag? {
+    /// The saved place you're currently standing inside, if any.
+    func suggestedPlace() -> SavedPlace? {
         guard let coord = location.deviceCoordinate else { return nil }
         return SavedPlace.nearest(to: coord.latitude, coord.longitude,
                                   in: settings.savedPlaces)
     }
 
+    /// The same answer, as a bare tag — what the camera flow pre-selects.
+    func suggestedPlaceTag() -> PlaceTag? { suggestedPlace()?.tag }
+
     var savedPlaceTags: [PlaceTag] {
-        PlaceTag.allCases.filter { settings.savedPlaces[$0.rawValue] != nil }
+        PlaceTag.allCases.filter { !SavedPlace.all($0, in: settings.savedPlaces).isEmpty }
+    }
+
+    // MARK: - Managing saved places (v4.1)
+
+    /// Rename a saved place. An empty name clears it back to the tag's generic
+    /// name rather than storing a blank.
+    func renamePlace(id: UUID, to name: String) {
+        guard let i = settings.savedPlaces.firstIndex(where: { $0.id == id }) else { return }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        settings.savedPlaces[i].name = trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// Move a saved place to where the device is now — the fix for a Home that
+    /// was anchored at the wrong address, which until now was permanent.
+    @discardableResult
+    func reanchorPlace(id: UUID) -> Bool {
+        guard let coord = location.deviceCoordinate,
+              let i = settings.savedPlaces.firstIndex(where: { $0.id == id }) else { return false }
+        settings.savedPlaces[i].latitude = coord.latitude
+        settings.savedPlaces[i].longitude = coord.longitude
+        settings.savedPlaces[i].savedAt = AppClock.now
+        return true
+    }
+
+    func setPlaceRadius(id: UUID, meters: Double) {
+        guard let i = settings.savedPlaces.firstIndex(where: { $0.id == id }) else { return }
+        settings.savedPlaces[i].radiusMeters = max(50, min(5_000, meters))
+    }
+
+    func forgetPlace(id: UUID) {
+        settings.savedPlaces.removeAll { $0.id == id }
     }
 
     func clearSavedPlaces() {
-        settings.savedPlaces = [:]
+        settings.savedPlaces = []
     }
 
     /// "🏠 Home" / "📍 Capitol Hill" pill text for a log's place, if tagged.

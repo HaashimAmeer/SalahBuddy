@@ -364,12 +364,69 @@ enum CircleMode: String, Codable {
     case demo, real
 }
 
-/// v3: a remembered coordinate for a place tag ("Home" etc.), captured the
-/// first time you tag that place with a device fix available. Powers the
-/// near-a-saved-place auto-suggestion on the post screen.
-struct SavedPlace: Codable, Equatable {
+/// The pre-v4.1 shape: one coordinate per tag, in a dictionary keyed by the
+/// tag's rawValue. Kept ONLY so `AppSettings`'s decoder can migrate an existing
+/// save — nothing else may refer to it.
+private struct LegacySavedPlace: Codable {
     var latitude: Double
     var longitude: Double
+}
+
+/// A remembered spot you pray at.
+///
+/// v4.1: a LIST, not one-per-tag. The old shape allowed exactly one Masjid,
+/// which is the unusual case — people pray at more than one, and the second
+/// could never be suggested or even recorded. It also anchored on the FIRST
+/// time you tagged something and never updated, so a Home saved at a friend's
+/// house stayed your Home forever with no way to see or fix it.
+///
+/// `radiusMeters` is per-place because 250 m is a house, not a campus or a
+/// hospital.
+struct SavedPlace: Codable, Equatable, Identifiable {
+    var id: UUID = UUID()
+    var tag: PlaceTag
+    /// What YOU call it — "Masjid Al-Noor", "Dad's place". nil falls back to
+    /// the tag's generic name.
+    var name: String?
+    var latitude: Double
+    var longitude: Double
+    var radiusMeters: Double = SavedPlace.defaultRadiusMeters
+    /// When it was first anchored. Journey shows "praying here since ...".
+    var savedAt: Date?
+
+    static let defaultRadiusMeters: Double = 250
+
+    /// The label to show for this place: its own name if it has one, else the
+    /// tag's ("Masjid").
+    var displayName: String {
+        if let name, !name.trimmingCharacters(in: .whitespaces).isEmpty { return name }
+        return tag.displayName
+    }
+
+    init(id: UUID = UUID(), tag: PlaceTag, name: String? = nil,
+         latitude: Double, longitude: Double,
+         radiusMeters: Double = SavedPlace.defaultRadiusMeters, savedAt: Date? = nil) {
+        self.id = id
+        self.tag = tag
+        self.name = name
+        self.latitude = latitude
+        self.longitude = longitude
+        self.radiusMeters = radiusMeters
+        self.savedAt = savedAt
+    }
+
+    // Tolerant, like every other persisted type here.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = (try? c.decode(UUID.self, forKey: .id)) ?? UUID()
+        tag = try c.decode(PlaceTag.self, forKey: .tag)
+        name = try? c.decodeIfPresent(String.self, forKey: .name)
+        latitude = try c.decode(Double.self, forKey: .latitude)
+        longitude = try c.decode(Double.self, forKey: .longitude)
+        radiusMeters = (try? c.decode(Double.self, forKey: .radiusMeters))
+            ?? SavedPlace.defaultRadiusMeters
+        savedAt = try? c.decodeIfPresent(Date.self, forKey: .savedAt)
+    }
 
     /// Great-circle distance in meters (haversine) — pure, testable.
     func distanceMeters(latitude lat: Double, longitude lon: Double) -> Double {
@@ -381,18 +438,25 @@ struct SavedPlace: Codable, Equatable {
         return r * 2 * atan2(sqrt(a), sqrt(1 - a))
     }
 
-    /// The saved place within `maxMeters` of the coordinate, nearest first.
+    /// The nearest saved place you are standing inside, or nil.
+    ///
+    /// Each place is judged against its OWN radius rather than one global
+    /// number, so a campus can be generous without making every house sloppy.
+    /// Pure — the coordinate is an argument, never a location read.
     static func nearest(to lat: Double, _ lon: Double,
-                        in places: [String: SavedPlace],
-                        maxMeters: Double = 250) -> PlaceTag? {
+                        in places: [SavedPlace]) -> SavedPlace? {
         places
-            .compactMap { key, place -> (PlaceTag, Double)? in
-                guard let tag = PlaceTag(rawValue: key) else { return nil }
+            .compactMap { place -> (SavedPlace, Double)? in
                 let d = place.distanceMeters(latitude: lat, longitude: lon)
-                return d <= maxMeters ? (tag, d) : nil
+                return d <= place.radiusMeters ? (place, d) : nil
             }
             .min { $0.1 < $1.1 }?
             .0
+    }
+
+    /// Every saved place of one tag.
+    static func all(_ tag: PlaceTag, in places: [SavedPlace]) -> [SavedPlace] {
+        places.filter { $0.tag == tag }
     }
 }
 
@@ -407,7 +471,10 @@ struct AppSettings: Codable {
     var dailyGoal: Int = 100
     var hasOnboarded: Bool = false
     var hardestPrayer: Prayer? = nil   // v2: onboarding goal-setting → seeds goal3 challenge
-    var savedPlaces: [String: SavedPlace] = [:]   // v3: PlaceTag.rawValue → remembered spot
+    /// v4.1: a LIST. Was `[String: SavedPlace]` keyed by tag rawValue, which
+    /// permitted exactly one place per tag; the decoder below migrates that
+    /// shape rather than dropping it.
+    var savedPlaces: [SavedPlace] = []
     var memberKind: String? = nil      // v3.2: "brother" / "sister" (onboarding, optional) — tailors copy
     var isTraveling: Bool = false      // v3.3: travel mode — combine Dhuhr+Asr and Maghrib+Isha
     // v3.6: per-kind notification options (design session). Prayer nudges
@@ -464,7 +531,26 @@ struct AppSettings: Codable {
         dailyGoal = (try? c.decode(Int.self, forKey: .dailyGoal)) ?? 100
         hasOnboarded = (try? c.decode(Bool.self, forKey: .hasOnboarded)) ?? false
         hardestPrayer = (try? c.decodeIfPresent(Prayer.self, forKey: .hardestPrayer)) ?? nil
-        savedPlaces = (try? c.decode([String: SavedPlace].self, forKey: .savedPlaces)) ?? [:]
+        // The list shape first, then the pre-v4.1 dictionary. A dictionary
+        // cannot decode as an array or vice versa, so the order is safe and the
+        // fall-through is what carries an existing install's places across
+        // instead of silently resetting somebody's Home to nothing.
+        if let list = try? c.decode([SavedPlace].self, forKey: .savedPlaces) {
+            savedPlaces = list
+        } else if let legacy = try? c.decode([String: LegacySavedPlace].self,
+                                             forKey: .savedPlaces) {
+            // The tag lived in the KEY, so it has to be recovered from there.
+            // An unrecognised key is dropped: it cannot be turned into a place
+            // without a tag, and inventing one would be worse than losing it.
+            savedPlaces = legacy.compactMap { key, place in
+                guard let tag = PlaceTag(rawValue: key) else { return nil }
+                return SavedPlace(tag: tag, latitude: place.latitude,
+                                  longitude: place.longitude)
+            }
+            .sorted { $0.tag.rawValue < $1.tag.rawValue }   // dictionaries are unordered
+        } else {
+            savedPlaces = []
+        }
         memberKind = (try? c.decodeIfPresent(String.self, forKey: .memberKind)) ?? nil
         isTraveling = (try? c.decode(Bool.self, forKey: .isTraveling)) ?? false
         notifyPrayerStart = (try? c.decode(Bool.self, forKey: .notifyPrayerStart)) ?? true

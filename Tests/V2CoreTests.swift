@@ -668,17 +668,21 @@ final class V2CoreTests: XCTestCase {
     func testSavedPlaceNearestPicksClosestWithinRadius() {
         // ~111m per 0.001° latitude. Home ≈ origin; masjid ≈ 1.1km north.
         let places = [
-            "home": SavedPlace(latitude: 47.6062, longitude: -122.3321),
-            "masjid": SavedPlace(latitude: 47.6162, longitude: -122.3321),
+            SavedPlace(tag: .home, latitude: 47.6062, longitude: -122.3321),
+            SavedPlace(tag: .masjid, latitude: 47.6162, longitude: -122.3321),
         ]
         // Standing ~55m from home → suggest home.
-        XCTAssertEqual(SavedPlace.nearest(to: 47.6067, -122.3321, in: places), .home)
+        XCTAssertEqual(SavedPlace.nearest(to: 47.6067, -122.3321, in: places)?.tag, .home)
         // Standing ~55m from the masjid → suggest masjid, not home.
-        XCTAssertEqual(SavedPlace.nearest(to: 47.6157, -122.3321, in: places), .masjid)
+        XCTAssertEqual(SavedPlace.nearest(to: 47.6157, -122.3321, in: places)?.tag, .masjid)
         // Standing ~550m from both → no suggestion.
         XCTAssertNil(SavedPlace.nearest(to: 47.6112, -122.3321, in: places))
-        // Custom radius widens the net.
-        XCTAssertNotNil(SavedPlace.nearest(to: 47.6112, -122.3321, in: places, maxMeters: 700))
+        // v4.1: the radius is now per-place rather than a call-site argument,
+        // so widening the net means widening THAT place.
+        let wide = places.map { p -> SavedPlace in
+            var copy = p; copy.radiusMeters = 700; return copy
+        }
+        XCTAssertNotNil(SavedPlace.nearest(to: 47.6112, -122.3321, in: wide))
     }
 
     func testSettingsWithoutSavedPlacesStillDecodes() throws {
@@ -692,10 +696,11 @@ final class V2CoreTests: XCTestCase {
 
         // Round-trip with a saved place survives.
         var withPlace = settings
-        withPlace.savedPlaces["home"] = SavedPlace(latitude: 1, longitude: 2)
+        let home = SavedPlace(tag: .home, latitude: 1, longitude: 2)
+        withPlace.savedPlaces = [home]
         let data = try JSONEncoder().encode(withPlace)
         let decoded = try JSONDecoder().decode(AppSettings.self, from: data)
-        XCTAssertEqual(decoded.savedPlaces["home"], SavedPlace(latitude: 1, longitude: 2))
+        XCTAssertEqual(decoded.savedPlaces, [home])
     }
 
     func testV1ProfileJSONStillDecodes() throws {
@@ -734,5 +739,76 @@ final class V2CoreTests: XCTestCase {
         let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
         let decoded = try decoder.decode(PrayerLog.self, from: encoder.encode(original))
         XCTAssertEqual(decoded, original)
+    }
+
+    // MARK: - Saved places: dictionary -> list migration (v4.1)
+
+    func testAPreV41SaveKeepsItsPlaces() throws {
+        // The old shape: one coordinate per tag, keyed by the tag's rawValue.
+        // Losing this on upgrade would silently reset somebody's Home — and
+        // Home also drives the travel banner, so the damage would not be
+        // confined to the Places card.
+        let json = """
+        {"savedPlaces":{"home":{"latitude":47.6062,"longitude":-122.3321},
+                        "masjid":{"latitude":47.6101,"longitude":-122.3421}}}
+        """.data(using: .utf8)!
+        let settings = try JSONDecoder().decode(AppSettings.self, from: json)
+
+        XCTAssertEqual(settings.savedPlaces.count, 2)
+        let home = try XCTUnwrap(settings.savedPlaces.first { $0.tag == .home })
+        XCTAssertEqual(home.latitude, 47.6062, accuracy: 0.0001)
+        XCTAssertEqual(home.longitude, -122.3321, accuracy: 0.0001)
+        XCTAssertNil(home.name, "a migrated place has no name until you give it one")
+        XCTAssertEqual(home.radiusMeters, SavedPlace.defaultRadiusMeters,
+                       "and inherits the radius the old code hard-coded")
+        XCTAssertTrue(settings.savedPlaces.contains { $0.tag == .masjid })
+    }
+
+    func testAnUnknownLegacyTagIsDroppedRatherThanInvented() throws {
+        let json = """
+        {"savedPlaces":{"home":{"latitude":1,"longitude":2},
+                        "spaceship":{"latitude":3,"longitude":4}}}
+        """.data(using: .utf8)!
+        let settings = try JSONDecoder().decode(AppSettings.self, from: json)
+        XCTAssertEqual(settings.savedPlaces.map(\.tag), [.home],
+                       "no tag can be recovered for an unknown key, and guessing is worse")
+    }
+
+    func testTheNewListShapeRoundTrips() throws {
+        var settings = AppSettings()
+        settings.savedPlaces = [
+            SavedPlace(tag: .masjid, name: "Masjid Al-Noor",
+                       latitude: 47.61, longitude: -122.34, radiusMeters: 400),
+            SavedPlace(tag: .masjid, name: "Downtown musalla",
+                       latitude: 47.60, longitude: -122.33),
+        ]
+        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        let restored = try decoder.decode(AppSettings.self, from: encoder.encode(settings))
+
+        XCTAssertEqual(restored.savedPlaces.count, 2, "TWO masjids — the whole point")
+        XCTAssertEqual(restored.savedPlaces[0].name, "Masjid Al-Noor")
+        XCTAssertEqual(restored.savedPlaces[0].radiusMeters, 400)
+        XCTAssertEqual(restored.savedPlaces[1].displayName, "Downtown musalla")
+        XCTAssertEqual(restored.savedPlaces.map(\.id), settings.savedPlaces.map(\.id),
+                       "ids are stable, so a rename can find its place again")
+    }
+
+    func testAbsentSavedPlacesDecodesEmptyRatherThanFailing() throws {
+        let settings = try JSONDecoder().decode(AppSettings.self,
+                                                from: "{}".data(using: .utf8)!)
+        XCTAssertTrue(settings.savedPlaces.isEmpty)
+    }
+
+    func testNearestJudgesEachPlaceAgainstItsOwnRadius() {
+        // A campus with a generous radius and a house with the default, ~300 m
+        // apart. Standing 350 m from both: inside the campus, outside the house.
+        let campus = SavedPlace(tag: .work, name: "Campus", latitude: 47.6500,
+                                longitude: -122.3000, radiusMeters: 1_000)
+        let house = SavedPlace(tag: .home, latitude: 47.6500, longitude: -122.3000)
+        let far = 47.6500 + (350.0 / 111_320.0)   // ~350 m north
+        XCTAssertEqual(SavedPlace.nearest(to: far, -122.3000, in: [campus, house])?.id,
+                       campus.id, "the house's 250 m does not reach; the campus's 1 km does")
+        XCTAssertNil(SavedPlace.nearest(to: far, -122.3000, in: [house]))
     }
 }
