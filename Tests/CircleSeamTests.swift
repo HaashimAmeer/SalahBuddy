@@ -241,6 +241,17 @@ final class CircleSeamTests: XCTestCase {
         }
     }
 
+    /// v4.2: and they take no rest days either — the same fact, which the race
+    /// now asks the seam for directly. `BuddySimulator.outcome` has three faces
+    /// (in-window, qada, missed) and none of them is a break, so the empty set
+    /// is the demo circle's answer rather than a caller shrugging.
+    func testSimulatedBuddiesHaveNoExcusedDays() {
+        for buddy in roster {
+            XCTAssertTrue(source.excusedDayKeys(forMember: memberID(buddy)).isEmpty)
+        }
+        XCTAssertTrue(source.excusedDayKeys(forMember: "buddy.Nobody").isEmpty)
+    }
+
     func testAnUnknownMemberAnswersEmpty() {
         // A stale id (a member removed between renders, or "you" by mistake)
         // must never fall through to another buddy's outcome.
@@ -260,6 +271,7 @@ final class CircleSeamTests: XCTestCase {
                                    window: window, now: now), .future)
         XCTAssertTrue(source.weekLogs(forMember: "buddy.Nobody", days: days, asOf: now).isEmpty)
         XCTAssertEqual(source.weeklyXP(forMember: "buddy.Nobody", days: days, asOf: now), 0)
+        XCTAssertTrue(source.excusedDayKeys(forMember: "buddy.Nobody").isEmpty)
     }
 
     func testAnEmptyRealCircleShowsNothingUntilPhaseB3() {
@@ -277,6 +289,7 @@ final class CircleSeamTests: XCTestCase {
                                   window: day.schedule.window(for: .fajr), now: now), .future)
         XCTAssertTrue(empty.weekLogs(forMember: "anyone", days: days, asOf: now).isEmpty)
         XCTAssertEqual(empty.weeklyXP(forMember: "anyone", days: days, asOf: now), 0)
+        XCTAssertTrue(empty.excusedDayKeys(forMember: "anyone").isEmpty)
         XCTAssertEqual(empty.recoveryXP(forMember: "anyone", weekKeys: ["2026-W24"]), 0)
     }
 
@@ -647,6 +660,17 @@ final class RemoteCircleSourceTests: XCTestCase {
         let asOf: Date = tuesdayStart.addingTimeInterval(86400)
         XCTAssertEqual(src.weeklyXP(forMember: amira.uuidString, days: weekDays(), asOf: asOf), 175,
                        "200 minus the 25 perfect-day bonus a resting day can't earn")
+
+        // v4.2: and the set itself is on the seam, because the crown race walks
+        // the week log by log and needs the same answer `weeklyXP` folds in.
+        XCTAssertEqual(src.excusedDayKeys(forMember: amira.uuidString), [mondayKey])
+        XCTAssertTrue(src.excusedDayKeys(forMember: bilal.uuidString).isEmpty,
+                      "one member's rest day is not the circle's")
+        let logs: [PrayerLog] = src.weekLogs(forMember: amira.uuidString,
+                                             days: weekDays(), asOf: asOf)
+        XCTAssertEqual(GameEngine.raceXP(logs: logs,
+                                         excusedDayKeys: src.excusedDayKeys(forMember: amira.uuidString)),
+                       175, "the race reads the seam and lands on the scoreboard's number")
     }
 
     func testRecoveryXPIsTheOpaqueWeeklyTotal() {
@@ -743,6 +767,7 @@ final class RemoteCircleSourceTests: XCTestCase {
                                      window: monday.window(for: .fajr), now: now).state,
                            .waiting, "id \(id)")
             XCTAssertEqual(src.weeklyXP(forMember: id, days: weekDays(), asOf: now), 0, "id \(id)")
+            XCTAssertTrue(src.excusedDayKeys(forMember: id).isEmpty, "id \(id)")
             XCTAssertNil(src.avatarPath(forMember: id), "id \(id)")
         }
     }
@@ -763,6 +788,7 @@ final class RemoteCircleSourceTests: XCTestCase {
                                     window: window, now: now), .future, "id \(id)")
             XCTAssertTrue(src.weekLogs(forMember: id, days: days, asOf: now).isEmpty, "id \(id)")
             XCTAssertEqual(src.weeklyXP(forMember: id, days: days, asOf: now), 0, "id \(id)")
+            XCTAssertTrue(src.excusedDayKeys(forMember: id).isEmpty, "id \(id)")
             XCTAssertEqual(src.recoveryXP(forMember: id, weekKeys: ["2026-W24"]), 0, "id \(id)")
             XCTAssertNil(src.avatarPath(forMember: id), "id \(id)")
         }

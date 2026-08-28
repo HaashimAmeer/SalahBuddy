@@ -212,15 +212,27 @@ struct RemoteCircleDataSource: CircleDataSource {
     /// they void the perfect-day bonus exactly as they do on your own row.
     func weeklyXP(forMember id: String, days: [(dayKey: String, schedule: DaySchedule)],
                   asOf now: Date) -> Int {
-        guard let userID = userID(forMember: id) else { return 0 }
         let logs: [PrayerLog] = weekLogs(forMember: id, days: days, asOf: now)
-        let excused: Set<String> = snapshot.excusedDayKeys(userID: userID)
+        let excused: Set<String> = excusedDayKeys(forMember: id)
         let dayKeys: Set<String> = Set(logs.map { $0.dayKey })
         var total = 0
         for key in dayKeys {
             total += GameEngine.xp(forDay: key, logs: logs, excusedDayKeys: excused)
         }
         return total
+    }
+
+    /// The member's rest days, straight off the mirror.
+    ///
+    /// v4.2: this used to be a local in `weeklyXP` alone. The crown race needs
+    /// the same set — an excused day earns no perfect-day bonus in the race any
+    /// more than it does in the standings — so it is answered once, here, and
+    /// `weeklyXP` reads it from the same place everybody else does. An id this
+    /// source doesn't speak for (unknown, departed, or "you") answers empty,
+    /// exactly as every other accessor on it does.
+    func excusedDayKeys(forMember id: String) -> Set<String> {
+        guard let userID = userID(forMember: id) else { return [] }
+        return snapshot.excusedDayKeys(userID: userID)
     }
 
     /// The opaque weekly dhikr/deeds total (§3) — the mirror stores one integer

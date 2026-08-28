@@ -328,17 +328,51 @@ final class CircleRecapTests: XCTestCase {
 
     /// The crown is decided by the same function the live scoreboard uses, so
     /// the recap can never crown somebody the Circle tab never did.
+    ///
+    /// v4.2: "the same logs" now includes the same rest days — each runner's
+    /// own, off the mirror for a friend and out of the entry for you.
     func testCrownMatchesTheLiveRaceOverTheSameLogs() throws {
         let recap = try scenarioRecap()
         let snapshot: CircleSnapshot = scenarioMirror()
-        var memberWeekLogs: [(member: CircleMember, logs: [PrayerLog])] = []
+        var memberWeekLogs: [ChallengeEngine.MemberWeek] = []
         for buddy in snapshot.buddyMembers {
             guard let id = UUID(uuidString: buddy.id) else { continue }
-            memberWeekLogs.append((buddy, snapshot.prayerLogs(userID: id, dayKeys: week)))
+            memberWeekLogs.append((buddy, snapshot.prayerLogs(userID: id, dayKeys: week),
+                                   snapshot.excusedDayKeys(userID: id)))
         }
-        memberWeekLogs.append((scenarioYou().member, scenarioYou().logs))
+        memberWeekLogs.append((scenarioYou().member, scenarioYou().logs,
+                               scenarioYou().excusedDayKeys))
         XCTAssertEqual(recap.crownHolderID,
                        ChallengeEngine.raceWinnerID(memberWeekLogs: memberWeekLogs))
+    }
+
+    /// A rest day voids the perfect-day bonus in the RACE as well as in the
+    /// standings — the half v4.1 left out when it gave the race its own walk of
+    /// the week.
+    ///
+    /// Amina's Monday is perfect and her crossing lands on Wednesday's fajr
+    /// (175 + 160 + 30 = 365, past 300 exactly there). Mark that Monday a rest
+    /// day and she is 25 short: her fajr leaves her on 340 — still over — so
+    /// the crown is checked where it actually moves, against a week trimmed to
+    /// Monday and Tuesday, which is 335 whole and 310 rested… and a target of
+    /// 325 that only the bonus can reach.
+    func testAnExcusedDayCannotCarryARunnerOverTheTarget() throws {
+        var posts: [RemotePost] = fullDay(amina, week[0])
+        for prayer in Prayer.allCases {
+            let tier: LogTier = (prayer == .isha) ? .lastCall : .onTime
+            posts.append(post(amina, prayer, week[1], tier: tier))
+        }
+        let logs: [PrayerLog] = mirror(posts: posts).prayerLogs(userID: amina, dayKeys: week)
+        XCTAssertEqual(GameEngine.raceXP(logs: logs, excusedDayKeys: []), 175 + 160)
+        XCTAssertEqual(GameEngine.raceXP(logs: logs, excusedDayKeys: [week[0]]), 150 + 160)
+
+        let her = CircleMember(id: amina.uuidString, name: "Amina", emoji: "🌸", isYou: false)
+        XCTAssertNotNil(ChallengeEngine.raceWinnerID(memberWeekLogs: [(her, logs, [])],
+                                                     threshold: 325),
+                        "her perfect Monday carries her over 325")
+        XCTAssertNil(ChallengeEngine.raceWinnerID(memberWeekLogs: [(her, logs, [week[0]])],
+                                                  threshold: 325),
+                     "a rest day pays its five prayers and not the bonus — 310, no crown")
     }
 
     /// Nobody reaching the target is an ordinary week, not an empty card.

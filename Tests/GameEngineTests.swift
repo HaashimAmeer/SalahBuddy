@@ -13,10 +13,14 @@ final class GameEngineTests: XCTestCase {
         return cal.date(from: c)!
     }
 
+    /// `at` defaults to the epoch, which is what every day-scoped fixture in
+    /// this file wants (nothing here cares WHEN a log landed). The race does —
+    /// `raceCrossing` walks the week in `loggedAt` order — so it says so.
     private func log(_ prayer: Prayer, _ tier: LogTier, dayKey: String,
-                     offset: Int? = nil, photo: String? = nil) -> PrayerLog {
+                     offset: Int? = nil, photo: String? = nil,
+                     at loggedAt: Date = Date(timeIntervalSince1970: 0)) -> PrayerLog {
         PrayerLog(id: UUID(), prayer: prayer, dayKey: dayKey,
-                  loggedAt: Date(timeIntervalSince1970: 0), tier: tier, xp: tier.xp,
+                  loggedAt: loggedAt, tier: tier, xp: tier.xp,
                   photoFilename: photo, utcOffset: offset)
     }
 
@@ -315,6 +319,117 @@ final class GameEngineTests: XCTestCase {
         var imperfect = logs
         imperfect[0] = log(.fajr, .qada, dayKey: dayKey)
         XCTAssertEqual(GameEngine.xp(forDay: dayKey, logs: imperfect), 5 + 4 * 30)
+    }
+
+    // MARK: - A break day earns no bonus in the race either (v4.2)
+
+    /// Monday 2026-06-08, 06:00 — the hour every race fixture counts from.
+    private var raceT0: Date { date(2026, 6, 8, 6, 0) }
+
+    /// The same three-day climb `V2CoreTests` races with, built here so the
+    /// pure engine can be questioned without a circle around it:
+    ///
+    /// * `2026-06-08` — four in-window and a qada isha. Complete, but the qada
+    ///   disqualifies the day: 125, no bonus, ever.
+    /// * `2026-06-09` — all five in-window, one an hour, finishing at `t0+9h`.
+    ///   175 when the day counts, 150 when it was a break day.
+    /// * `2026-06-10` — one more fajr at `t0+10h`.
+    ///
+    /// So the 25 XP of the middle day's bonus is the ONLY difference between
+    /// the two readings, and it lands exactly on the 300 mark.
+    private func raceWeek() -> [PrayerLog] {
+        var logs: [PrayerLog] = []
+        for (i, prayer) in Prayer.allCases.enumerated() {
+            let tier: LogTier = (prayer == .isha) ? .qada : .onTime
+            logs.append(log(prayer, tier, dayKey: "2026-06-08",
+                            at: raceT0.addingTimeInterval(Double(i) * 3600)))
+        }
+        for (i, prayer) in Prayer.allCases.enumerated() {
+            logs.append(log(prayer, .onTime, dayKey: "2026-06-09",
+                            at: raceT0.addingTimeInterval(Double(5 + i) * 3600)))
+        }
+        logs.append(log(.fajr, .onTime, dayKey: "2026-06-10",
+                        at: raceT0.addingTimeInterval(10 * 3600)))
+        return logs
+    }
+
+    /// Five prayers, all in their windows, on a day you were excused from: 150,
+    /// not 175. `isPerfectDay` has said so since v2 and every other total has
+    /// asked it — the race arrived a release late and asked nobody.
+    func testRaceXPGivesAnExcusedDayNoPerfectBonus() {
+        let week = raceWeek()
+        XCTAssertEqual(GameEngine.raceXP(logs: week, excusedDayKeys: []), 125 + 175 + 30,
+                       "no break days: the middle day is perfect and pays 25")
+        XCTAssertEqual(GameEngine.raceXP(logs: week, excusedDayKeys: ["2026-06-09"]),
+                       125 + 150 + 30,
+                       "a break day: the five prayers still count, the bonus does not")
+
+        // The middle day alone, so the 175/150 is unmistakably that day's.
+        let midweek = week.filter { $0.dayKey == "2026-06-09" }
+        XCTAssertEqual(GameEngine.raceXP(logs: midweek, excusedDayKeys: []), 175)
+        XCTAssertEqual(GameEngine.raceXP(logs: midweek, excusedDayKeys: ["2026-06-09"]), 150)
+
+        // Somebody else's break day is not yours: an unrelated key changes nothing.
+        XCTAssertEqual(GameEngine.raceXP(logs: week, excusedDayKeys: ["2026-06-11"]),
+                       GameEngine.raceXP(logs: week, excusedDayKeys: []))
+    }
+
+    /// And the crossing agrees with the total, which is the whole point of
+    /// v4.1: the bar and the crown may not read different numbers. Excused, the
+    /// week reaches 300 an hour later — at the next day's fajr, not on the
+    /// prayer that would have completed a "perfect" rest day.
+    func testRaceCrossingGivesAnExcusedDayNoPerfectBonus() {
+        let week = raceWeek()
+        XCTAssertEqual(GameEngine.raceCrossing(logs: week, threshold: 300, excusedDayKeys: []),
+                       raceT0.addingTimeInterval(9 * 3600),
+                       "the bonus lands with the fifth in-window prayer, at 300 exactly")
+        XCTAssertEqual(GameEngine.raceCrossing(logs: week, threshold: 300,
+                                               excusedDayKeys: ["2026-06-09"]),
+                       raceT0.addingTimeInterval(10 * 3600),
+                       "without the bonus the week is 275 there, and crosses an hour later")
+
+        // 275 IS reached at t0+9h either way — the excused day loses the bonus,
+        // never the prayers.
+        XCTAssertEqual(GameEngine.raceCrossing(logs: week, threshold: 275,
+                                               excusedDayKeys: ["2026-06-09"]),
+                       raceT0.addingTimeInterval(9 * 3600))
+
+        // Stop before the last day and the excused week never crosses at all.
+        let throughMidweek = week.filter { $0.dayKey != "2026-06-10" }
+        XCTAssertNotNil(GameEngine.raceCrossing(logs: throughMidweek, threshold: 300,
+                                                excusedDayKeys: []))
+        XCTAssertNil(GameEngine.raceCrossing(logs: throughMidweek, threshold: 300,
+                                             excusedDayKeys: ["2026-06-09"]),
+                     "275 is not 300 — a break day cannot carry you over the line")
+    }
+
+    /// The crown is FIRST PAST THE POST, and this pins the half that surprises
+    /// people: a make-up logged onto a day that was perfect voids its 25-XP
+    /// bonus (and pays 5), so the week's total drops back BELOW the target —
+    /// and the crossing stands, because it happened hours earlier. The progress
+    /// bar reading 280/300 under a standing crown is the intended behaviour of
+    /// a race to a target, not a bug to be tidied away.
+    func testACrossingSurvivesAMakeUpThatVoidsTheBonusItWasWonWith() {
+        var week = raceWeek().filter { $0.dayKey != "2026-06-10" }   // 125 + 175 = 300
+        XCTAssertEqual(GameEngine.raceXP(logs: week, excusedDayKeys: []), 300)
+        let wonAt = GameEngine.raceCrossing(logs: week, threshold: 300, excusedDayKeys: [])
+        XCTAssertEqual(wonAt, raceT0.addingTimeInterval(9 * 3600))
+
+        // A travel day can hold six: a make-up lands on the perfect day, a day
+        // later, and takes the bonus back with it.
+        week.append(log(.dhuhr, .qada, dayKey: "2026-06-09",
+                        at: raceT0.addingTimeInterval(30 * 3600)))
+        XCTAssertEqual(GameEngine.raceXP(logs: week, excusedDayKeys: []), 280,
+                       "the bar falls under the target — 25 gone, 5 paid")
+        XCTAssertEqual(GameEngine.raceCrossing(logs: week, threshold: 300, excusedDayKeys: []),
+                       wonAt,
+                       "the crown was won at t0+9h and stays won: first past the post")
+
+        // The other half of the same rule: nothing is banked, so deleting the
+        // logs that did the crossing gives the crown back.
+        let undone = week.filter { !($0.dayKey == "2026-06-09" && $0.prayer == .isha) }
+        XCTAssertNil(GameEngine.raceCrossing(logs: undone, threshold: 300, excusedDayKeys: []),
+                     "a crown falls with its basis — it is recomputed, never remembered")
     }
 
     // MARK: - Week math (BuddySimulator)

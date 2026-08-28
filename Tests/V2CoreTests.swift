@@ -260,7 +260,7 @@ final class V2CoreTests: XCTestCase {
     }
 
     func testCircleperfectTargetTracksCircleSize() {
-        let members = (0..<9).map { (member("m\($0)"), [PrayerLog]()) }
+        let members: [ChallengeEngine.MemberWeek] = (0..<9).map { (member("m\($0)"), [], []) }
         let ctx = context(memberWeekLogs: members)
         let def = ChallengeEngine.activeDefinitions(ctx).first { $0.id == "circleperfect" }!
         XCTAssertEqual(def.target, 9, "every member, incl. you, must full-day")
@@ -318,7 +318,7 @@ final class V2CoreTests: XCTestCase {
     }
 
     private func context(myLogs: [PrayerLog] = [],
-                         memberWeekLogs: [(member: CircleMember, logs: [PrayerLog])] = [],
+                         memberWeekLogs: [ChallengeEngine.MemberWeek] = [],
                          todayKey: String = "d07",
                          recentDayKeys: [String]? = nil,
                          weekDayKeys: [String] = ["d01", "d02", "d03", "d04", "d05", "d06", "d07"],
@@ -385,29 +385,30 @@ final class V2CoreTests: XCTestCase {
         }
 
         // All three logged isha d05–d07 → run of 3.
-        var ctx = context(memberWeekLogs: [(a, ishaLogs(["d05", "d06", "d07"])),
-                                           (b, ishaLogs(["d05", "d06", "d07"])),
-                                           (you, ishaLogs(["d05", "d06", "d07"]))])
+        var ctx = context(memberWeekLogs: [(a, ishaLogs(["d05", "d06", "d07"]), []),
+                                           (b, ishaLogs(["d05", "d06", "d07"]), []),
+                                           (you, ishaLogs(["d05", "d06", "d07"]), [])])
         XCTAssertEqual(ChallengeEngine.current(for: def, ctx: ctx), 3)
         XCTAssertTrue(ChallengeEngine.isCompletedNow(def, ctx: ctx))
 
         // One member missing d06 breaks the run for EVERYONE.
-        ctx = context(memberWeekLogs: [(a, ishaLogs(["d05", "d06", "d07"])),
-                                       (b, ishaLogs(["d05", "d07"])),
-                                       (you, ishaLogs(["d05", "d06", "d07"]))])
+        ctx = context(memberWeekLogs: [(a, ishaLogs(["d05", "d06", "d07"]), []),
+                                       (b, ishaLogs(["d05", "d07"]), []),
+                                       (you, ishaLogs(["d05", "d06", "d07"]), [])])
         XCTAssertEqual(ChallengeEngine.current(for: def, ctx: ctx), 1)
         XCTAssertFalse(ChallengeEngine.isCompletedNow(def, ctx: ctx))
     }
 
     func testRace300WinnerIdentification() {
         let t0 = date(2026, 6, 8, 6, 0)
-        func burst(_ member: CircleMember, count: Int, startingAt: Date) -> (CircleMember, [PrayerLog]) {
+        func burst(_ member: CircleMember, count: Int,
+                   startingAt: Date) -> ChallengeEngine.MemberWeek {
             // count onTime logs (30 XP each), one per hour.
             let logs = (0..<count).map { i in
                 log(.dhuhr, .onTime, dayKey: "d0\(1 + i / 5)",
                     loggedAt: startingAt.addingTimeInterval(Double(i) * 3600))
             }
-            return (member, logs)
+            return (member, logs, [])
         }
         let a = member("a"), you = member("you", isYou: true)
 
@@ -477,24 +478,40 @@ final class V2CoreTests: XCTestCase {
         let climb = perfectDayClimber(startingAt: t0)
 
         // The two halves of the race now quote the same number.
-        XCTAssertEqual(GameEngine.raceXP(logs: climb), 125 + 175 + 30)
-        XCTAssertEqual(ChallengeEngine.memberWeeklyXP(logs: climb), GameEngine.raceXP(logs: climb))
+        XCTAssertEqual(GameEngine.raceXP(logs: climb, excusedDayKeys: []), 125 + 175 + 30)
+        XCTAssertEqual(ChallengeEngine.memberWeeklyXP(logs: climb, excusedDayKeys: []),
+                       GameEngine.raceXP(logs: climb, excusedDayKeys: []))
 
         // 300 is reached the moment d02 turns perfect — not an hour later, when
         // a sum blind to the bonus would have got there.
-        XCTAssertEqual(GameEngine.raceCrossing(logs: climb, threshold: 300),
+        XCTAssertEqual(GameEngine.raceCrossing(logs: climb, threshold: 300, excusedDayKeys: []),
                        t0.addingTimeInterval(9 * 3600))
 
         // And the bar reading the target is exactly when somebody has crossed:
         // d01+d02 alone is 275 raw, 300 scored.
         let throughD02 = Array(climb.dropLast())
-        XCTAssertEqual(GameEngine.raceXP(logs: throughD02), 300)
-        XCTAssertNotNil(GameEngine.raceCrossing(logs: throughD02, threshold: 300))
+        XCTAssertEqual(GameEngine.raceXP(logs: throughD02, excusedDayKeys: []), 300)
+        XCTAssertNotNil(GameEngine.raceCrossing(logs: throughD02, threshold: 300,
+                                                excusedDayKeys: []))
 
         // One prayer short of perfect, the day is 245 and nobody has crossed.
         let shortOfPerfect = throughD02.filter { !($0.dayKey == "d02" && $0.prayer == .isha) }
-        XCTAssertEqual(GameEngine.raceXP(logs: shortOfPerfect), 245)
-        XCTAssertNil(GameEngine.raceCrossing(logs: shortOfPerfect, threshold: 300))
+        XCTAssertEqual(GameEngine.raceXP(logs: shortOfPerfect, excusedDayKeys: []), 245)
+        XCTAssertNil(GameEngine.raceCrossing(logs: shortOfPerfect, threshold: 300,
+                                             excusedDayKeys: []))
+
+        // v4.2: the SAME week with d02 excused is 25 short everywhere at once —
+        // the bar and the crossing move together or they were never one number.
+        XCTAssertEqual(GameEngine.raceXP(logs: climb, excusedDayKeys: ["d02"]), 125 + 150 + 30)
+        XCTAssertEqual(ChallengeEngine.memberWeeklyXP(logs: climb, excusedDayKeys: ["d02"]),
+                       GameEngine.raceXP(logs: climb, excusedDayKeys: ["d02"]))
+        XCTAssertEqual(GameEngine.raceCrossing(logs: climb, threshold: 300,
+                                               excusedDayKeys: ["d02"]),
+                       t0.addingTimeInterval(10 * 3600),
+                       "a rest day pays its prayers and not the bonus, so d03 does the crossing")
+        XCTAssertEqual(GameEngine.raceXP(logs: throughD02, excusedDayKeys: ["d02"]), 275)
+        XCTAssertNil(GameEngine.raceCrossing(logs: throughD02, threshold: 300,
+                                             excusedDayKeys: ["d02"]))
     }
 
     /// The bonus decides the crown, and it decides it for whoever earned it —
@@ -504,9 +521,9 @@ final class V2CoreTests: XCTestCase {
         let you = member("you", isYou: true), a = member("a")
         // "a" gets there at t0+9h30m: after your perfect day lands, before a
         // bonus-blind sum would have credited it.
-        let entries: [(member: CircleMember, logs: [PrayerLog])] =
-            [(a, flatRunner(endingAt: t0.addingTimeInterval(9 * 3600 + 1800))),
-             (you, perfectDayClimber(startingAt: t0))]
+        let entries: [ChallengeEngine.MemberWeek] =
+            [(a, flatRunner(endingAt: t0.addingTimeInterval(9 * 3600 + 1800)), []),
+             (you, perfectDayClimber(startingAt: t0), [])]
 
         XCTAssertEqual(ChallengeEngine.raceWinnerID(memberWeekLogs: entries), "you",
                        "your perfect day put you over first — the crown follows the bar")
@@ -519,9 +536,9 @@ final class V2CoreTests: XCTestCase {
     func testPerfectDayBonusAlsoLosesYouACrownYouUsedToWin() {
         let t0 = date(2026, 6, 8, 6, 0)
         let you = member("you", isYou: true), a = member("a")
-        let entries: [(member: CircleMember, logs: [PrayerLog])] =
-            [(a, perfectDayClimber(startingAt: t0)),
-             (you, flatRunner(endingAt: t0.addingTimeInterval(9 * 3600 + 1800)))]
+        let entries: [ChallengeEngine.MemberWeek] =
+            [(a, perfectDayClimber(startingAt: t0), []),
+             (you, flatRunner(endingAt: t0.addingTimeInterval(9 * 3600 + 1800)), [])]
 
         XCTAssertEqual(ChallengeEngine.raceWinnerID(memberWeekLogs: entries), "a",
                        "her perfect day counts on her bar, so it counts in the race")
@@ -529,7 +546,70 @@ final class V2CoreTests: XCTestCase {
         XCTAssertFalse(ChallengeEngine.isCompletedNow(def, ctx: context(memberWeekLogs: entries)),
                        "you reached 300 second — no award")
         // You still crossed; you were simply beaten to it.
-        XCTAssertGreaterThanOrEqual(ChallengeEngine.memberWeeklyXP(logs: entries[1].logs), 300)
+        XCTAssertGreaterThanOrEqual(ChallengeEngine.memberWeeklyXP(logs: entries[1].logs,
+                                                                   excusedDayKeys: []), 300)
+    }
+
+    // MARK: - ...and a break day earns no bonus in it (v4.2)
+
+    /// The same two runners, the same hour of daylight between them — and d02
+    /// is now a day you were excused from. Without the bonus your week is 275
+    /// there, so `a` reaches the target first and the crown is hers.
+    ///
+    /// This is the direction that COSTS you: it is the one a fix written to
+    /// make the excused set "helpful" would quietly skip.
+    func testAnExcusedDayCostsYouACrownTheBonusWouldHaveWon() {
+        let t0 = date(2026, 6, 8, 6, 0)
+        let you = member("you", isYou: true), a = member("a")
+        let entries: [ChallengeEngine.MemberWeek] =
+            [(a, flatRunner(endingAt: t0.addingTimeInterval(9 * 3600 + 1800)), []),
+             (you, perfectDayClimber(startingAt: t0), ["d02"])]
+
+        // Same fixtures uncrossed by a rest day put YOU first — that is
+        // `testPerfectDayBonusWinsYouTheCrownItUsedToCostYou`, one flag away.
+        XCTAssertEqual(ChallengeEngine.raceWinnerID(memberWeekLogs: entries), "a",
+                       "your rest day pays five prayers and no bonus, so she got there first")
+        let def = ChallengeEngine.definition(id: "race300")!
+        XCTAssertFalse(ChallengeEngine.isCompletedNow(def, ctx: context(memberWeekLogs: entries)))
+        // And the bar the crown followed says the same 25 XP less.
+        XCTAssertEqual(ChallengeEngine.current(for: def, ctx: context(memberWeekLogs: entries)),
+                       125 + 150 + 30)
+    }
+
+    /// ...and the direction that WINS you one: her perfect day was a rest day,
+    /// so the bonus it looks like it earned is not hers to race with.
+    func testAnExcusedDayCostsHerACrownAndHandsItToYou() {
+        let t0 = date(2026, 6, 8, 6, 0)
+        let you = member("you", isYou: true), a = member("a")
+        let entries: [ChallengeEngine.MemberWeek] =
+            [(a, perfectDayClimber(startingAt: t0), ["d02"]),
+             (you, flatRunner(endingAt: t0.addingTimeInterval(9 * 3600 + 1800)), [])]
+
+        XCTAssertEqual(ChallengeEngine.raceWinnerID(memberWeekLogs: entries), "you",
+                       "she crosses at t0+10h now, half an hour after you did")
+        let def = ChallengeEngine.definition(id: "race300")!
+        XCTAssertTrue(ChallengeEngine.isCompletedNow(def, ctx: context(memberWeekLogs: entries)))
+    }
+
+    /// Each runner is scored against THEIR OWN rest days, which is the bug one
+    /// shared (or forgotten) set would reintroduce. Two identical weeks; only
+    /// the first is excused, and the first is also the one array order would
+    /// hand a tie to — so the crown moving is the excused set doing real work.
+    func testEachRunnersExcusedDaysAreTheirOwn() {
+        let t0 = date(2026, 6, 8, 6, 0)
+        let resting = member("resting"), praying = member("praying")
+        let entries: [ChallengeEngine.MemberWeek] =
+            [(resting, perfectDayClimber(startingAt: t0), ["d02"]),
+             (praying, perfectDayClimber(startingAt: t0), [])]
+
+        XCTAssertEqual(ChallengeEngine.raceWinnerID(memberWeekLogs: entries), "praying",
+                       "identical logs; only the rest day separates them")
+        XCTAssertEqual(ChallengeEngine.memberWeeklyXP(logs: entries[0].logs,
+                                                      excusedDayKeys: entries[0].excusedDayKeys)
+                       + GameEngine.perfectDayBonus,
+                       ChallengeEngine.memberWeeklyXP(logs: entries[1].logs,
+                                                      excusedDayKeys: entries[1].excusedDayKeys),
+                       "and the gap between their bars is exactly one bonus")
     }
 
     func testCompletionAwardedOnceAndWeeklyRekeying() {
@@ -548,13 +628,13 @@ final class V2CoreTests: XCTestCase {
         // Group weeklies key by id|weekKey → completing last week re-arms this week.
         let a = member("a"), b = member("b"), you = member("you", isYou: true)
         let isha = ["d05", "d06", "d07"].map { log(.isha, .prayed, dayKey: $0) }
-        let groupCtx = context(memberWeekLogs: [(a, isha), (b, isha), (you, isha)],
+        let groupCtx = context(memberWeekLogs: [(a, isha, []), (b, isha, []), (you, isha, [])],
                                weekKey: "2026-W24",
                                completions: ["isha3|2026-W23": Date()])
         let keys = ChallengeEngine.newlyCompleted(groupCtx).map(\.key)
         XCTAssertTrue(keys.contains("isha3|2026-W24"), "last week's completion doesn't block this week")
 
-        let blocked = context(memberWeekLogs: [(a, isha), (b, isha), (you, isha)],
+        let blocked = context(memberWeekLogs: [(a, isha, []), (b, isha, []), (you, isha, [])],
                               weekKey: "2026-W24",
                               completions: ["isha3|2026-W24": Date()])
         XCTAssertFalse(ChallengeEngine.newlyCompleted(blocked).map(\.key).contains("isha3|2026-W24"))
@@ -566,8 +646,8 @@ final class V2CoreTests: XCTestCase {
         let a = member("a"), you = member("you", isYou: true)
         func fajrLogs(_ days: [String]) -> [PrayerLog] { days.map { log(.fajr, .prayed, dayKey: $0) } }
 
-        var ctx = context(memberWeekLogs: [(a, fajrLogs(["d05", "d06", "d07"])),
-                                           (you, fajrLogs(["d05", "d06", "d07"]))],
+        var ctx = context(memberWeekLogs: [(a, fajrLogs(["d05", "d06", "d07"]), []),
+                                           (you, fajrLogs(["d05", "d06", "d07"]), [])],
                           customChallenges: [custom])
         let def = ChallengeEngine.activeDefinitions(ctx).first { $0.id == "custom-test" }!
         XCTAssertEqual(def.target, 3)
@@ -578,8 +658,8 @@ final class V2CoreTests: XCTestCase {
         XCTAssertTrue(ChallengeEngine.newlyCompleted(ctx).map(\.key).contains("custom-test|2026-W24"))
 
         // One member missing a day breaks the run.
-        ctx = context(memberWeekLogs: [(a, fajrLogs(["d05", "d07"])),
-                                       (you, fajrLogs(["d05", "d06", "d07"]))],
+        ctx = context(memberWeekLogs: [(a, fajrLogs(["d05", "d07"]), []),
+                                       (you, fajrLogs(["d05", "d06", "d07"]), [])],
                       customChallenges: [custom])
         XCTAssertEqual(ChallengeEngine.current(for: def, ctx: ctx), 1)
     }

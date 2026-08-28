@@ -25,7 +25,7 @@ Toggle **Prayed in jamaat** (or **Jumma** on Friday Dhuhr) after the photo and t
 
 | Bonus | XP | Notes |
 |---|---|---|
-| Perfect day | +25 | All 5 prayers in their windows; qada disqualifies |
+| Perfect day | +25 | All 5 prayers in their windows; qada disqualifies; a **break day never earns it** — everywhere, including the race |
 
 ## Dhikr & deeds (v3.8 — permanent, for everyone; v4 — counts for everyone in the circle)
 
@@ -63,6 +63,6 @@ XP needed to clear level n → n+1: `100 + (n−1) × 25`. New title every 5 lev
 ## The circle (weekly, resets Monday 00:00 local)
 
 - Weekly score = prayer XP + bonuses **+ that week's recovery (dhikr/deeds) XP as one opaque total** — the same rule for you and for every friend (SPEC-V4 §3).
-- **Race**: first member to the weekly target wins the crown — **prayer XP only**, so a big dhikr week never buys one. "Prayer XP" here is the logs *plus the perfect-day bonuses they earned* — the same number the race's progress bar shows, since the bonus is bought with exactly what the race rewards (all five, in their windows). The one thing left out is the opaque recovery total. The target starts at 300 and climbs +100 with every past win.
+- **Race**: first member to the weekly target wins the crown — **prayer XP only**, so a big dhikr week never buys one. "Prayer XP" here is the logs *plus the perfect-day bonuses they earned* — the same number the race's progress bar shows, since the bonus is bought with exactly what the race rewards (all five, in their windows). A **break day earns no bonus in the race either**, exactly as it earns none on the scoreboard beside it: five prayers on a day you were excused from are still five prayers, and still not a perfect day. The one thing left out is the opaque recovery total. The target starts at 300 and climbs +100 with every past win. **The crown is first past the post**: it is decided by who *reached* the target earliest, not by who is above it now — so undoing the prayers that got you there gives the crown back (it is recomputed from the logs, never banked), while a later make-up that voids a banked perfect-day bonus leaves it standing, and the bar can sit just under the target under a crown that has already been won.
 - **The weekly recap's circle page** (Journey, real circles only) recaps the last finished Mon–Sun week with the same two numbers: the standings as the scoreboard scored them, and the best single day anybody had — prayer XP, decided by the data (highest XP, then the earlier day, then the name) so every phone in the circle shows the same answer.
 - Hard-coded group challenges (everyone-prays-Isha ×3, Circle Perfect Day) plus **custom challenges** the circle creates (+ button): pick a prayer and a day count, everyone has to log it that many days in a row, reward = 15 XP × days.

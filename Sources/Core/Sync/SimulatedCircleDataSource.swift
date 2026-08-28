@@ -75,6 +75,13 @@ struct SimulatedCircleDataSource: CircleDataSource {
         return BuddySimulator.weeklyXP(for: buddy, days: days, asOf: now)
     }
 
+    /// Simulated buddies never take a break — `BuddySimulator.outcome` has only
+    /// three faces (in-window, qada, missed) and none of them is a rest day. So
+    /// the empty set is the demo circle's ANSWER, not a caller shrugging: there
+    /// is no excused day here for the race or the scoreboard to miss, which is
+    /// the same fact `recoveryXP` reports as 0 just below.
+    func excusedDayKeys(forMember id: String) -> Set<String> { [] }
+
     /// Simulated buddies never take a break, so they earn no dhikr/deeds XP —
     /// the demo scoreboard is prayer XP alone, exactly as in v3.9.
     func recoveryXP(forMember id: String, weekKeys: [String]) -> Int { 0 }

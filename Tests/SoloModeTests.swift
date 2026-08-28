@@ -36,7 +36,7 @@ final class SoloModeTests: XCTestCase {
     }
 
     private func context(myLogs: [PrayerLog] = [],
-                         memberWeekLogs: [(member: CircleMember, logs: [PrayerLog])] = [],
+                         memberWeekLogs: [ChallengeEngine.MemberWeek] = [],
                          completions: [String: Date] = [:],
                          customChallenges: [CustomChallenge] = [],
                          hasCircle: Bool = true,
@@ -171,7 +171,7 @@ final class SoloModeTests: XCTestCase {
         let isha = ["d05", "d06", "d07"].map { log(.isha, .prayed, dayKey: $0) }
         let custom = CustomChallenge(id: "custom-solo", prayer: .isha, days: 3,
                                      createdAt: date(2026, 6, 8))
-        let solo = context(myLogs: isha, memberWeekLogs: [(you, isha)],
+        let solo = context(myLogs: isha, memberWeekLogs: [(you, isha, [])],
                            customChallenges: [custom], hasCircle: false)
 
         let visible = ChallengeEngine.progressList(solo).map(\.id)
@@ -196,14 +196,15 @@ final class SoloModeTests: XCTestCase {
         // The exploit: "everyone logged Isha" is trivially true over a
         // one-member circle, so isha3 completed itself and re-paid 50 XP every
         // week. The predicate still says yes...
-        let solo = context(memberWeekLogs: [(you, isha)], hasCircle: false)
+        let solo = context(memberWeekLogs: [(you, isha, [])], hasCircle: false)
         XCTAssertTrue(ChallengeEngine.isCompletedNow(def, ctx: solo))
         // ...but isha3 is no longer an active definition, so nothing is awarded.
         XCTAssertFalse(ChallengeEngine.activeDefinitions(solo).contains { $0.id == "isha3" })
         XCTAssertFalse(ChallengeEngine.newlyCompleted(solo).map(\.key).contains("isha3|2026-W24"))
 
         // One real friend and the challenge is live again.
-        let withCircle = context(memberWeekLogs: [(member("a"), isha), (you, isha)], hasCircle: true)
+        let withCircle = context(memberWeekLogs: [(member("a"), isha, []), (you, isha, [])],
+                                 hasCircle: true)
         XCTAssertEqual(ChallengeEngine.current(for: def, ctx: withCircle), 3)
         XCTAssertTrue(ChallengeEngine.newlyCompleted(withCircle).map(\.key).contains("isha3|2026-W24"))
     }
@@ -216,8 +217,8 @@ final class SoloModeTests: XCTestCase {
             log(.dhuhr, .onTime, dayKey: "d0\(1 + i / 5)",
                 loggedAt: t0.addingTimeInterval(Double(i) * 3600))
         }
-        let soloRace = context(memberWeekLogs: [(you, burst)], hasCircle: false)
-        XCTAssertEqual(ChallengeEngine.raceWinnerID(memberWeekLogs: [(you, burst)]), "you",
+        let soloRace = context(memberWeekLogs: [(you, burst, [])], hasCircle: false)
+        XCTAssertEqual(ChallengeEngine.raceWinnerID(memberWeekLogs: [(you, burst, [])]), "you",
                        "the raw race still says you crossed first — you're the only runner")
         XCTAssertNil(ChallengeEngine.activeDefinitions(soloRace).first { $0.id == "race300" })
         XCTAssertFalse(ChallengeEngine.newlyCompleted(soloRace).map(\.key)
@@ -225,11 +226,12 @@ final class SoloModeTests: XCTestCase {
 
         // circleperfect's target collapses to 1 (just you) when solo — gone too.
         let full = Prayer.allCases.map { log($0, .onTime, dayKey: "d07") }
-        let soloPerfect = context(memberWeekLogs: [(you, full)], hasCircle: false)
+        let soloPerfect = context(memberWeekLogs: [(you, full, [])], hasCircle: false)
         XCTAssertNil(ChallengeEngine.activeDefinitions(soloPerfect).first { $0.id == "circleperfect" })
 
         // With one friend it's back, targeting every member.
-        let withCircle = context(memberWeekLogs: [(member("a"), full), (you, full)], hasCircle: true)
+        let withCircle = context(memberWeekLogs: [(member("a"), full, []), (you, full, [])],
+                                 hasCircle: true)
         XCTAssertEqual(ChallengeEngine.activeDefinitions(withCircle)
             .first { $0.id == "circleperfect" }?.target, 2)
     }
@@ -252,7 +254,7 @@ final class SoloModeTests: XCTestCase {
                 theirs.append(log(prayer, .onTime, dayKey: key, loggedAt: at.addingTimeInterval(600)))
             }
         }
-        let members = [(friend, theirs), (you, mine)]
+        let members: [ChallengeEngine.MemberWeek] = [(friend, theirs, []), (you, mine, [])]
 
         // Live circle: all three group challenges pay out.
         let live = context(myLogs: mine, memberWeekLogs: members)

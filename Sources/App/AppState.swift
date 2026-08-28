@@ -1339,13 +1339,17 @@ final class AppState: ObservableObject {
         let weekDayKeySet = Set(weekDayKeys)
         let days = currentWeekDays()
 
+        // v4.2: every runner brings their own rest days. A friend's come off the
+        // mirror through the seam; yours are `profile.excusedDayKeys`, the local
+        // truth your own scoreboard row and recap already score against.
         let source = circleSource
-        var memberWeekLogs: [(member: CircleMember, logs: [PrayerLog])] = []
+        var memberWeekLogs: [ChallengeEngine.MemberWeek] = []
         for member in source.members {
             let weekLogs: [PrayerLog] = source.weekLogs(forMember: member.id, days: days, asOf: now)
-            memberWeekLogs.append((member, weekLogs))
+            memberWeekLogs.append((member, weekLogs, source.excusedDayKeys(forMember: member.id)))
         }
-        memberWeekLogs.append((youMember, logs.filter { weekDayKeySet.contains($0.dayKey) }))
+        memberWeekLogs.append((youMember, logs.filter { weekDayKeySet.contains($0.dayKey) },
+                               profile.excusedDayKeys))
 
         return ChallengeEngine.Context(myLogs: logs,
                                        memberWeekLogs: memberWeekLogs,
@@ -1665,7 +1669,7 @@ final class AppState: ObservableObject {
 
         let keySet: Set<String> = Set(weekDayKeys)
         var standings: [CircleWeekRecap.Standing] = []
-        var memberWeekLogs: [(member: CircleMember, logs: [PrayerLog])] = []
+        var memberWeekLogs: [ChallengeEngine.MemberWeek] = []
         var bestDay: CircleWeekRecap.BestDay?
         var anyLogs: Bool = false
 
@@ -1689,7 +1693,10 @@ final class AppState: ObservableObject {
             // SCORING.md already describes.
             standings.append(CircleWeekRecap.Standing(member: entry.member,
                                                       xp: prayerXP + max(0, entry.recoveryXP)))
-            memberWeekLogs.append((entry.member, weekLogs))
+            // The crown re-runs the race over the same excused set the standings
+            // above just scored with — one entry, read twice, so the card cannot
+            // crown a perfect day it printed as a rest day.
+            memberWeekLogs.append((entry.member, weekLogs, entry.excusedDayKeys))
         }
         guard anyLogs else { return nil }
 

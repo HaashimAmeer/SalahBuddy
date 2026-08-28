@@ -678,13 +678,18 @@ extension AppState {
 
         // v4: the crown reads the same seam the scoreboard does, so a real
         // circle races on synced posts without touching this math.
+        // v4.2: and the same rest days too — the seam answers for a friend, and
+        // your own excused set is the one your row is scored with everywhere
+        // else. A break day is never a perfect day, on the bar or in the race.
         let source = circleSource
-        var memberWeekLogs: [(member: CircleMember, logs: [PrayerLog])] = source.members.map { member in
-            (member, source.weekLogs(forMember: member.id, days: days, asOf: now))
+        var memberWeekLogs: [ChallengeEngine.MemberWeek] = source.members.map { member in
+            (member, source.weekLogs(forMember: member.id, days: days, asOf: now),
+             source.excusedDayKeys(forMember: member.id))
         }
         if let you = circleMembers.first(where: { $0.isYou }) {
             let weekKeySet = Set(dayKeys)
-            memberWeekLogs.append((you, logs.filter { weekKeySet.contains($0.dayKey) }))
+            memberWeekLogs.append((you, logs.filter { weekKeySet.contains($0.dayKey) },
+                                   profile.excusedDayKeys))
         }
         return ChallengeEngine.raceWinnerID(memberWeekLogs: memberWeekLogs, threshold: 300)
     }

@@ -622,8 +622,20 @@ enum GameEngine {
     /// unclaimed — and worse, hand the crown to whoever the bonus-free total
     /// happened to favour. At 25 XP the bonus is worth most of a prayer; it
     /// changes orderings, not just totals.
-    static func raceXP(logs: [PrayerLog]) -> Int {
-        Set(logs.map(\.dayKey)).reduce(0) { $0 + xp(forDay: $1, logs: logs) }
+    ///
+    /// `excusedDayKeys` has NO default, deliberately (v4.2). An excused day
+    /// never earns the perfect-day bonus — `isPerfectDay` has said so since v2,
+    /// and the scoreboard, the recap and your own weekly total have always
+    /// passed the set — but the race arrived a currency-fix late and took no
+    /// excused days at all, so a break day quietly paid a member 25 XP the
+    /// standings beside it refused them. A default of `[]` would let the next
+    /// caller re-open exactly that hole without writing a line: pass the
+    /// member's real set, or say `[]` out loud and mean it (simulated buddies
+    /// never take a break, so `[]` is their ANSWER, not an omission).
+    static func raceXP(logs: [PrayerLog], excusedDayKeys: Set<String>) -> Int {
+        Set(logs.map(\.dayKey)).reduce(0) {
+            $0 + xp(forDay: $1, logs: logs, excusedDayKeys: excusedDayKeys)
+        }
     }
 
     /// The instant `logs` first reached `threshold` under `raceXP`, or nil if
@@ -638,7 +650,36 @@ enum GameEngine {
     /// rather than the whole prefix keeps it linear in the week AND keeps the
     /// arithmetic identical to the total; a hand-rolled running version of the
     /// perfect-day rule would be a second definition, which is the bug.
-    static func raceCrossing(logs: [PrayerLog], threshold: Int) -> Date? {
+    ///
+    /// `excusedDayKeys` is the runner's OWN set and, like `raceXP`'s, has no
+    /// default: a break day cannot be a perfect day, so it cannot pay the bonus
+    /// that decides a crown either.
+    ///
+    /// THE CROWN IS FIRST PAST THE POST — a decision, not an oversight, so
+    /// please leave it alone. The walk RETURNS at the first instant the total
+    /// reaches `threshold` and never looks at the logs after it, which has two
+    /// consequences that only look inconsistent from a distance:
+    ///
+    /// * A crown falls with its basis. Nothing is banked anywhere — the winner
+    ///   is recomputed from the logs every time it is asked for — so undoing
+    ///   the prayers that did the crossing un-crowns the member, on every
+    ///   phone, with no state to reconcile. `excusedDayKeys` is part of that
+    ///   basis, not of the bookkeeping below: marking a day of the week a rest
+    ///   day re-runs the whole walk, so a crossing that only the voided bonus
+    ///   reached moves later or stops happening.
+    /// * A crown SURVIVES later bookkeeping on a week that already crossed.
+    ///   Log a make-up on a day that was perfect and the day loses its 25-XP
+    ///   bonus and gains 5: the week's `raceXP` drops back under the target,
+    ///   the progress bar reads (say) 280/300 — and the crown stays, because
+    ///   the runner had already passed the post hours earlier. That is the
+    ///   ordinary convention for a race to a target, and it is what keeps the
+    ///   crown from flickering off somebody's screen because a friend tidied up
+    ///   an old day. Do not "fix" the bar and the crown into agreeing here:
+    ///   they answer different questions — "how far are you now" and "who got
+    ///   there first" — and v4.1 already made them agree on the only thing they
+    ///   must, which is the currency.
+    static func raceCrossing(logs: [PrayerLog], threshold: Int,
+                             excusedDayKeys: Set<String>) -> Date? {
         let ordered = logs.sorted { a, b in
             a.loggedAt == b.loggedAt ? a.id.uuidString < b.id.uuidString
                                      : a.loggedAt < b.loggedAt
@@ -648,7 +689,8 @@ enum GameEngine {
         var total = 0
         for entry in ordered {
             logsByDay[entry.dayKey, default: []].append(entry)
-            let scored = xp(forDay: entry.dayKey, logs: logsByDay[entry.dayKey] ?? [])
+            let scored = xp(forDay: entry.dayKey, logs: logsByDay[entry.dayKey] ?? [],
+                            excusedDayKeys: excusedDayKeys)
             total += scored - (xpByDay[entry.dayKey] ?? 0)
             xpByDay[entry.dayKey] = scored
             if total >= threshold { return entry.loggedAt }

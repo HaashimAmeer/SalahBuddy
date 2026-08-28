@@ -57,10 +57,21 @@ enum ChallengeEngine {
 
     // MARK: - Context
 
+    /// One runner in the race: who they are, the week they logged, and the days
+    /// of it they were excused from.
+    ///
+    /// v4.2: the excused set is part of the SHAPE rather than an optional extra,
+    /// so a caller assembling a week cannot quietly forget that a break day
+    /// earns no perfect-day bonus. Every member's set is their own — yours is
+    /// `profile.excusedDayKeys`, a real friend's comes off the mirror, and a
+    /// simulated buddy has none because simulated buddies never take a break.
+    typealias MemberWeek = (member: CircleMember, logs: [PrayerLog],
+                            excusedDayKeys: Set<String>)
+
     /// Everything needed to compute progress, gathered by AppState.
     struct Context {
-        let myLogs: [PrayerLog]                                          // full history
-        let memberWeekLogs: [(member: CircleMember, logs: [PrayerLog])]  // current week, all members
+        let myLogs: [PrayerLog]                 // full history
+        let memberWeekLogs: [MemberWeek]        // current week, all members
         let todayKey: String
         let recentDayKeys: [String]    // ordered oldest→newest, ending today (~30 days)
         let weekDayKeys: [String]      // Mon-first, 7 dayKeys of the current week
@@ -166,7 +177,7 @@ enum ChallengeEngine {
             }
         case "race300":
             guard let you = ctx.memberWeekLogs.first(where: { $0.member.isYou }) else { return 0 }
-            return memberWeeklyXP(logs: you.logs)
+            return memberWeeklyXP(logs: you.logs, excusedDayKeys: you.excusedDayKeys)
         case "circleperfect":
             let weekSoFar = weekDayKeysThroughToday(ctx)
             var best = 0
@@ -227,12 +238,20 @@ enum ChallengeEngine {
     /// its own sum of raw `log.xp` and so raced in a currency nobody was shown
     /// — a member could watch the bar pass the target and stay uncrowned,
     /// because the perfect-day bonus counted on screen and not here.
-    static func raceWinnerID(memberWeekLogs: [(member: CircleMember, logs: [PrayerLog])],
+    ///
+    /// v4.2: each runner is scored against THEIR OWN excused days, which is why
+    /// `MemberWeek` carries them. Break days score alike everywhere else — the
+    /// scoreboard, the recap, your own weekly total — and the race is now no
+    /// exception: five prayers on a day you were excused from are still five
+    /// prayers, and still not a perfect day.
+    static func raceWinnerID(memberWeekLogs: [MemberWeek],
                              threshold: Int = 300) -> String? {
         var winner: (id: String, at: Date)?
         for entry in memberWeekLogs {
             guard let crossedAt = GameEngine.raceCrossing(logs: entry.logs,
-                                                          threshold: threshold) else { continue }
+                                                          threshold: threshold,
+                                                          excusedDayKeys: entry.excusedDayKeys)
+            else { continue }
             if winner == nil || crossedAt < winner!.at {
                 winner = (entry.member.id, crossedAt)
             }
@@ -243,8 +262,11 @@ enum ChallengeEngine {
     /// Weekly XP for a member's week-logs — per-day XP including the
     /// perfect-day bonus, which is the scoreboard's prayer half and, since
     /// v4.1, the race's own number too. See `GameEngine.raceXP`.
-    static func memberWeeklyXP(logs: [PrayerLog]) -> Int {
-        GameEngine.raceXP(logs: logs)
+    ///
+    /// v4.2: `excusedDayKeys` is the member's own, and required — the same set,
+    /// and the same reason, as everywhere else a day gets scored.
+    static func memberWeeklyXP(logs: [PrayerLog], excusedDayKeys: Set<String>) -> Int {
+        GameEngine.raceXP(logs: logs, excusedDayKeys: excusedDayKeys)
     }
 
     // MARK: - Helpers

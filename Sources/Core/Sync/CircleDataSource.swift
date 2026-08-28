@@ -36,6 +36,16 @@ protocol CircleDataSource {
     func weeklyXP(forMember id: String, days: [(dayKey: String, schedule: DaySchedule)],
                   asOf now: Date) -> Int
 
+    /// The member's excused (break) days — the set every scoring call takes so
+    /// that a rest day can never be a perfect day.
+    ///
+    /// v4.2: the scoreboard already had this, folded inside `weeklyXP`. The
+    /// crown race needs the same set a level up (it walks the week itself, log
+    /// by log), so the seam answers the question instead of each source hiding
+    /// its answer. A bare set of dayKeys and nothing else: `breakReason` never
+    /// leaves the device that wrote it.
+    func excusedDayKeys(forMember id: String) -> Set<String>
+
     /// The member's dhikr/deeds XP for those weeks — one opaque total per
     /// week, never the underlying deeds (SPEC-V4 §3).
     func recoveryXP(forMember id: String, weekKeys: [String]) -> Int
@@ -76,6 +86,9 @@ struct EmptyCircleDataSource: CircleDataSource {
                   asOf now: Date) -> Int {
         0
     }
+
+    /// Nobody is in this circle, so nobody is resting in it either.
+    func excusedDayKeys(forMember id: String) -> Set<String> { [] }
 
     func recoveryXP(forMember id: String, weekKeys: [String]) -> Int { 0 }
 }
