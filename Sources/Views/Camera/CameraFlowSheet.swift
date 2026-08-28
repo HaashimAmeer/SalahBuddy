@@ -3,7 +3,8 @@ import UIKit
 
 /// The capture sheet flow around `CameraCaptureView`:
 /// capture → confirm (jamaat toggle + optional place tag) → PhotoStore.save →
-/// appState.log → dismiss (the existing celebration overlay then fires on Today).
+/// appState.log → drop the JPEG if the log didn't take it → dismiss (the
+/// existing celebration overlay then fires on Today).
 /// Owned by the home agent.
 struct CameraFlowSheet: View {
     let target: CameraTarget
@@ -33,6 +34,24 @@ struct CameraFlowSheet: View {
         .interactiveDismissDisabled(captured != nil)
     }
 
+    /// Write the JPEG, log the prayer, and — if the log did not take the
+    /// photo — take the photo back.
+    ///
+    /// The write has to come FIRST and stays that way: `log` mirrors to the
+    /// circle from inside itself, and `PhotoSync` re-reads the file off the
+    /// disk when the outbox drains, so a photo written after the log would race
+    /// its own upload.
+    ///
+    /// v4.1: which is why the cleanup is at the end instead. `log` and
+    /// `logCombined` report a refusal by simply not appending — no target
+    /// window, the prayer already logged, the window not open yet — and the
+    /// window LAPSING while the confirm screen sat open is worse than a
+    /// refusal: the log lands, as qada, and `buildLog` deliberately drops the
+    /// photo. Both leave a JPEG on the disk that nothing references and nothing
+    /// would ever come back for, so ask the logs, not the flow, whether the
+    /// file is still wanted (`GameEngine.isPhotoOrphaned`) — a travel pair
+    /// shares one photo across two logs and that has to keep counting as
+    /// wanted.
     private func post(_ image: UIImage, jamaat: Bool, place: PlaceTag?, placeName: String?) {
         // Photo-save failure (disk) must never lose the prayer: an empty
         // filename from PhotoStore.save is treated as "no photo".
@@ -47,6 +66,7 @@ struct CameraFlowSheet: View {
                           placeTag: place, placeName: placeName)
             }
         }
+        PhotoStore.deleteIfOrphaned(filename, in: state.logs)
         dismiss()
     }
 }

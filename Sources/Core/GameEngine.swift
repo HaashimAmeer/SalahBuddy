@@ -537,6 +537,31 @@ enum GameEngine {
         return next
     }
 
+    // MARK: - Photo retention (v4.1)
+
+    /// Is the JPEG named `filename` spoken for by nothing at all?
+    ///
+    /// The one rule that decides whether a file in `PhotoStore` may go, and it
+    /// is deliberately about the LOGS rather than about the disk — which is
+    /// what makes it pure, and what lets the two ends of a photo's life ask the
+    /// identical question:
+    ///
+    /// - **Undo**, after removing a log. A travel-combined pair is two logs
+    ///   sharing ONE photo (see `mirrorLogged`), so taking back the follow
+    ///   prayer must leave the picture the lead still draws exactly where it is.
+    /// - **The camera flow**, after writing one. The confirm screen can sit open
+    ///   across the end of the window, and by the time "Post" is tapped the log
+    ///   may be refused outright, or land as qada — which drops the photo on
+    ///   purpose (`buildLog`). Either way the JPEG is already on disk with
+    ///   nothing pointing at it, and nothing later would ever come looking.
+    ///
+    /// nil and "" are not orphans, they are absences: `PhotoStore.save` returns
+    /// "" when the write failed, and there is no file to take back.
+    static func isPhotoOrphaned(_ filename: String?, in logs: [PrayerLog]) -> Bool {
+        guard let filename, !filename.isEmpty else { return false }
+        return !logs.contains { $0.photoFilename == filename }
+    }
+
     /// The log that REPRESENTS `(prayer, dayKey)` in a view of a PAST day — a
     /// week-grid cell, a memory, a day sheet.
     ///

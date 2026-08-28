@@ -600,11 +600,10 @@ final class AppState: ObservableObject {
 
         // Undo removes the photo file too — the grid returns to its CTA state.
         // v3.3: a combined (travel) pair shares one photo, so only delete the
-        // file once no remaining log still references it.
-        if let photo = removed.photoFilename,
-           !logs.contains(where: { $0.photoFilename == photo }) {
-            PhotoStore.delete(photo)
-        }
+        // file once no remaining log still references it. v4.1: that rule is
+        // `GameEngine.isPhotoOrphaned`, shared with the camera flow, which asks
+        // it of a photo it has just written rather than one it just orphaned.
+        PhotoStore.deleteIfOrphaned(removed.photoFilename, in: logs)
 
         // All of undo's arithmetic, in `GameEngine` where scoring lives. It
         // compares the day BEFORE against the day AFTER rather than assuming

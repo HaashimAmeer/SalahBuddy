@@ -41,6 +41,19 @@ enum PhotoStore {
         try? FileManager.default.removeItem(at: url(for: filename))
     }
 
+    /// v4.1: the other half of `save` — take a JPEG back off the disk unless
+    /// some log still points at it.
+    ///
+    /// It sits next to `save` so the two are read together, because the
+    /// failure it exists to prevent is a caller that wrote a photo and then
+    /// found out the log would not have it. The decision itself is
+    /// `GameEngine.isPhotoOrphaned` and belongs there; this is only the file
+    /// operation that follows from it.
+    static func deleteIfOrphaned(_ filename: String?, in logs: [PrayerLog]) {
+        guard let filename, GameEngine.isPhotoOrphaned(filename, in: logs) else { return }
+        delete(filename)
+    }
+
     /// Deletes the whole photos directory (reset-all-data path).
     static func deleteAll() {
         try? FileManager.default.removeItem(at: Store.directory.appendingPathComponent("photos", isDirectory: true))

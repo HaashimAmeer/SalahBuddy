@@ -14,10 +14,10 @@ final class GameEngineTests: XCTestCase {
     }
 
     private func log(_ prayer: Prayer, _ tier: LogTier, dayKey: String,
-                     offset: Int? = nil) -> PrayerLog {
+                     offset: Int? = nil, photo: String? = nil) -> PrayerLog {
         PrayerLog(id: UUID(), prayer: prayer, dayKey: dayKey,
                   loggedAt: Date(timeIntervalSince1970: 0), tier: tier, xp: tier.xp,
-                  utcOffset: offset)
+                  photoFilename: photo, utcOffset: offset)
     }
 
     private func fullDay(dayKey: String, tier: LogTier = .onTime) -> [PrayerLog] {
@@ -833,6 +833,107 @@ final class GameEngineTests: XCTestCase {
         XCTAssertEqual(after.streak, 3)
         XCTAssertEqual(after.lastStreakDayKey, "2026-08-21")
         XCTAssertEqual(after.perfectDayCount, 0)
+    }
+
+    // MARK: - Photo retention (a JPEG lives exactly as long as a log wants it)
+
+    /// The plain case, from both ends: the log took the photo, so the file
+    /// stays; nothing took it, so the file goes.
+    func testAPhotoIsAnOrphanExactlyWhenNoLogPointsAtIt() {
+        let key = "2026-08-22"
+        let kept = log(.fajr, .onTime, dayKey: key, photo: "fajr.jpg")
+
+        XCTAssertFalse(GameEngine.isPhotoOrphaned("fajr.jpg", in: [kept]),
+                       "the log that was just written is holding it")
+        XCTAssertTrue(GameEngine.isPhotoOrphaned("fajr.jpg", in: []),
+                      "no logs at all — nothing will ever come looking")
+        XCTAssertTrue(GameEngine.isPhotoOrphaned("fajr.jpg", in: [log(.asr, .onTime, dayKey: key,
+                                                                     photo: "asr.jpg")]),
+                      "someone else's photo is no reason to keep this one")
+    }
+
+    /// THE BUG. The confirm screen sat open across the end of the window, so by
+    /// the time "Post" was tapped the tier was qada — the log lands, and
+    /// `buildLog` drops the photo on purpose because a qada carries none. The
+    /// JPEG is already on the disk, and nothing in the accepted log points at
+    /// it.
+    ///
+    /// The two halves are asserted together on purpose: the lapse is what makes
+    /// the tier qada, and the qada is what makes the file an orphan.
+    func testALapsedWindowLeavesTheJustWrittenPhotoBehind() {
+        let start = date(2026, 8, 22, 12, 0)
+        let window = PrayerWindow(prayer: .dhuhr, start: start,
+                                  end: start.addingTimeInterval(120 * 60))
+
+        // Confirm screen opened inside the window, posted after it closed.
+        XCTAssertEqual(GameEngine.tier(for: window, at: start.addingTimeInterval(60)), .onTime)
+        let lapsed = GameEngine.tier(for: window, at: window.end)
+        XCTAssertEqual(lapsed, .qada, "the window closed while the sheet was open")
+        XCTAssertFalse(LogTier.qada.isInWindow, "which is why the log drops the photo")
+
+        // What `log` actually appended: a qada, no photo.
+        let landed = log(.dhuhr, .qada, dayKey: "2026-08-22", photo: nil)
+        XCTAssertTrue(GameEngine.isPhotoOrphaned("2026-08-22_dhuhr_ab12cd34.jpg", in: [landed]),
+                      "the accepted log took no photo, so the file must not survive it")
+    }
+
+    /// A refusal leaves the same mess by a different route: `log` no-ops when
+    /// the prayer is already logged, and the second post's JPEG is left over
+    /// while the FIRST one's is still rightfully in use.
+    func testARefusedSecondPostLosesItsOwnPhotoAndOnlyItsOwn() {
+        let key = "2026-08-22"
+        let first = log(.maghrib, .onTime, dayKey: key, photo: "first.jpg")
+
+        XCTAssertTrue(GameEngine.isPhotoOrphaned("second.jpg", in: [first]),
+                      "the double-log was refused — its photo is nobody's")
+        XCTAssertFalse(GameEngine.isPhotoOrphaned("first.jpg", in: [first]),
+                       "and the post that DID land keeps its own")
+    }
+
+    /// v3.3, and it must not regress: a travel-combined pair is TWO logs
+    /// sharing ONE photo. Undoing one side may not delete the picture the other
+    /// side still draws — only undoing both frees the file.
+    func testATravelPairSharesOnePhotoUntilBothSidesAreGone() {
+        let key = "2026-08-22"
+        let shared = "pair.jpg"
+        let lead = log(.dhuhr, .onTime, dayKey: key, photo: shared)
+        let follow = log(.asr, .onTime, dayKey: key, photo: shared)
+
+        XCTAssertFalse(GameEngine.isPhotoOrphaned(shared, in: [lead, follow]),
+                       "both sides posted — plainly in use")
+        XCTAssertFalse(GameEngine.isPhotoOrphaned(shared, in: [lead]),
+                       "asr undone, dhuhr still shows it")
+        XCTAssertFalse(GameEngine.isPhotoOrphaned(shared, in: [follow]),
+                       "and the same the other way round")
+        XCTAssertTrue(GameEngine.isPhotoOrphaned(shared, in: []),
+                      "only once neither side is left")
+    }
+
+    /// A combined post that landed is the same question the camera flow asks
+    /// straight after `logCombined` — the file it just wrote is spoken for
+    /// twice over, and the success path must not touch it.
+    func testACombinedPostKeepsItsPhotoAlongsideAnUnrelatedDay() {
+        let shared = "pair.jpg"
+        let logs: [PrayerLog] = [
+            log(.fajr, .onTime, dayKey: "2026-08-21", photo: "yesterday.jpg"),
+            log(.dhuhr, .onTime, dayKey: "2026-08-22", photo: shared),
+            log(.asr, .onTime, dayKey: "2026-08-22", photo: shared),
+            log(.isha, .qada, dayKey: "2026-08-22")
+        ]
+        XCTAssertFalse(GameEngine.isPhotoOrphaned(shared, in: logs))
+        XCTAssertFalse(GameEngine.isPhotoOrphaned("yesterday.jpg", in: logs))
+        XCTAssertTrue(GameEngine.isPhotoOrphaned("never-written.jpg", in: logs))
+    }
+
+    /// nil and "" are absences, not orphans. "" is what `PhotoStore.save`
+    /// returns when the disk write failed — there is no file to take back, and
+    /// the prayer was logged without one, exactly as intended.
+    func testAFailedWriteIsNothingToCleanUp() {
+        let logs: [PrayerLog] = [log(.fajr, .onTime, dayKey: "2026-08-22")]
+        XCTAssertFalse(GameEngine.isPhotoOrphaned(nil, in: logs))
+        XCTAssertFalse(GameEngine.isPhotoOrphaned("", in: logs))
+        XCTAssertFalse(GameEngine.isPhotoOrphaned(nil, in: []))
+        XCTAssertFalse(GameEngine.isPhotoOrphaned("", in: []))
     }
 
     // MARK: - What a square draws
