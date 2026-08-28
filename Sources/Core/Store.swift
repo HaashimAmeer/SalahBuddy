@@ -12,7 +12,7 @@ extension CodingUserInfoKey {
     static let persistingMirror = CodingUserInfoKey(rawValue: "org.amacvoters.salahbuddy.persistingMirror")!
 }
 
-/// Dead-simple JSON persistence in the app's Documents directory.
+/// Dead-simple JSON persistence in the app's shared container.
 /// Corrupt or missing files NEVER crash — they fall back to the default.
 enum Store {
     static let profileFile = "profile.json"
@@ -24,10 +24,29 @@ enum Store {
     static let circleFile = "circle.json"
     static let outboxFile = "outbox.json"
 
-    static var directory: URL {
+    /// Where everything lived before v5, and where it still lives when the App
+    /// Group container is unavailable.
+    static let documentsDirectory: URL =
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
-    }
+
+    /// v5 §2: the App Group container — **the one path every file in this app
+    /// derives from**, which is exactly why repointing it is all a widget needs
+    /// to be able to read any of this.
+    ///
+    /// `let`, not `var`: the answer cannot change inside a process, and asking
+    /// the container question once is worth more than the computed property's
+    /// tidiness — `Store.url(for:)` is on the path of every load and save.
+    ///
+    /// The fallback is not defensive decoration. `containerURL(…)` answers nil
+    /// in a test host without the entitlement, on CI, and in a build whose
+    /// profile lost the capability; falling back to Documents means those
+    /// builds behave exactly like v4 instead of launching into an empty app.
+    /// `SharedContainer.prepareOnLaunch()` sees the same two URLs and declines
+    /// to record a migration it did not perform.
+    static let directory: URL = SharedContainer.resolveDirectory(
+        group: SharedContainer.containerURL,
+        fallback: Store.documentsDirectory)
 
     static func url(for filename: String) -> URL {
         directory.appendingPathComponent(filename)

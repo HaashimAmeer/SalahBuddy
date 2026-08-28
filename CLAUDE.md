@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-SalahBuddy is an iOS (SwiftUI, iOS 17+) prayer-tracking app: you log each of the five daily prayers by snapping a photo, earn XP scaled by how early in the window you pray, and keep all five together with a small "circle" of friends. Bundle id `org.amacvoters.salahbuddymock`; TestFlight today.
+SalahBuddy is an iOS (SwiftUI, iOS 18+ since v5 — SPEC-V5 §9-04) prayer-tracking app: you log each of the five daily prayers by snapping a photo, earn XP scaled by how early in the window you pray, and keep all five together with a small "circle" of friends. Bundle id `org.amacvoters.salahbuddymock`; TestFlight today.
 
 Since v4 this is a **monorepo**: the iOS app at the root, a **Supabase backend under `backend/`** (Postgres + Auth + Storage + Realtime + Deno edge functions), and a circle that can be either **simulated locally** (demo, `BuddySimulator`, exactly as v3.9 shipped) or **real friends on real devices** (`Sources/Core/Sync/`). A solo user still needs no account and the app still works fully offline — the backend only enters the picture at the social boundary. `SPEC-V4.md` is the contract; `backend/README.md` is the backend's own manual and is more detailed than this file.
 
@@ -43,7 +43,7 @@ xcodebuild test -project SalahBuddy.xcodeproj -scheme SalahBuddy \
 
 **Signing:** `DEVELOPMENT_TEAM` is declared in `project.yml`, so regenerating is signing-safe (it does *not* wipe the team — unlike projects that set the team only in Xcode). Simulator builds/tests need no signing at all.
 
-SPM dependencies (all declared in `project.yml`): **Adhan** (`batoulapps/adhan-swift` 1.4.0) for prayer times, **supabase-swift** (2.55.1+) for the circle, **GoogleSignIn-iOS** (9.2.0+) for one of the two sign-in providers. `Package.resolved` is refreshed by CI after a dependency change — never hand-edit it, and pull the bot commit before pushing again. `SalahBuddy.entitlements` (Sign in with Apple + `aps-environment`) is wired from `project.yml` and lives OUTSIDE `Sources/` so XcodeGen cannot mistake it for a resource.
+SPM dependencies (all declared in `project.yml`): **Adhan** (`batoulapps/adhan-swift` 1.4.0) for prayer times, **supabase-swift** (2.55.1+) for the circle, **GoogleSignIn-iOS** (9.2.0+) for one of the two sign-in providers. `Package.resolved` is refreshed by CI after a dependency change — never hand-edit it, and pull the bot commit before pushing again. `SalahBuddy.entitlements` (Sign in with Apple, `aps-environment`, and since v5 the App Group + shared keychain access group) is wired from `project.yml` and lives OUTSIDE `Sources/` so XcodeGen cannot mistake it for a resource. It is the APP's file — an extension gets its own rather than sharing this one. In `keychain-access-groups` the ORDER matters: the first entry is the process's default group, so the app-identifier group stays first (see the comments in the file).
 
 ### The backend (`backend/`)
 
@@ -91,7 +91,9 @@ The one `@MainActor ObservableObject` (injected as `@EnvironmentObject`). It own
 **Pure, testable, no I/O, no singletons, no clock reads** — every function takes inputs explicitly. This is the single source of truth for tier math, XP, levels, perfect-day/jamaat/recovery caps, streak increment/reverse/reconcile, and weekly XP. When changing scoring, change it here and update `Tests/`.
 
 ### Persistence — `Store` (Sources/Core/Store.swift)
-JSON files in Documents (`profile.json`, `logs.json`, `settings.json`). Corrupt/missing files silently fall back to defaults. **`PrayerLog` and `UserProfile`/`AppSettings` have hand-written migration-safe decoders** — older saved data with missing fields must keep decoding, so when you add a field, give it a tolerant `decodeIfPresent` with a default.
+JSON files (`profile.json`, `logs.json`, `settings.json`) under `Store.directory`. Corrupt/missing files silently fall back to defaults. **`PrayerLog` and `UserProfile`/`AppSettings` have hand-written migration-safe decoders** — older saved data with missing fields must keep decoding, so when you add a field, give it a tolerant `decodeIfPresent` with a default.
+
+**v5 §2: `Store.directory` is the App Group container** (`group.org.amacvoters.salahbuddymock`), not Documents — a widget is a different process and cannot read the app's Documents. Everything derives from that one property (PhotoStore, BuddyPhotoCache, the mirror, the outbox), which is why repointing it was the whole move. It **falls back to Documents** when `containerURL(…)` answers nil (test host, CI, a build whose profile lost the capability), and `SharedContainer.prepareOnLaunch()` — called from `SalahBuddyApp.init()`, before any file is read — merges Documents into the container once, idempotently, never letting an older file overwrite a newer one. The Supabase session moved with it, into the shared keychain access group (`SessionKeychain`); the old item is read once and re-stored so nobody is signed out by the update.
 
 ### The simulated circle — `BuddySimulator` (Sources/Core/BuddySimulator.swift)
 There are no real friends. A fixed pool of buddies has outcomes derived as a **pure function of `(buddyName, dayKey, prayer)`** via FNV-1a seeding + `SplitMix64` (a deterministic PRNG, defined here). A buddy's post only becomes visible once `AppClock.now >= its derived loggedAt`, so the circle "fills in live" and time-travel reproduces it exactly. Buddy photos are never real images — they're seeded SwiftUI illustrations (`PostContent.illustration(seed:)`). `member(for:)` converts a buddy to a `CircleMember`.

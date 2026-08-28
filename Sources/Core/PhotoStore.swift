@@ -1,7 +1,7 @@
 import UIKit
 
-/// Local photo persistence for prayer posts. JPEGs live in
-/// Documents/photos/; logs reference them by bare filename.
+/// Local photo persistence for prayer posts. JPEGs live in `photos/` under
+/// `Store.directory`; logs reference them by bare filename.
 /// Saves downscale to max 1200px on the long edge (JPEG 0.7) so grids never
 /// need to hold huge images.
 enum PhotoStore {
@@ -9,8 +9,13 @@ enum PhotoStore {
     static let maxDimension: CGFloat = 1200
     static let jpegQuality: CGFloat = 0.7
 
+    /// v5: a constant rather than a literal in three places, because
+    /// `ContainerMigration` is now the fourth and a typo there would move an
+    /// empty directory and leave every photo behind.
+    static let directoryName: String = "photos"
+
     static var directory: URL {
-        let dir = Store.directory.appendingPathComponent("photos", isDirectory: true)
+        let dir = Store.directory.appendingPathComponent(directoryName, isDirectory: true)
         if !FileManager.default.fileExists(atPath: dir.path) {
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         }
@@ -56,7 +61,8 @@ enum PhotoStore {
 
     /// Deletes the whole photos directory (reset-all-data path).
     static func deleteAll() {
-        try? FileManager.default.removeItem(at: Store.directory.appendingPathComponent("photos", isDirectory: true))
+        try? FileManager.default.removeItem(
+            at: Store.directory.appendingPathComponent(directoryName, isDirectory: true))
     }
 
     // MARK: - Demo images

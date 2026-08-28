@@ -6,11 +6,11 @@ import UIKit
 /// Two photo stores exist in this app and they are deliberately not the same
 /// thing:
 ///
-/// - `PhotoStore` (`Documents/photos/`) holds YOUR photos. They are yours
+/// - `PhotoStore` (`photos/`) holds YOUR photos. They are yours
 ///   forever, they feed Memories, and nothing in the sync layer may add to it,
 ///   evict from it or otherwise change what it means. The server copy of one of
 ///   your photos is only the share.
-/// - `BuddyPhotoCache` (`Documents/circlephotos/`) holds photos your circle
+/// - `BuddyPhotoCache` (`circlephotos/`) holds photos your circle
 ///   posted. They are a cache of somebody else's content: cheap to lose, wrong
 ///   to keep. They expire, they never reach Memories, and they never touch
 ///   `PhotoStore` — which is why they live behind a different type in a
@@ -37,8 +37,8 @@ enum BuddyPhotoCache {
     /// while capping the cache at roughly 60 MB of quality-0.7 JPEGs.
     static let maxCount: Int = 400
 
-    /// `Documents/circlephotos/`, created on demand — same shape as
-    /// `PhotoStore.directory`, deliberately NOT the same path.
+    /// `circlephotos/` under `Store.directory`, created on demand — same shape
+    /// as `PhotoStore.directory`, deliberately NOT the same path.
     static var directory: URL {
         let dir: URL = Store.directory.appendingPathComponent(directoryName, isDirectory: true)
         BuddyPhotoCache.ensureDirectory(dir)

@@ -1,7 +1,11 @@
 name: SalahBuddy
 options:
   bundleIdPrefix: org.amacvoters
-  deploymentTarget: { iOS: "17.0" }
+  # v5 §9-04 DECIDED: the floor rises to iOS 18. The audience is TestFlight,
+  # every tester's device is far past it, and it buys the widget phases their
+  # whole vocabulary — ControlWidget (§3's Control Center entry) and the
+  # ActivityKit surface §6 is built on — with no availability gates anywhere.
+  deploymentTarget: { iOS: "18.0" }
   createIntermediateGroups: true
 packages:
   Adhan: { url: https://github.com/batoulapps/adhan-swift, from: "1.4.0" }
@@ -68,8 +72,11 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: org.amacvoters.salahbuddymock
         TARGETED_DEVICE_FAMILY: "1"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        # v4: Sign in with Apple + push. Kept OUT of Sources/ so XcodeGen
-        # never mistakes it for a bundle resource.
+        # v4: Sign in with Apple + push. v5 §2 adds the App Group and the
+        # shared keychain access group to the same file. Kept OUT of Sources/
+        # so XcodeGen never mistakes it for a bundle resource — and per-target,
+        # so P2's widget extension brings its OWN file rather than editing this
+        # one (an extension must not claim Sign in with Apple or aps-environment).
         CODE_SIGN_ENTITLEMENTS: SalahBuddy.entitlements
   SalahBuddyTests:
     type: bundle.unit-test

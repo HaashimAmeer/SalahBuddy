@@ -8,6 +8,22 @@ struct SalahBuddyApp: App {
     /// notifications stay `NotificationManager`'s.
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
+    /// v5 §2: move Documents into the App Group container BEFORE anything reads
+    /// a file.
+    ///
+    /// This is the earliest hook there is, and it has to be. `AppState()` loads
+    /// the profile and the logs in its own initialiser, and `CircleStack.start`
+    /// — which is otherwise THE launch sequence — runs long after both objects
+    /// exist. The two `@StateObject` initialisers below are `@autoclosure`, so
+    /// neither has run yet when this does.
+    ///
+    /// Idempotent and marker-guarded, so this is one `UserDefaults` read on
+    /// every launch after the first, and the whole move exactly once. A build
+    /// with no container (see `Store.directory`) does nothing at all here.
+    init() {
+        SharedContainer.prepareOnLaunch()
+    }
+
     @StateObject private var state = AppState()
     /// v4: the session and the circle it belongs to. They are created together
     /// because the service binds to the session (`CircleService(auth:)`), and
