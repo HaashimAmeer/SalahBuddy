@@ -204,11 +204,17 @@ and `esm.sh` are blocked. `@supabase/supabase-js` is therefore imported as
 
 ## How CI deploys
 
-`.github/workflows/backend.yml`, path-filtered to `backend/**`. Three jobs:
+`.github/workflows/backend.yml`, path-filtered to `backend/**` — minus
+`backend/README.md` and `backend/scripts/**`, neither of which deploys
+anything. Without those two exclusions a typo fix in these docs, or a one-line
+change to the triage CLI an operator runs from their own terminal, would run
+`link` → `db push` → `functions deploy` against the live project and mint three
+throwaway auth users that nothing deletes. `backend/tests/**` is deliberately
+still in: a change to the suite is exactly what `test` exists to run. Three jobs:
 
 | job | runs when | does |
 |---|---|---|
-| `test` | every push to `staging`, `production`, `dev/**` | Postgres 16 service → `run_sql_tests.sh`, then `deno check` + `deno test` |
+| `test` | every push to `staging`, `production`, `dev/**` | `bash -n` + shellcheck over `scripts/` and `tests/`, Postgres 16 service → `run_sql_tests.sh`, then `deno check` + `deno test` |
 | `deploy-staging` | `test` passed **and** ref is `staging` | `supabase link` → `db push` → `functions deploy --use-api` |
 | `smoke-staging` | `deploy-staging` actually deployed | curl-level proofs against staging with the publishable key only |
 
@@ -847,7 +853,27 @@ export SUPABASE_SERVICE_ROLE_KEY=...     # Project Settings → API Keys → ser
 
 `<id>` is a report id or any unambiguous prefix — `list` prints both. Both
 actions confirm first (`remove` wants the short id typed back);
-`TRIAGE_ASSUME_YES=1` skips that, and nothing else asks.
+`TRIAGE_ASSUME_YES=1` skips that, and nothing else asks. Prefixes resolve
+against the whole open queue plus the most recently handled reports, so an open
+report stays actionable no matter how much closed history has piled up behind
+it — closed reports are never deleted, and a window of "the oldest N rows"
+would eventually contain nothing but history.
+
+**Everything a member wrote is flattened before it is printed.** The reason, the
+display name and the photo path are all text somebody chose — `posts.photo_path`
+is bare `text` that `authenticated` can write, and `reports_insert` copies it in
+verbatim — so all three have their control characters replaced before they reach
+your terminal. Otherwise a newline in any of them draws a convincing extra line
+inside somebody else's entry (a fake "post gone (undone or swept)" is enough to
+talk you out of looking), and an ESC repaints the screen.
+
+**An odd-shaped path stops `photo` and `remove`, never `dismiss`.** The two
+commands that splice the path into a Storage URL refuse anything outside the
+`<circle>/<user>/<uuid>.jpg` character set rather than build that request — take
+the object down in the dashboard's Storage browser instead. `dismiss` builds no
+URL, so it stays available in every case: a report that no command can close is
+a nightly `Reports awaiting triage` warning forever, with `oldest_open_hours`
+climbing, which is a worse outcome than an unusual path.
 
 **The key comes from the environment and nowhere else.** No flag, no config
 file, no prompt. The script refuses to start without it, rejects a publishable

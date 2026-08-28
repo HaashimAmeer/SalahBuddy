@@ -95,6 +95,19 @@ command -v curl >/dev/null || { echo "need curl" >&2; exit 1; }
 
 die() { echo "✗ $*" >&2; exit 1; }
 
+# Every piece of member-written text that reaches this terminal goes through
+# here first, and `list` has the same function in jq. A reason, a display name
+# and a photo path are all strings a signed-in member chose: `reason` is 500
+# free characters, `profiles.name` is `text` with no constraint, and
+# `posts.photo_path` is bare `text` that `authenticated` holds an INSERT/UPDATE
+# grant on — `reports_insert` copies whatever is there into the report. Flatten
+# the control characters and none of them can draw an extra line inside a block
+# the operator is meant to read as one, or repaint the screen with an ESC.
+# Non-ASCII is left alone: names in this app are Arabic and emoji as often as
+# not, and a tool that mangles somebody's name to moderate their photo has
+# picked the wrong enemy.
+plain() { printf '%s' "${1:-}" | tr '\001-\037\177' ' '; }
+
 KEY="${SUPABASE_SERVICE_ROLE_KEY:-}"
 require_key() {
   [ -n "$KEY" ] || die "SUPABASE_SERVICE_ROLE_KEY is not set.
@@ -197,39 +210,73 @@ R_POST=""; R_USER=""; R_PATH=""; R_REASON=""
 rf() { printf '%s' "$R_JSON" | jq -r --arg k "$1" '.[$k] // ""'; }
 
 resolve() { # id-or-prefix
-  local want n
+  local want n pool
   want="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
   [ -n "$want" ] || die "which report? \`$0 list\` prints the open ones with their ids"
 
-  api GET "/rest/v1/reports?select=$REPORT_FIELDS&order=created_at.asc&limit=500" "" "return=representation"
-  check "reading reports" 200
+  # TWO windows, unioned, and not one window of 500 rows ordered by age. That
+  # was the first shape and it rots: a handled report is never deleted — it is
+  # the permanent record an App Review answer is made of — so "the 500 oldest
+  # rows" becomes, after the 500th report is ever filed, 500 rows of closed
+  # history with not one open report among them. `list` would happily print
+  # report 501 with its id and `remove <that id>` would die with "no report id
+  # starts with…": the tool contradicting itself, silently, and worse every
+  # month. So ask for the sets that are actually wanted —
+  #   * the whole OPEN queue, which is what triage acts on, and which `list`
+  #     calls an incident long before it reaches 500 rows;
+  #   * the most recently HANDLED reports, so re-running a decision on
+  #     something closed an hour ago still resolves.
+  # A prefix that matches in both is still ambiguous and still says so.
+  api GET "/rest/v1/reports?select=$REPORT_FIELDS&handled_at=is.null&order=created_at.asc&limit=500" \
+      "" "return=representation"
+  check "reading the open reports" 200
+  pool="$RESP"
 
-  n="$(printf '%s' "$RESP" | jq --arg w "$want" '[.[] | select(.id | startswith($w))] | length')"
+  api GET "/rest/v1/reports?select=$REPORT_FIELDS&handled_at=not.is.null&order=handled_at.desc&limit=500" \
+      "" "return=representation"
+  check "reading recently handled reports" 200
+  pool="$(printf '%s\n%s\n' "$pool" "$RESP" | jq -sc 'add')"
+
+  n="$(printf '%s' "$pool" | jq --arg w "$want" '[.[] | select(.id | startswith($w))] | length')"
   case "$n" in
     0) die "no report id starts with '$want'. \`$0 list\` shows what is open." ;;
     1) ;;
     *) die "'$want' matches $n reports — type a few more characters." ;;
   esac
 
-  R_JSON="$(printf '%s' "$RESP" | jq -c --arg w "$want" '[.[] | select(.id | startswith($w))][0]')"
+  R_JSON="$(printf '%s' "$pool" | jq -c --arg w "$want" '[.[] | select(.id | startswith($w))][0]')"
   R_ID="$(rf id)";        R_CREATED="$(rf created_at)"
   R_HAT="$(rf handled_at)"; R_HACT="$(rf handled_action)"
   R_POST="$(rf post_id)"; R_USER="$(rf reported_user_id)"
   R_PATH="$(rf photo_path)"
-  # The path is about to be spliced into a URL and into a PostgREST `eq.` filter.
-  # It cannot hold anything awkward — the app writes `<circle>/<user>/<uuid>.jpg`
-  # and `reports_insert` pins it to `posts.photo_path` — but "cannot" there is a
-  # claim about a policy in another file, and this is the line that would build
-  # the query string. Check rather than inherit the assumption.
-  if [ -n "$R_PATH" ] && printf '%s' "$R_PATH" | LC_ALL=C grep -q '[^A-Za-z0-9./_-]'; then
-    die "report $(printf '%.8s' "$R_ID") carries a photo path that is not the
-     <circle>/<user>/<uuid>.jpg shape the app writes. Nothing here will put it
-     in a URL — look at that row by hand before acting on it."
-  fi
   # 500 characters a member typed, about to be printed in a confirmation the
-  # operator is meant to read carefully. Flatten the control characters so it
-  # cannot draw its own extra lines — same reasoning as `list`'s `plain`.
-  R_REASON="$(rf reason | tr '\001-\037\177' ' ')"
+  # operator is meant to read carefully.
+  R_REASON="$(plain "$(rf reason)")"
+}
+
+# The photo path is member-written text (see `plain`), and `photo` and `remove`
+# splice it into a Storage URL and into a PostgREST `eq.` filter. It should not
+# be able to hold anything awkward — the app writes `<circle>/<user>/<uuid>.jpg`
+# and `reports_insert` pins it to `posts.photo_path` — but "should not" there is
+# a claim about a policy in another file, and these are the lines that build the
+# query string. Check rather than inherit the assumption.
+#
+# This lives HERE and not in `resolve`, which is where it was written first and
+# was wrong: `dismiss` calls `resolve` too and never touches the path, so a
+# member who put a space in their own photo_path could make the one report about
+# them unclosable by any command this tool has — a nightly
+# `::warning title=Reports awaiting triage` in perpetuity, with an
+# `oldest_open_hours` climbing forever and no way to clear it. Refusing to build
+# a URL is right; refusing to close a report is the opposite of what this file
+# is for.
+require_safe_path() {
+  [ -n "$R_PATH" ] || return 0
+  printf '%s' "$R_PATH" | LC_ALL=C grep -q '[^A-Za-z0-9./_-]' || return 0
+  die "report $(printf '%.8s' "$R_ID") carries a photo path that is not the
+     <circle>/<user>/<uuid>.jpg shape the app writes. Nothing here will put it
+     in a URL — look at that row by hand, in the dashboard's table editor, and
+     take the object down there. \`$0 dismiss $(printf '%.8s' "$R_ID")\` still
+     closes the report once you have."
 }
 
 # The display name of whoever was reported. A separate call because the foreign
@@ -241,7 +288,12 @@ name_of() { # user-uuid
   [ -n "$id" ] || { printf '(nobody — the report was anonymised)'; return; }
   api GET "/rest/v1/profiles?select=name&id=eq.$id" "" "return=representation"
   [ "$CODE" = "200" ] && n="$(jqr '.[0].name // empty')"
-  printf '%s' "${n:-(no name on file)}"
+  # Through `plain` because this lands in the confirmation block — the last
+  # thing between the operator and an irreversible delete, and the one screen
+  # where a member gets to put text next to their own name. `$( )` strips only
+  # TRAILING newlines, so an embedded one would otherwise survive into the
+  # middle of the block and read as one of its lines.
+  plain "${n:-(no name on file)}"
 }
 
 # --- commands ----------------------------------------------------------------
@@ -285,12 +337,17 @@ cmd_list() {
     # "how old" line rather than the whole listing.
     def secs: try (sub("\\.[0-9]+";"") | sub("[+-]00:?00$";"Z") | fromdateiso8601) catch null;
 
-    # `reason` is 500 characters a signed-in member wrote, and a display name is
-    # the same kind of text. Both land in a terminal here, so both get their
-    # control characters flattened first: a newline would let a reporter draw a
-    # convincing fake "post  still live" line inside somebody else'"'"'s entry, and an
-    # ESC would let them repaint the screen. Non-ASCII is left alone — names in
-    # this app are Arabic and emoji as often as not.
+    # THREE strings here are text a signed-in member chose, and every one of
+    # them goes through this: `reason` (500 free characters), the display name,
+    # and — least obviously, which is why it was missed the first time — the
+    # PHOTO PATH. `posts.photo_path` is bare `text` with no CHECK and
+    # `authenticated` holds insert/update on it, so the REPORTED member picks
+    # that string and `reports_insert` copies it in verbatim; a newline in it
+    # would let them draw a convincing fake "post  still live" line inside their
+    # own entry and talk the operator out of looking. An ESC would let them
+    # repaint the screen. Non-ASCII is left alone — names in this app are Arabic
+    # and emoji as often as not.
+    # Everything else on these lines is a uuid or a derived age.
     def plain: (. // "") | gsub("[\u0000-\u001f\u007f]"; " ");
     def ago: . as $t | (secs) as $e
       | if $e == null then "" else ((now - $e) / 3600 | floor) as $h
@@ -315,7 +372,7 @@ cmd_list() {
       (if .photo_path == null then
          "    photo   none left — it aged out of Storage on the 30-day clock"
        else
-         "    photo   \(.photo_path)"
+         "    photo   \(.photo_path | plain)"
        end),
       (if .post_id == null then
          "    post    gone (undone or swept) — the photo may still be in the bucket"
@@ -347,6 +404,7 @@ cmd_photo() {
   [ -n "$R_PATH" ] || die "report $(printf '%.8s' "$R_ID") has no photo path — it aged out of
      Storage on the 30-day retention clock, which is the evidence window by
      design. Decide on the reason text, or \`$0 dismiss\` it."
+  require_safe_path
 
   storage POST "/object/sign/$BUCKET/$R_PATH" "$(jq -nc --argjson s "$SIGN_SECONDS" '{expiresIn:$s}')"
   if [ "$CODE" != "200" ]; then
@@ -416,6 +474,7 @@ cmd_remove() {
   resolve "${1:-}"
   [ -n "$R_PATH" ] || die "report $(printf '%.8s' "$R_ID") names no photo — there is nothing to
      take down. \`$0 dismiss\` closes it."
+  require_safe_path
 
   already_handled || true
   local who; who="$(name_of "$R_USER")"
@@ -493,13 +552,17 @@ cmd_dismiss() {
   already_handled || true
   local who; who="$(name_of "$R_USER")"
 
+  # No `require_safe_path` here, on purpose: dismiss builds no URL and no
+  # filter, so the charset rule that protects `photo` and `remove` would only
+  # make an odd-looking path into a report nothing can close. It is PRINTED
+  # though, so it goes through `plain` like every other string a member chose.
   confirm "dismiss" \
     "Dismissing closes this report and removes nothing." \
     "" \
     "    report  $R_ID" \
     "    filed   $R_CREATED  by a member" \
     "    about   $who" \
-    "    photo   ${R_PATH:-(already aged out of Storage)}" \
+    "    photo   $(plain "${R_PATH:-(already aged out of Storage)}")" \
     "    reason  ${R_REASON:-(none given)}" \
     "" \
     "  The photo stays exactly where it is and the circle keeps seeing it." \

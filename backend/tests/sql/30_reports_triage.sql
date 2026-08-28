@@ -348,17 +348,19 @@ end $$;
 -- timestamp indistinguishable from a human decision. Nothing downstream would
 -- notice — the queue simply goes quiet and stays quiet.
 --
--- So re-apply the real migration file (`:migrations_dir` comes from
--- run_sql_tests.sh, the same trick test 17 uses) over a table holding one open
--- report and two handled ones, and assert it touched none of them. That covers
--- idempotence too: `supabase db push` will not re-run a recorded version, but a
--- hand-run `psql -f` during a recovery will.
+-- So the real migration file gets run again over a table that already holds
+-- reports (`:migrations_dir` comes from run_sql_tests.sh, the same trick test 17
+-- uses) — TWICE, because the two runs prove different things and the first one
+-- alone was mistaken for both.
 update public.reports set handled_action = null
  where id = '00000000-0000-0000-0000-0000000030b1';
 
 create temporary table triage_before on commit drop as
   select id, created_at, handled_at, handled_action from public.reports;
 
+-- 8a. Idempotence. `supabase db push` will not re-run a recorded version, but a
+--     hand-run `psql -f` during a recovery will, so running the file over a
+--     database that already has it must be a no-op on the rows.
 \i :migrations_dir/20260828000100_reports_triage.sql
 
 do $$
@@ -379,6 +381,72 @@ begin
   select count(*) into v_open from public.reports where handled_at is null;
   if v_open <> 1 then
     raise exception 're-applying the migration left % open report(s), expected 1', v_open;
+  end if;
+end $$;
+
+-- 8b. The assertion 8a CANNOT make, and the reason this step is two steps.
+--
+-- Both column adds are `add column IF NOT EXISTS`, so on that second run they
+-- were no-ops: 8a proves the FILE CONTAINS NO DATA-MODIFYING STATEMENT, which
+-- is a real property and a much narrower one than "the backlog survives the
+-- deploy". The ADD COLUMN path itself — the only line that will ever touch the
+-- staging project's existing rows — never ran. Mutate the migration to
+-- `add column if not exists handled_at timestamptz default now()` and 8a alone
+-- stays green, while the real deploy back-fills every report ever filed and
+-- then aborts on the pair constraint.
+--
+-- So put the table into the shape deploy day will actually find: the rows, and
+-- no triage columns at all. Dropping the columns takes the constraint and the
+-- partial index with them (both are defined over the columns), which is exactly
+-- the pre-migration state. Then run the file for real.
+alter table public.reports drop column handled_at;
+alter table public.reports drop column handled_action;
+
+\i :migrations_dir/20260828000100_reports_triage.sql
+
+do $$
+declare
+  v_bad    text;
+  v_rows   int;
+  v_closed int;
+begin
+  -- ADD COLUMN must not disturb the evidence. created_at is the only column
+  -- from the snapshot still comparable — handled_at/handled_action were just
+  -- dropped, which is the point.
+  select string_agg(r.id::text, ', ' order by r.id::text) into v_bad
+    from public.reports r
+    join triage_before b on b.id = r.id
+   where r.created_at is distinct from b.created_at;
+  if v_bad is not null then
+    raise exception 'adding the triage columns disturbed existing reports: %', v_bad;
+  end if;
+
+  select count(*),
+         count(*) filter (where handled_at is not null or handled_action is not null)
+    into v_rows, v_closed
+    from public.reports;
+  if v_rows <> 3 then
+    raise exception 'the backlog changed size across the migration (% rows)', v_rows;
+  end if;
+  -- THE assertion. A default on either column closes every report ever filed on
+  -- the day this migration runs, with a timestamp indistinguishable from a
+  -- human decision, and nothing downstream would ever say so.
+  if v_closed <> 0 then
+    raise exception
+      '% pre-existing report(s) arrived CLOSED — a default on a triage column has shut the backlog', v_closed;
+  end if;
+
+  -- ...and the rest of the file came back over them, rather than the columns
+  -- landing bare because a `drop constraint if exists` found nothing to replace.
+  if not exists (select 1 from pg_constraint
+                  where conname = 'reports_handled_pair'
+                    and conrelid = 'public.reports'::regclass) then
+    raise exception 'reports_handled_pair did not come back with the columns';
+  end if;
+  if not exists (select 1 from pg_trigger
+                  where tgname = 'reports_stamp_handled'
+                    and tgrelid = 'public.reports'::regclass) then
+    raise exception 'reports_stamp_handled did not come back with the columns';
   end if;
 end $$;
 

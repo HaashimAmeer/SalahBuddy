@@ -27,18 +27,27 @@ name: backend
 # session gets a verdict on every push without merging to staging first —
 # but note that only `staging` deploys; dev branches stop after `test`.
 #
-# The negation matters on `staging`: "backend/**" matches backend/README.md, so
-# a typo fix in the docs would otherwise run `supabase link` → `db push` →
-# `functions deploy` against the live project and mint three throwaway auth
-# users that nothing deletes — for a change that deploys nothing. tests/** is
-# deliberately NOT excluded: a change to the suite is exactly what the `test`
-# job exists to run.
+# The negations matter on `staging`: "backend/**" matches every one of them, so
+# a change to any would otherwise run `supabase link` → `db push` → `functions
+# deploy` against the live project and mint three throwaway auth users that
+# nothing deletes — for a change that deploys nothing.
+#
+#   * README.md — the docs. A typo fix is not a deploy.
+#   * scripts/** — operator tooling (triage_reports.sh), run from a human's
+#     terminal against whichever project their key names. It is neither schema
+#     nor an edge function; `db push` and `functions deploy` would not carry a
+#     line of it anywhere. The `test` job parses it instead (see "Check the
+#     shell parses"), which runs whenever a real backend change does.
+#
+# tests/** is deliberately NOT excluded: a change to the suite is exactly what
+# the `test` job exists to run.
 on:
   push:
     branches: [staging, production, "dev/**"]
     paths:
       - "backend/**"
       - "!backend/README.md"
+      - "!backend/scripts/**"
       - ".github/workflows/backend.yml"
   workflow_dispatch:
 
@@ -105,6 +114,32 @@ jobs:
             sudo apt-get install -y -qq postgresql-client
           fi
           psql --version
+
+      # The repo's shell is real infrastructure and until now nothing checked a
+      # line of it: run_sql_tests.sh IS the step below, and triage_reports.sh is
+      # the hand tool that moderates reported photos on the live project with
+      # the service-role key. A `bash -n` is a parse, not a lint — it catches
+      # the unbalanced quote or the missing `fi` that would otherwise be found
+      # by an operator, at a terminal, mid-moderation.
+      #
+      # shellcheck ships on ubuntu-latest, so this is a real gate rather than a
+      # decorative one; the `command -v` fallback exists so a future runner
+      # image dropping it degrades to the parse instead of going quietly green.
+      # SC2207 is excused by name: run_sql_tests.sh splits a sorted file list on
+      # purpose, in a directory it controls, and a blanket exclusion is honest
+      # where silencing the whole severity would not be.
+      - name: Check the shell parses
+        run: |
+          shopt -s nullglob
+          files=(backend/scripts/*.sh backend/tests/*.sh)
+          [ ${#files[@]} -gt 0 ] || { echo "no shell to check"; exit 1; }
+          for f in "${files[@]}"; do bash -n "$f"; echo "  parsed $f"; done
+          if command -v shellcheck >/dev/null; then
+            shellcheck -S warning -e SC2207 "${files[@]}"
+            echo "  shellcheck clean"
+          else
+            echo "  note: no shellcheck on this runner — parse only"
+          fi
 
       - name: SQL suite (shim + migrations + assertions)
         run: backend/tests/run_sql_tests.sh
