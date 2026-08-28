@@ -39,10 +39,11 @@ backend/
       20260822000400_post_zone_wildcard.sql   # a NULL offset is a wildcard, not a third zone
       20260822000500_device_utc_offset.sql    # the RECIPIENT's zone, so push can skip a stale day
     functions/
-      _shared/                      # apns.ts, auth.ts, db.ts, http.ts, messages.ts, util.ts,
-                                    #   validate.ts, zones.ts
+      _shared/                      # apns.ts, auth.ts, db.ts, http.ts, messages.ts, sweep.ts,
+                                    #   util.ts, validate.ts, zones.ts
       notify/index.ts               # post / join / nudge push fan-out (APNs, signed in-function)
       retention/index.ts            # the ~30-day photo sweep
+      sweep-orphans/index.ts        # deletes the auth.users shells delete_account() cannot
   tests/
     shim/00_supabase_shim.sql       # fakes auth.*/storage.*/the API roles on vanilla Postgres
     sql/01..29_*.sql                # assertion tests — RLS, caps, privacy, constraints
@@ -196,6 +197,10 @@ you want the real project updated. Pushes to `production` also stop after
 progress: killing a run mid `db push` can leave the remote migration history
 half-applied.
 
+A second workflow, **`.github/workflows/maintenance.yml`**, is not part of that
+pipeline: it is the *scheduler* (see "Scheduled maintenance" below) and runs on
+a nightly cron rather than on a push.
+
 ### Credentials CI expects
 
 Nothing here is stored in the repo. Names only:
@@ -205,6 +210,8 @@ Nothing here is stored in the repo. Names only:
 | `SUPABASE_ACCESS_TOKEN` | secret | `deploy-staging` (Supabase account token) |
 | `SUPABASE_STAGING_PROJECT_REF` | secret | `deploy-staging` |
 | `SUPABASE_STAGING_DB_PASSWORD` | secret | `deploy-staging` |
+| `SUPABASE_STAGING_SERVICE_ROLE_KEY` | secret | `maintenance` — see "Scheduled maintenance" |
+| `SUPABASE_STAGING_USER_SWEEP_APPLY` | variable, optional | `maintenance`; `true` lets the account sweep delete rather than report |
 The smoke proofs need no configuration: they read the staging URL and publishable key from
 `Sources/Core/Sync/SupabaseConfig.swift`, so they exercise the exact values the app ships. Set the
 repo variables `SUPABASE_STAGING_URL` / `SUPABASE_STAGING_PUBLISHABLE_KEY` only to point them at a
@@ -553,6 +560,122 @@ own immediately, photos included.
 
 ---
 
+## Scheduled maintenance
+
+`.github/workflows/maintenance.yml`, nightly at 09:17 UTC plus a manual
+`workflow_dispatch`. It POSTs `retention` and then `sweep-orphans`. Until this
+existed both functions were only ever called opportunistically by a client,
+which made the ~30-day photo promise depend on somebody opening the app.
+
+**Why a workflow and not `pg_cron` + `pg_net`.** Neither extension exists in the
+sandbox, so that route can only be configured by hand against the live database
+and only verified there — a scheduler nobody can read in the repo, review in a
+PR, or test before it runs. A workflow file is all three, and its runs leave a
+log. The cost is that GitHub disables a scheduled workflow after 60 days of repo
+inactivity; if the sweeps ever go quiet, check that first.
+
+Public-repo safety is the same contract `backend.yml` keeps: `schedule` +
+`workflow_dispatch` only (cron fires on the DEFAULT branch and nowhere else, and
+there is no `pull_request` trigger to hand a fork anything), secrets reach the
+shell through `env:` and never through `${{ }}` inside a `run:`, and the project
+URL is masked before the first request.
+
+**It holds the service-role key, and it is the only thing that does.** Both
+functions require the raw `SUPABASE_STAGING_SERVICE_ROLE_KEY` as the bearer:
+`isServiceRoleToken()` compares it verbatim against the value the platform
+injects and deliberately does not trust a decoded `role` claim, because that
+claim is what unlocks retention's destructive `days` knob. Copy it from **Project
+Settings → API Keys** — the `service_role` / secret key itself, not a personal
+access token and not the publishable key. Do not reach for `--no-verify-jwt`
+while wiring this up, and never give this secret to the smoke job: a proof that
+bypasses RLS proves nothing.
+
+Two details in the job are load-bearing:
+
+- **The retention call drains, and knows when to stop.**
+  `purge_expired_photo_rows` is bounded at 500 paths per call, so a full batch is
+  the signal that a backlog exists; the job re-POSTs (up to five passes) with
+  `minIntervalMinutes: 0` to step past the lease it just took. That is safe
+  because the passes are strictly sequential inside one job and the workflow's
+  `concurrency` group keeps two jobs apart — the lease exists to stop overlapping
+  ticks, not sequential ones. The FIRST pass always uses the default one-hour
+  lease, so a manual run minutes after the nightly one correctly comes back
+  `claimed_recently` instead of sweeping twice.
+- **Only named numeric fields are printed.** The functions answer in counts by
+  design, but this log is readable by anyone on the internet, so the job never
+  `jq .`s a whole body. Error bodies are the exception and they are safe by
+  construction: `http.ts` answers 5xx with a bare machine code and 4xx with a
+  message written for the caller.
+
+---
+
+## Sweeping orphaned accounts
+
+`delete_account()` erases every row a user owns and then stops: removing the
+`auth.users` row needs the service-role admin API, which no client holds, and the
+app signs out the moment the RPC returns. The shells accumulate — one per real
+deletion, three per staging push from the smoke job's throwaway users.
+`supabase/functions/sweep-orphans/` is the admin half.
+
+**Service-role only**, unlike `retention`. A signed-in developer may force a
+photo sweep because that work is a fixed, idempotent cleanup; this one enumerates
+every account in the project on every call, which is both a real cost and a shape
+no user session should be able to ask for. Anything that is not the service-role
+key gets a `403`.
+
+**Report is the default.** A bare POST counts what it *would* delete and deletes
+nothing; only `{"apply": true}` arms it. The scheduled run stays in report mode
+until the repo variable `SUPABASE_STAGING_USER_SWEEP_APPLY` is set to `true`, so
+a criteria bug surfaces as a number nobody expected rather than as deleted
+accounts. A per-run cap (100) bounds the blast radius even then.
+
+### Why the criteria cannot delete a real account
+
+The rules live in `_shared/sweep.ts` and are all ANDed, and every one of them is
+a reason to KEEP a row — so adding a rule can only ever shrink the delete set.
+The first is the load-bearing one:
+
+1. **No `public.profiles` row.** `on_auth_user_created` is an AFTER INSERT
+   trigger on `auth.users` that writes a profile for every account ever created,
+   so a live account HAS one. `authenticated` holds no DELETE grant on `profiles`
+   (it gets SELECT plus column-scoped INSERT/UPDATE and nothing else — SQL test
+   12 pins that matrix in both directions), so no client can drop its own profile
+   and keep its account. The only statement in the system that deletes one is
+   `delete_account()`. No profile means the human asked us to erase them.
+2. **No `circle_members`, `posts` or `devices` row either.** Three more of the
+   tables `delete_account()` empties; any one of them still holding a row is
+   proof this is not a finished deletion, whatever the profile says.
+3. **Older than 30 days** (floor 7, however the body is fat-fingered), **and**
+   no sign-in and no `updated_at` touch inside that same window.
+
+A timestamp that cannot be read is a keep, never a sweep — "I do not know how old
+this row is" must never resolve to "delete it" — and a brand-new signup that has
+not finished onboarding is protected twice over, by its profile and by its age.
+
+**What is deliberately not a criterion: the email address.** "Delete everything
+matching `salahbuddy-ci-*`" is the obvious shortcut and it is the one rule here
+that could take a real person with it — one typo in the pattern, or one human who
+signs up with a similar address. The rules above reach the CI users anyway (they
+call `delete_account()` on their way out, so they clear 1-2 immediately and 3
+thirty days later) and they reach genuinely deleted accounts too, which a pattern
+never would.
+
+The ownership lookups are paged with `collectOwners`, and that paging is part of
+the safety argument rather than a performance detail: a naive
+`select … in (ids) limit N` lets one member with more than N posts fill the page
+on their own, leaving every other id unmentioned — and "unmentioned" is exactly
+what the caller reads as "owns nothing". A full page therefore proves nothing and
+is always followed by another ask; only a short page proves every remaining id
+was considered. `tests/deno/sweep_test.ts` hammers that case offline.
+
+**The circles those users created need no separate sweep.** Once the last
+membership goes the circle is empty, and retention's step 5 drops empty circles
+seven days later. Deleting the shell is also what finally anonymises anything
+they reported: `reports.reporter_id` is `ON DELETE SET NULL` precisely so the
+complaint survives the reporter.
+
+---
+
 ## Reporting a photo
 
 App Store guideline 1.2 wants a way to flag user-generated content before the
@@ -655,8 +778,9 @@ itself, and dropping the pin fails "filed a report that named no member").
   window, by design — reports are read on a human cadence well inside it.
 - **`delete_account()` does not touch `reports`.** Deleting your account must
   not retract a complaint you filed about someone else's photo; the FK
-  anonymises it instead, when the orphaned `auth.users` shell is finally swept
-  (see the TODO below). If that sweep stays unbuilt and the lingering
+  anonymises it instead, when the orphaned `auth.users` shell is swept (see
+  "Sweeping orphaned accounts" — that sweep now exists, but it waits out the
+  30-day age rule first). If it is ever turned off and the lingering
   `reporter_id` becomes uncomfortable, the one-line fix is
   `update public.reports set reporter_id = null where reporter_id = v_uid`
   inside the RPC — not a delete.
@@ -682,21 +806,22 @@ itself, and dropping the pin fails "filed a report that named no member").
 - [ ] **Add `backend/supabase/.temp/` to `.gitignore`.** The Supabase CLI
       writes the linked project ref there; on a public repo that should never
       be committed by accident.
-- [ ] **Schedule `retention`.** Nothing calls it yet, which is the one thing
-      standing between the sweep described above and the ~30-day promise in §4.
-      Options: `pg_cron` + `pg_net` on the project (neither is available in the
-      sandbox, so it must be configured against the real database), or an
-      external scheduler POSTing with the service-role key. The lease makes
-      over-calling safe. **Whichever you pick, it must present the raw
-      `SUPABASE_SERVICE_ROLE_KEY` as the bearer** — `isServiceRoleToken()`
-      compares it verbatim and no longer trusts a decoded `role` claim, because
-      that claim is what unlocks the destructive `days` knob. Do not reach for
-      `--no-verify-jwt` while wiring this up.
-- [ ] **Sweep orphaned `auth.users` rows.** `delete_account()` purges every
-      row a user owns but cannot delete their `auth.users` row (that needs
-      `service_role`); the app signs out immediately after. An admin sweep
-      still has to remove the shells — including the throwaway CI users, and
-      the circles they created, which linger on staging.
+- [x] **Schedule `retention`.** Done: `.github/workflows/maintenance.yml` POSTs
+      it nightly (see "Scheduled maintenance"). `pg_cron` + `pg_net` was the
+      other option and lost — it can only be configured, and only verified,
+      against the live database, so nobody could review it in a PR.
+- [x] **Sweep orphaned `auth.users` rows.** Done:
+      `supabase/functions/sweep-orphans/`, called by the same nightly job. The
+      circles those users created need nothing extra — retention already drops a
+      circle nobody is in.
+- [ ] **Add the `SUPABASE_STAGING_SERVICE_ROLE_KEY` secret.** Both sweeps above
+      are code until it exists; without it every nightly run skips with a notice
+      and **photos are not being aged out**. It is the staging project's
+      `service_role` / secret key, verbatim, from Project Settings → API Keys.
+- [ ] **Move the account sweep from report to apply.** Read a few nightly
+      reports first — "would delete" against "accounts scanned" and the keep
+      tally — then set the repo variable `SUPABASE_STAGING_USER_SWEEP_APPLY` to
+      `true`. Until then the shells are counted, not removed.
 - [ ] **APNs secrets on the real project** (`supabase secrets set APNS_*`).
       Until then every push path logs and skips, by design.
 - [ ] **Triage tooling for `reports`.** The client half shipped in Phase D

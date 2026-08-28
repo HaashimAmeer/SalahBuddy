@@ -15,6 +15,11 @@ declare
   v_friend uuid := '00000000-0000-0000-0000-000000000902';
   v_circle uuid;
   v_code   text;
+  -- Derived, not written down: record_nudge() only accepts a day_key within
+  -- ±1 day of the server's own date, so a literal here passes for two days and
+  -- then fails forever (see test 09). posts.day_key below has no such bound and
+  -- can stay a fixed date.
+  v_today  text := to_char(now() at time zone 'utc', 'YYYY-MM-DD');
 begin
   perform set_config('request.jwt.claims', format('{"sub":"%s","role":"authenticated"}', v_me), true);
   select id, code into v_circle, v_code from public.create_circle('Bye', '🤝');
@@ -31,7 +36,7 @@ begin
   insert into public.posts (id, user_id, circle_id, day_key, prayer, tier, logged_at)
   values (gen_random_uuid(), v_friend, v_circle, '2026-08-21', 'asr', 'prayed', now());
   insert into public.devices (user_id, apns_token) values (v_friend, 'token-friend');
-  perform public.record_nudge(v_me, '2026-08-21', 'isha');
+  perform public.record_nudge(v_me, v_today, 'isha');
 
   perform set_config('request.jwt.claims', format('{"sub":"%s","role":"authenticated"}', v_me), true);
   perform public.delete_account();

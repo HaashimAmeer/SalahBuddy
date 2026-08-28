@@ -49,7 +49,7 @@ SPM dependencies (all declared in `project.yml`): **Adhan** (`batoulapps/adhan-s
 
 ```
 backend/supabase/migrations/*.sql   # schema, RLS, column-scoped grants, triggers, RPCs — applied in order
-backend/supabase/functions/         # Deno: notify (post/join/nudge push), retention (photo sweep), _shared/
+backend/supabase/functions/         # Deno: notify (push), retention (photo sweep), sweep-orphans (auth.users shells), _shared/
 backend/tests/run_sql_tests.sh      # scratch DB -> shim -> migrations -> tests/sql/*.sql -> seed twice
 backend/tests/deno/                 # unit tests for the function helpers (no network, no permissions)
 ```
@@ -59,7 +59,7 @@ Two hard constraints for any cloud session, both real and both already worked ar
 - **No Docker**, so `supabase start` is not an option, and **`*.supabase.co` is blocked by egress policy** — you cannot reach the staging project from here. SQL runs against a plain local Postgres with `backend/tests/shim/` applied (it fakes `auth.*`, the API roles, and — deliberately — Supabase's default `public` grants, so the migrations have to revoke for real). `backend/tests/run_sql_tests.sh` is the whole loop and it is FAST: run it after any migration change.
 - **Deno only resolves `npm:` and `node:` specifiers** here (`jsr:`, `deno.land`, `esm.sh` are blocked). `deno check` + `deno test backend/tests/deno/` is the function suite.
 
-Deploys are CI's job (`.github/workflows/backend.yml`, path-filtered to `backend/**`): migrations + functions go to the **staging** project on a push. There is no production project yet — see `backend/README.md`'s TODO.
+Deploys are CI's job (`.github/workflows/backend.yml`, path-filtered to `backend/**`): migrations + functions go to the **staging** project on a push. There is no production project yet — see `backend/README.md`'s TODO. A second workflow, **`.github/workflows/maintenance.yml`**, is the *scheduler*: a nightly cron that POSTs `retention` and `sweep-orphans` with the service-role key (the only job in the repo that holds it).
 
 ### CI — a local pre-push hook, GitHub Actions, and Xcode Cloud
 

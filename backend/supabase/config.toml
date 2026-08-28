@@ -18,3 +18,10 @@ verify_jwt = true
 # Triggered on a schedule with the service-role key, or by a signed-in
 # developer forcing a sweep. Either way, an authenticated caller is required.
 verify_jwt = true
+
+[functions.sweep-orphans]
+# Deletes auth.users rows, so the platform gate stays on AND the function
+# additionally refuses anything that is not the service-role key itself. Unlike
+# retention there is no developer-triggered mode: enumerating every account in
+# the project is not a shape a user session should be able to ask for.
+verify_jwt = true

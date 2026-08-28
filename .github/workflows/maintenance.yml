@@ -1,0 +1,295 @@
+# Scheduled backend maintenance: the photo retention sweep, then the orphaned
+# auth.users sweep.
+#
+# Both were built and then left with nothing calling them. Retention is the
+# ~30-day photo promise in SPEC-V4 §4 — until now it only ran when a client
+# happened to trigger it, which makes a privacy promise depend on somebody
+# opening the app. `sweep-orphans` removes the account shells `delete_account()`
+# cannot (backend/README.md, "TODO before production"). They pair: one schedule,
+# one credential, one trip.
+#
+# Why a workflow rather than pg_cron + pg_net: neither extension exists in the
+# sandbox, so that route can only be configured by hand against the live
+# database and can only be verified there — a scheduler nobody can read in the
+# repo, review in a PR, or test before it runs. This file is all three.
+#
+# Public-repo safety, the same rules backend.yml lives by:
+#   * `schedule` and `workflow_dispatch` only. Cron fires on the DEFAULT branch
+#     and nowhere else, so a fork PR cannot reach these secrets — there is no
+#     pull_request trigger here at all,
+#   * secrets reach the shell through `env:` only, never interpolated into a
+#     `run:` script (a `${{ }}` inside `run:` is textual substitution),
+#   * the project URL is masked before the first request, and only NAMED numeric
+#     fields of each response are ever printed. The functions' own bodies carry
+#     nothing but counts by design (see sweep-orphans/index.ts), but this log is
+#     readable by anyone on the internet and a `jq .` of a whole body is one
+#     schema change away from printing something that should not be there.
+#
+# THE CREDENTIAL. Unlike every other job in this repo, this one holds the
+# service-role key: `retention` and `sweep-orphans` both require it verbatim
+# (`isServiceRoleToken` compares it against the injected value and deliberately
+# does not trust a decoded `role` claim). That key bypasses RLS entirely, so it
+# lives in exactly one place — the secret named below, read by this workflow and
+# no other. The smoke job in backend.yml must never be given it: a proof that
+# bypasses RLS proves nothing.
+name: maintenance
+
+on:
+  # 09:17 UTC ≈ 02:17 in Seattle — a quiet hour, and off the hour because
+  # GitHub delays cron jobs scheduled on it. Daily: retention's own lease
+  # defaults to an hour, so the cadence is only ever "at least this often".
+  schedule:
+    - cron: "17 9 * * *"
+  workflow_dispatch:
+    inputs:
+      apply_user_sweep:
+        description: >-
+          Actually delete the orphaned auth.users rows in this run
+          (leave off for a report). Can only turn the sweep ON — the repo
+          variable still decides the scheduled runs.
+        type: boolean
+        default: false
+
+# GitHub disables a scheduled workflow after 60 days with no repo activity. If
+# the sweeps ever go quiet, check that before checking anything else.
+concurrency:
+  group: maintenance
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      # The one secret this workflow needs, and the most powerful one in the
+      # project. Same STAGING naming as backend.yml's three; a production
+      # project (when one exists) gets its own copy of this workflow's job with
+      # PRODUCTION_* names, exactly as the deploy job will.
+      SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_STAGING_SERVICE_ROLE_KEY }}
+      # Override only. Left unset, the URL is read from the config the app
+      # ships — the same default, and the same reasoning, as backend.yml's
+      # smoke job: a second copy in Settings can drift from the binary.
+      STAGING_URL: ${{ vars.SUPABASE_STAGING_URL || secrets.SUPABASE_STAGING_URL }}
+      # Set the repo variable to "true" once a few days of reports look right.
+      # Until then every scheduled run of the user sweep is read-only, which is
+      # the whole point of having a report mode: a criteria bug shows up as a
+      # number nobody expected instead of as deleted accounts.
+      APPLY_USER_SWEEP: ${{ inputs.apply_user_sweep || vars.SUPABASE_STAGING_USER_SWEEP_APPLY }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Resolve the project URL and check the credential
+        id: guard
+        run: |
+          set -uo pipefail
+          CONFIG="Sources/Core/Sync/SupabaseConfig.swift"
+          url="${STAGING_URL:-}"
+          source="repo variable/secret"
+          if [ -z "$url" ] && [ -f "$CONFIG" ]; then
+            url="$(grep -oE 'https://[a-z0-9]+\.supabase\.co' "$CONFIG" | head -1)"
+            source="$CONFIG (the config the app ships)"
+          fi
+
+          missing=()
+          [ -n "${SERVICE_ROLE_KEY:-}" ] || missing+=("SUPABASE_STAGING_SERVICE_ROLE_KEY")
+          [ -n "$url" ]                  || missing+=("a project URL")
+
+          if [ ${#missing[@]} -eq 0 ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            { echo "url<<EOF"; echo "$url"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+            echo "Resolved the project endpoint from: $source"
+            exit 0
+          fi
+
+          # A fork or a fresh clone gets a green, self-explaining run rather
+          # than a nightly red X for a decision nobody made.
+          echo "configured=false" >> "$GITHUB_OUTPUT"
+          list="$(printf '%s, ' "${missing[@]}")"; list="${list%, }"
+          {
+            echo "### Maintenance skipped"
+            echo
+            echo "Missing: \`$list\`"
+            echo
+            echo "\`SUPABASE_STAGING_SERVICE_ROLE_KEY\` is the staging project's"
+            echo "**service_role / secret** key, copied verbatim from"
+            echo "**Project Settings → API Keys**. The functions compare it"
+            echo "against the value the platform injects, so it has to be that"
+            echo "exact key — not a personal access token, not the publishable key."
+            echo
+            echo "Add it under **Settings → Secrets and variables → Actions**."
+            echo
+            echo "**Until this is set, photos are not being aged out.**"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=Maintenance skipped::Missing $list — nothing was swept."
+
+      - name: Sweep
+        if: steps.guard.outputs.configured == 'true'
+        shell: bash
+        env:
+          RESOLVED_URL: ${{ steps.guard.outputs.url }}
+        run: |
+          set -uo pipefail
+
+          # GitHub masks secrets automatically; a repo VARIABLE is not masked,
+          # and the URL carries the project ref. Mask both before anything is
+          # printed, the same way the smoke job does.
+          URL="${RESOLVED_URL%/}"
+          echo "::add-mask::$URL"
+          ref="$(printf '%s' "$URL" | sed -E 's#^https?://([^./]+)\..*#\1#')"
+          if [ -n "$ref" ] && [ "$ref" != "$URL" ]; then echo "::add-mask::$ref"; fi
+
+          CODE=""; RESP=""
+          call() { # $1 = function slug, $2 = JSON body
+            local raw
+            raw="$(curl --silent --show-error --max-time 180 -X POST \
+                     -H "Authorization: Bearer $SERVICE_ROLE_KEY" \
+                     -H "apikey: $SERVICE_ROLE_KEY" \
+                     -H "Content-Type: application/json" \
+                     -H "Accept: application/json" \
+                     --data "$2" \
+                     -w $'\n%{http_code}' \
+                     "$URL/functions/v1/$1" 2>&1)" || raw="$raw"$'\n000'
+            CODE="${raw##*$'\n'}"
+            RESP="${raw%$'\n'*}"
+          }
+          num() { printf '%s' "$RESP" | jq -r "$1 // 0" 2>/dev/null || printf '0'; }
+
+          # Echoing an error body is safe by construction: http.ts answers 5xx
+          # with a bare machine code and 4xx with a message written for the
+          # caller. Neither carries a row, a path or an address.
+          died() {
+            echo "::error title=$1 failed::HTTP $CODE $(printf '%s' "$RESP" | head -c 300 | tr -d '\n')"
+            {
+              echo "### $1 FAILED"
+              echo
+              echo "HTTP \`$CODE\`."
+              case "$CODE" in
+                404) echo "The function is not deployed yet — push a \`backend/**\`"
+                     echo "change to \`staging\` and let \`deploy-staging\` run." ;;
+                401|403) echo "\`SUPABASE_STAGING_SERVICE_ROLE_KEY\` is not the key the project"
+                         echo "injects. Both functions compare the bearer verbatim, so it must"
+                         echo "be the **service_role / secret** key from Project Settings → API"
+                         echo "Keys — not an access token, not the publishable key." ;;
+                000) echo "The request never completed. A paused free-tier project does this;"
+                     echo "unpause it in the dashboard and re-run." ;;
+                *)   echo "See the function's own logs in the Supabase dashboard — 5xx bodies"
+                     echo "here carry a machine code only, on purpose." ;;
+              esac
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          }
+
+          # ---- retention -----------------------------------------------------
+          # First pass takes the documented defaults, including the one-hour
+          # lease: a manual run minutes after the nightly one SHOULD come back
+          # "claimed_recently" rather than sweeping twice.
+          #
+          # After that, drain. `purge_expired_photo_rows` is bounded at 500 paths
+          # per call so the first sweep after a long gap cannot hang, which means
+          # a full batch is the signal that there is more waiting. The follow-up
+          # passes pass minIntervalMinutes:0 to step past the lease they just
+          # took — safe because they are strictly sequential inside one job, and
+          # the workflow's concurrency group is what keeps two jobs apart.
+          MAX_PASSES=5
+          BATCH=500
+          total_cleared=0; total_removed=0; pending=0; storage_errors=0; passes=0
+          retention_note=""
+          body='{}'
+          for pass in $(seq 1 $MAX_PASSES); do
+            call retention "$body"
+            [ "$CODE" = "200" ] || died "retention"
+            [ "$(printf '%s' "$RESP" | jq -r '.ok // false')" = "true" ] || died "retention"
+            passes=$pass
+
+            if [ "$(printf '%s' "$RESP" | jq -r '.skipped // false')" = "true" ]; then
+              # Somebody else claimed the lease inside the interval — a client
+              # trigger, or a manual run. Nothing to do and nothing wrong: "0
+              # cleared" here means "already swept", not "found nothing".
+              retention_note="$(printf '%s' "$RESP" | jq -r '.reason // "?"')"
+              echo "retention: skipped ($retention_note)"
+              break
+            fi
+
+            cleared="$(num '.photoRowsCleared')"
+            total_cleared=$((total_cleared + cleared))
+            total_removed=$((total_removed + $(num '.objectsRemoved')))
+            pending="$(num '.pendingRetry')"
+            storage_errors="$(printf '%s' "$RESP" | jq -r '(.storageErrors // []) | length' 2>/dev/null || echo 0)"
+            echo "retention pass $pass: $cleared path(s) claimed, $(num '.objectsRemoved') removed, $pending pending"
+
+            # Storage refused a batch. Those paths stay on the tombstone list and
+            # the next nightly run retries them; hammering it now would not help.
+            if [ "$storage_errors" != "0" ]; then
+              echo "::warning title=Retention storage errors::$storage_errors batch(es) failed; the paths stay queued for the next run."
+              break
+            fi
+            [ "$cleared" -ge "$BATCH" ] || break
+            body='{"minIntervalMinutes":0}'
+          done
+
+          # ---- orphaned auth.users -------------------------------------------
+          sweep_body='{}'
+          mode="report only"
+          if [ "${APPLY_USER_SWEEP:-}" = "true" ]; then
+            sweep_body='{"apply":true}'
+            mode="APPLYING"
+          fi
+          echo "sweep-orphans: $mode"
+          call sweep-orphans "$sweep_body"
+          [ "$CODE" = "200" ] || died "sweep-orphans"
+          [ "$(printf '%s' "$RESP" | jq -r '.ok // false')" = "true" ] || died "sweep-orphans"
+
+          scanned="$(num '.scanned')"
+          deletable="$(num '.deletable')"
+          deleted="$(num '.deleted')"
+          delete_errors="$(num '.deleteErrors')"
+          withheld="$(num '.withheldByCap')"
+          # The keep tally is a fixed set of integer counters built by
+          # planSweep(), so printing it whole cannot leak a row.
+          kept="$(printf '%s' "$RESP" | jq -c '.kept // {}' 2>/dev/null || printf '{}')"
+          echo "sweep-orphans: scanned $scanned, deletable $deletable, deleted $deleted"
+          echo "sweep-orphans: kept $kept"
+          if [ "$(printf '%s' "$RESP" | jq -r '.scanCapped // false')" = "true" ]; then
+            echo "::warning title=User scan capped::more accounts than one run reads; the remainder is picked up tomorrow."
+          fi
+          if [ "$delete_errors" != "0" ]; then
+            echo "::warning title=Account deletions failed::$delete_errors could not be removed; see the function logs."
+          fi
+
+          # ---- report --------------------------------------------------------
+          {
+            echo "### Retention"
+            echo
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| passes | $passes |"
+            echo "| photo rows cleared | $total_cleared |"
+            echo "| storage objects removed | $total_removed |"
+            echo "| still pending | $pending |"
+            if [ -n "$retention_note" ]; then
+              echo "| skipped | \`$retention_note\` — the lease was already claimed |"
+            fi
+            echo
+            echo "### Orphaned accounts ($mode)"
+            echo
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| accounts scanned | $scanned |"
+            echo "| would delete | $deletable |"
+            echo "| deleted | $deleted |"
+            echo "| withheld by the per-run cap | $withheld |"
+            echo "| failed | $delete_errors |"
+            echo
+            echo "Kept, by reason: \`$kept\`"
+            echo
+            if [ "$mode" = "report only" ]; then
+              echo "Report only. Set the repo **variable**"
+              echo "\`SUPABASE_STAGING_USER_SWEEP_APPLY\` to \`true\` to let the"
+              echo "nightly run delete them, once these numbers look right."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

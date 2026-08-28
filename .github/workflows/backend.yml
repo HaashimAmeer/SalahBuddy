@@ -365,8 +365,12 @@ jobs:
 
           # ---- cleanup ------------------------------------------------------
           # delete_account() purges every row the throwaway user created. The
-          # auth.users row itself needs service_role and is left for the admin
-          # sweep on the punch list (see backend/README.md).
+          # auth.users row itself needs service_role, which this job must never
+          # hold — the nightly `maintenance` workflow sweeps those shells once
+          # they are 30 days old (backend/README.md, "Sweeping orphaned
+          # accounts"). Leaving them is what makes the smoke user indis-
+          # tinguishable from a real deleted account, which is the point: the
+          # sweep is never given a rule that only fits CI.
           CLEANUP_JWTS=()
           cleanup() {
             local j
