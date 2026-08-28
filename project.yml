@@ -1,7 +1,11 @@
 name: SalahBuddy
 options:
   bundleIdPrefix: org.amacvoters
-  deploymentTarget: { iOS: "17.0" }
+  # v5 §9-04 DECIDED: the floor rises to iOS 18. The audience is TestFlight,
+  # every tester's device is far past it, and it buys the widget phases their
+  # whole vocabulary — ControlWidget (§3's Control Center entry) and the
+  # ActivityKit surface §6 is built on — with no availability gates anywhere.
+  deploymentTarget: { iOS: "18.0" }
   createIntermediateGroups: true
 packages:
   Adhan: { url: https://github.com/batoulapps/adhan-swift, from: "1.4.0" }
@@ -24,6 +28,14 @@ targets:
       - { package: Adhan }
       - { package: Supabase, product: Supabase }
       - { package: GoogleSignIn, product: GoogleSignIn }
+      # v5 §3 (P2): the widget. An app-extension dependency is EMBEDDED by
+      # XcodeGen (Embed App Extensions → PlugIns/), which is the whole of what
+      # "ships with the app" means for a widget — and it means the app's
+      # scheme builds it, so `build-for-testing` compiles it too.
+      - { target: SalahBuddyWidget }
+      # v5 §5-B (P3): the notification service extension. Embedded the same
+      # way, for the same reason — and so the app's scheme compiles it.
+      - { target: SalahBuddyNotify }
     info:
       path: Sources/Info.plist
       properties:
@@ -52,6 +64,30 @@ targets:
         # used for authentication regardless. Revisit only if the app ever
         # ships its own cryptography.
         ITSAppUsesNonExemptEncryption: false
+        # v5 §5: the QUIET reload push. `notify` sends an alert-free
+        # `content-available` push for every post after the first one in a
+        # window, so the home screen does not sit on "3 of 5" while the fourth
+        # and fifth arrive. A background push is delivered to
+        # `AppDelegate.didReceiveRemoteNotification` and NOWHERE ELSE, and iOS
+        # drops it silently unless this mode is declared — so the missing key
+        # would look exactly like Apple's throttling, which §5 says to expect.
+        #
+        # It grants no new capability at the App Store review desk beyond what
+        # `aps-environment` already implies, and it does not enable background
+        # FETCH (that is a different mode, deliberately absent).
+        UIBackgroundModes:
+          - remote-notification
+        # v5 §6 (P4): the Live Activity. Without this key ActivityKit reports
+        # `areActivitiesEnabled == false` on every device and `Activity.request`
+        # throws — which looks exactly like a person having turned Live
+        # Activities off in Settings, i.e. like nothing at all. It belongs to
+        # the APP even though the widget extension draws the surface.
+        NSSupportsLiveActivities: true
+        # Frequent updates are deliberately NOT declared
+        # (`NSSupportsLiveActivitiesFrequentUpdates`). §6's activity moves when
+        # a friend prays — a handful of times per window — and the key exists
+        # for surfaces that update every few minutes. Claiming it would ask iOS
+        # to budget for traffic this app does not send.
         NSLocationWhenInUseUsageDescription: "SalahBuddy uses your location to calculate accurate prayer times."
         NSCameraUsageDescription: "SalahBuddy uses the camera so you can snap a quick photo when you pray and share it with your circle."
         NSPhotoLibraryUsageDescription: "SalahBuddy lets you pick a photo from your library for your prayer post."
@@ -63,14 +99,131 @@ targets:
           - CFBundleTypeRole: Editor
             CFBundleURLSchemes:
               - com.googleusercontent.apps.923951498597-445nb4q5o5k66imnbbul70h88s7bct72
+          # v5 §2 tooth #3 (P4): the app's own scheme, and it exists for ONE
+          # case. The widget's nudge button holds a session it may NEVER
+          # refresh — two processes rotating one refresh token invalidate each
+          # other — so an expired token means "hand this to the app". A widget
+          # cannot open a sheet, so handing over is a URL:
+          # `salahbuddy://nudge?member=…&prayer=…&dayKey=…`. Spelled in
+          # `SharedBackend.urlScheme`, which both processes compile.
+          - CFBundleTypeRole: Editor
+            CFBundleURLName: org.amacvoters.salahbuddymock
+            CFBundleURLSchemes:
+              - salahbuddy
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: org.amacvoters.salahbuddymock
         TARGETED_DEVICE_FAMILY: "1"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        # v4: Sign in with Apple + push. Kept OUT of Sources/ so XcodeGen
-        # never mistakes it for a bundle resource.
+        # v4: Sign in with Apple + push. v5 §2 adds the App Group and the
+        # shared keychain access group to the same file. Kept OUT of Sources/
+        # so XcodeGen never mistakes it for a bundle resource — and per-target,
+        # so P2's widget extension brings its OWN file rather than editing this
+        # one (an extension must not claim Sign in with Apple or aps-environment).
         CODE_SIGN_ENTITLEMENTS: SalahBuddy.entitlements
+  # v5 §3 (P2) / §4 §6 (P4) — the widget process.
+  #
+  # It compiles FOUR PATHS and nothing else: its own `Widget/` sources,
+  # `Sources/Shared/` (the two file formats the two processes must agree on —
+  # `widget.json` and the Live Activity's content state — plus the backend
+  # constants and the nudge's session read), `Models.swift` (pure value types,
+  # so the extension speaks the app's `Prayer` and `LogTier` rather than a
+  # second copy of them that could drift) and `Theme.swift` (the palette, for
+  # the same reason). No `GameEngine`, no Adhan, no Supabase SDK, no `Store`,
+  # no `AppClock`: §3 says the widget re-derives nothing, and the surest way to
+  # keep a rule like that is to not give the target the files it would need to
+  # break it.
+  #
+  # P4's nudge button is the one thing in here that touches the network, and it
+  # does so with `URLSession` and a Keychain read — NOT with the Supabase SDK,
+  # which would drag the whole sync layer across this line. §2 tooth #3 is why
+  # it can never do more than read: two processes rotating one refresh token
+  # invalidate each other.
+  SalahBuddyWidget:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: Widget
+      - path: Sources/Shared
+      - path: Sources/Core/Models.swift
+      - path: Sources/UI/Theme.swift
+    info:
+      path: Widget/Info.plist
+      properties:
+        CFBundleDisplayName: SalahBuddy
+        # Same trap the app's Info.plist documents: a literal here WINS over
+        # the build setting, so an extension pinned to "1.0 (1)" would be
+        # rejected at upload for disagreeing with the app it ships inside —
+        # App Store Connect requires the two versions to match exactly, and
+        # ci_post_clone.sh stamps CURRENT_PROJECT_VERSION in this file's
+        # settings.base where BOTH targets inherit it.
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        # The app's id plus a suffix — an extension's bundle id MUST be
+        # prefixed by its host app's, and this one needs its own App ID in the
+        # portal with the App Group (and, for P4, keychain sharing) enabled.
+        #
+        # THAT PORTAL STEP GATES THE MERGE, not the other way round: every
+        # automated check here builds unsigned for the simulator and stays
+        # green without it, and the first thing to notice is Xcode Cloud's
+        # Archive failing on `staging` with no build reaching TestFlight. See
+        # "A new TARGET is a portal step" in XCODE-CLOUD.md.
+        PRODUCT_BUNDLE_IDENTIFIER: org.amacvoters.salahbuddymock.widget
+        TARGETED_DEVICE_FAMILY: "1"
+        # Its OWN entitlements file: the App Group it shares with the app, and
+        # nothing the app claims that an extension may not (Sign in with Apple,
+        # aps-environment). See the comments in the file.
+        CODE_SIGN_ENTITLEMENTS: SalahBuddyWidget.entitlements
+  # v5 §5-B (P3) — the notification service extension.
+  #
+  # One file, one call: `WidgetCenter.reloadAllTimelines()` on a push carrying
+  # `mutable-content: 1`. It is the only mechanism by which a friend's post can
+  # reach a home-screen widget while the app is closed (§5 lists the three
+  # options and this is the only one that exists as an API today).
+  #
+  # It compiles `NotificationService/` and NOTHING else — no `Sources/`, not
+  # even `Sources/Shared`. It has no business reading `widget.json`: the app is
+  # that file's one writer, and an extension that could open the container is an
+  # extension somebody will eventually be tempted to make write to it.
+  #
+  # And therefore NO entitlements file. It needs no App Group (it reads
+  # nothing), no keychain group (it authenticates nothing) and no
+  # aps-environment (that is the app's). An extension that claims a capability
+  # its App ID does not have fails to sign, which is a slow way to find out.
+  SalahBuddyNotify:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: NotificationService
+    info:
+      path: NotificationService/Info.plist
+      properties:
+        CFBundleDisplayName: SalahBuddy
+        # The same version trap the other two document: a literal here WINS
+        # over the build setting, and App Store Connect rejects an upload whose
+        # extension disagrees with its host app.
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.usernotifications.service
+          # Module-qualified because the class is Swift: `NotificationService`
+          # alone is an Objective-C class name, which this target does not have
+          # one of, and the extension would fail to launch at delivery time —
+          # silently, since iOS then just shows the alert.
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).NotificationService
+    settings:
+      base:
+        # A SECOND explicit App ID in the portal, exactly like the widget's —
+        # and it gates the merge for the same reason: every check in this repo
+        # builds unsigned for the simulator and stays green without it, and the
+        # first sign of trouble is Xcode Cloud's Archive failing on `staging`.
+        # See "A new TARGET is a portal step" in XCODE-CLOUD.md.
+        PRODUCT_BUNDLE_IDENTIFIER: org.amacvoters.salahbuddymock.notify
+        TARGETED_DEVICE_FAMILY: "1"
   SalahBuddyTests:
     type: bundle.unit-test
     platform: iOS

@@ -214,6 +214,15 @@ export function buildAPNsPayload(opts: {
   threadId?: string | null;
   category?: string | null;
   sound?: string | null;
+  /// v5 §5-B: run the app's Notification Service Extension before the banner
+  /// is shown. The extension's only job is `reloadAllTimelines()`, which is the
+  /// one way a friend's post reaches a home-screen widget with the app closed.
+  ///
+  /// It changes NOTHING about the notification a person sees — the extension
+  /// hands `request.content` straight back — and it is safe on a device with an
+  /// older build installed: a phone with no such extension simply ignores the
+  /// key and shows the alert.
+  mutableContent?: boolean;
   data?: Record<string, unknown>;
 }): Record<string, unknown> {
   const aps: Record<string, unknown> = {
@@ -223,6 +232,7 @@ export function buildAPNsPayload(opts: {
   if (aps.sound === undefined) delete aps.sound;
   if (opts.threadId) aps["thread-id"] = opts.threadId;
   if (opts.category) aps.category = opts.category;
+  if (opts.mutableContent) aps["mutable-content"] = 1;
 
   const payload: Record<string, unknown> = { aps };
   for (const [key, value] of Object.entries(opts.data ?? {})) {
@@ -230,6 +240,178 @@ export function buildAPNsPayload(opts: {
   }
   return payload;
 }
+
+/// v5 §5 — the reload-only push: `content-available` and the custom data, and
+/// nothing a person can see.
+///
+/// A SEPARATE function rather than a nullable `alert` on the one above, because
+/// the property that matters is "there is no way for a title to end up in
+/// here". §6's collapsed alert (one per prayer window per friend) is right for
+/// the tray and must not move; what it leaves behind is a widget sitting on
+/// "3 of 5" while the fourth and fifth post arrive. This is what tells the
+/// phone to go and look, with no banner, no sound and no badge.
+///
+/// It is delivered to `AppDelegate.didReceiveRemoteNotification` and to the
+/// notification service extension NEVER — that one runs for alerts only. Apple
+/// throttles background pushes and guarantees nothing about them, which is
+/// exactly why §5 calls this a bonus and not the mechanism.
+export function buildSilentAPNsPayload(
+  opts: { data?: Record<string, unknown> } = {},
+): Record<string, unknown> {
+  const payload: Record<string, unknown> = { aps: { "content-available": 1 } };
+  for (const [key, value] of Object.entries(opts.data ?? {})) {
+    if (value !== undefined && value !== null) payload[key] = value;
+  }
+  return payload;
+}
+
+/// v5 §6 — a Live Activity payload. `content-state` replaces `alert`, the
+/// activity's own `attributes` come along on a start, and there is a hard 4 KB
+/// ceiling on the whole thing (see `LIVE_ACTIVITY_PAYLOAD_LIMIT`).
+///
+/// A liveactivity push goes out at 10 like an alert, not at 5 like a background
+/// push: priority 5 tells Apple it may be delayed for power, and an activity
+/// that says "3 of 5 prayed" twenty minutes late is worse than one that never
+/// updated at all. (Apple accepts both here; 5 is for battery-friendly
+/// housekeeping, which this is not.)
+export const APNS_LIVE_ACTIVITY_PUSH_TYPE = "liveactivity";
+export const APNS_LIVE_ACTIVITY_PRIORITY = 10;
+
+// ------------------------------------------------------- the Live Activity (§6)
+
+/// What a liveactivity push is doing to the activity on the other end.
+///
+/// `start` creates one that is not there (push-to-start) and is the only event
+/// that carries `attributes`; `update` moves a running one; `end` retires it.
+///
+/// The app ends its own activity WHEN IT IS RUNNING — `LiveActivityController`
+/// on the Swift side, from `publishWidgetSnapshot` — which is not the same as
+/// "at the window's close", and the difference is why `end` is here. Nothing
+/// schedules a client-side end: ActivityKit has no request-time dismissal date
+/// and `staleDate` only dims the card. So a phone that is asleep when its window
+/// closes keeps a "window closed" card until it is next picked up, unless one of
+/// these arrives first. See backend/README.md, "Who starts a Live Activity" —
+/// the gap is documented at both ends there.
+export type LiveActivityEvent = "start" | "update" | "end";
+
+/// Apple's ceiling on a Live Activity payload. §6 states it as the reason the
+/// content state carries "emoji/names/counts/tier colours only; photos only if
+/// already in the shared container" — there is no way to send a picture, and a
+/// payload one byte over this is rejected whole (413/PayloadTooLarge), not
+/// truncated.
+export const LIVE_ACTIVITY_PAYLOAD_LIMIT = 4096;
+
+/// How many bytes a built payload actually costs, UTF-8, as Apple counts it.
+/// Exported so the fan-out can trim BEFORE spending a round trip on a payload
+/// Apple will refuse.
+export function apnsPayloadBytes(payload: Record<string, unknown>): number {
+  return new TextEncoder().encode(JSON.stringify(payload)).length;
+}
+
+export function fitsLiveActivityBudget(payload: Record<string, unknown>): boolean {
+  return apnsPayloadBytes(payload) <= LIVE_ACTIVITY_PAYLOAD_LIMIT;
+}
+
+/// Builds the `aps` block ActivityKit decodes on the device.
+///
+/// The shape is Apple's and every key is load-bearing:
+///   * `timestamp` — seconds. ActivityKit DISCARDS an update whose timestamp is
+///     older than the one it already applied, which is what makes two pushes
+///     racing over the same window safe. It is the payload's, not the request's.
+///   * `event` — see `LiveActivityEvent`.
+///   * `content-state` — decoded as `PrayerWindowAttributes.ContentState`
+///     (Sources/Shared/PrayerWindowActivity.swift). The two shapes are the same
+///     shape or the push is silently dropped, so the Swift side decodes
+///     tolerantly and every key here is one it names.
+///   * `attributes-type` / `attributes` — the STATIC half of the activity, and
+///     required on `start` only. `attributes-type` is the Swift type's name,
+///     spelled once in `LIVE_ACTIVITY_ATTRIBUTES_TYPE`.
+///   * `stale-date` — when the system should start showing the activity as out
+///     of date. The window's end, always: an activity that outlives its prayer
+///     is the thing §6 says must not happen.
+///   * `dismissal-date` — when the system retires an ENDED activity from the
+///     Lock Screen. Meaningless on start/update and omitted there.
+///
+/// No `alert` is emitted. A start push may carry one, and deliberately does
+/// not: §5's post announcement is already the banner for this event, and a
+/// second one for the same fact is exactly the kind of withdrawal from the push
+/// permission §6 is careful about.
+export function buildLiveActivityPayload(opts: {
+  event: LiveActivityEvent;
+  contentState: Record<string, unknown>;
+  timestampSeconds: number;
+  attributesType?: string;
+  attributes?: Record<string, unknown>;
+  staleSeconds?: number;
+  dismissalSeconds?: number;
+  relevanceScore?: number;
+  data?: Record<string, unknown>;
+}): Record<string, unknown> {
+  const aps: Record<string, unknown> = {
+    timestamp: Math.floor(opts.timestampSeconds),
+    event: opts.event,
+    "content-state": opts.contentState,
+  };
+  if (opts.event === "start") {
+    // Apple refuses a start with no attributes, and there is no sensible
+    // default: the attributes ARE which prayer window this activity is about.
+    if (!opts.attributesType || !opts.attributes) {
+      throw new Error("a live activity start push needs attributes");
+    }
+    aps["attributes-type"] = opts.attributesType;
+    aps.attributes = opts.attributes;
+  }
+  if (opts.staleSeconds !== undefined) {
+    aps["stale-date"] = Math.floor(opts.staleSeconds);
+  }
+  if (opts.event === "end" && opts.dismissalSeconds !== undefined) {
+    aps["dismissal-date"] = Math.floor(opts.dismissalSeconds);
+  }
+  if (opts.relevanceScore !== undefined) {
+    aps["relevance-score"] = opts.relevanceScore;
+  }
+
+  const payload: Record<string, unknown> = { aps };
+  for (const [key, value] of Object.entries(opts.data ?? {})) {
+    if (value !== undefined && value !== null) payload[key] = value;
+  }
+  return payload;
+}
+
+/// Apple's push type for a payload with no alert in it, and the priority it
+/// insists on. A background push sent at priority 10 is rejected outright
+/// (`BadPriority`), which would make the §5 reload look like a silent no-op.
+export const APNS_BACKGROUND_PUSH_TYPE = "background";
+export const APNS_BACKGROUND_PRIORITY = 5;
+
+// -------------------------------------------------------------- the apns-topic
+
+/// SPEC-V5 §1: "Live Activities need a different `apns-topic` suffix, and
+/// that's the only line that assumes a bare bundle id." This is that line,
+/// lifted out of `sendAPNs` and made pure so it is testable and so there is
+/// exactly one place the rule lives.
+///
+/// An alert, a background push and a nudge all address the APP
+/// (`org.amacvoters.salahbuddymock`). A Live Activity addresses a different
+/// endpoint of the same app and Apple routes it by topic:
+/// `<bundle id>.push-type.liveactivity`. Send one to the bare id and Apple
+/// answers 400/TopicDisallowed — which looks exactly like a misconfigured key
+/// from the outside, i.e. like nothing at all.
+export const APNS_LIVE_ACTIVITY_TOPIC_SUFFIX = ".push-type.liveactivity";
+
+export function apnsTopic(bundleId: string, pushType?: string | null): string {
+  if (pushType !== APNS_LIVE_ACTIVITY_PUSH_TYPE) return bundleId;
+  // Idempotent: APNS_BUNDLE_ID is a deployment secret, and somebody eventually
+  // sets it to the suffixed form after reading Apple's docs. Appending a second
+  // copy would be a silent 400 on every Live Activity push.
+  return bundleId.endsWith(APNS_LIVE_ACTIVITY_TOPIC_SUFFIX)
+    ? bundleId
+    : `${bundleId}${APNS_LIVE_ACTIVITY_TOPIC_SUFFIX}`;
+}
+/// What everything else goes out at, and `sendAPNs`' default. Named so the
+/// header and the skip log below read it from the same place — a log that
+/// reported a priority the request did not carry would be worse than no log.
+export const APNS_ALERT_PRIORITY = 10;
 
 // ------------------------------------------------------------------- delivery
 
@@ -365,9 +547,12 @@ export async function sendAPNs(opts: SendAPNsOptions): Promise<APNsSendResult> {
     });
     const headers: Record<string, string> = {
       authorization: `bearer ${jwt}`,
-      "apns-topic": creds.bundleId,
+      // v5 §6: a Live Activity is a different topic on the same app. See
+      // `apnsTopic` — this used to be a bare `creds.bundleId`, which §1 named
+      // as the one line that would have to change.
+      "apns-topic": apnsTopic(creds.bundleId, opts.pushType),
       "apns-push-type": opts.pushType ?? "alert",
-      "apns-priority": String(opts.priority ?? 10),
+      "apns-priority": String(opts.priority ?? APNS_ALERT_PRIORITY),
       "content-type": "application/json",
     };
     if (opts.collapseId) {
@@ -423,6 +608,16 @@ export async function sendAPNs(opts: SendAPNsOptions): Promise<APNsSendResult> {
   }
 }
 
+/// Whether a built payload asks for the notification service extension.
+/// Reads the payload rather than an option, because by the time delivery has it
+/// the payload IS the fact — an option that was dropped on the way here would
+/// still read as "true" from the wrong side of the decision.
+function mutableContentOf(payload: Record<string, unknown>): boolean {
+  const aps = payload.aps;
+  if (typeof aps !== "object" || aps === null) return false;
+  return (aps as Record<string, unknown>)["mutable-content"] === 1;
+}
+
 export function parseAPNsReason(body: string): string | undefined {
   if (!body) return undefined;
   try {
@@ -472,6 +667,11 @@ export async function deliverToDevices(
     expiration?: number;
     concurrency?: number;
     timeoutMs?: number;
+    /// v5 §5: `"background"` for a reload-only payload. Absent means `"alert"`,
+    /// which is `sendAPNs`' own default and every push before this one.
+    pushType?: string;
+    /// Paired with `pushType` — Apple rejects a background push at 10.
+    priority?: number;
   } = {},
 ): Promise<DeliverSummary> {
   const log = opts.log ?? defaultLog;
@@ -489,7 +689,25 @@ export async function deliverToDevices(
 
   if (!creds) {
     // One line, not one per device — an unconfigured environment is normal.
-    log("apns: not configured — skipping fan-out", { devices: devices.length });
+    //
+    // The three fields beyond the count are the v5 §5 decisions, and they are
+    // here because they answer the same operational question: "why is nobody's
+    // widget updating". A push that went as an `alert` when it should have been
+    // a `background`, a background push sent at the alert priority (Apple
+    // answers 400/BadPriority and NOTHING is delivered — not a dead token, not
+    // an unregistered device, just a failure the reply still reports 200 over),
+    // and an alert that did not ask for the notification service extension all
+    // look exactly like Apple throttling from the outside — silent,
+    // intermittent, and about somebody else's phone. This is the line that says
+    // which. (`notify_test.ts` reads it for the same reason, and the shape is
+    // one object with named keys rather than a message, so rewording the
+    // sentence does not break it.)
+    log("apns: not configured — skipping fan-out", {
+      devices: devices.length,
+      pushType: opts.pushType ?? "alert",
+      priority: opts.priority ?? APNS_ALERT_PRIORITY,
+      mutableContent: mutableContentOf(payload),
+    });
     summary.skipped = devices.length;
     return summary;
   }
@@ -505,6 +723,8 @@ export async function deliverToDevices(
       credentials: creds,
       collapseId: opts.collapseId,
       expiration: opts.expiration,
+      pushType: opts.pushType,
+      priority: opts.priority,
       fetchImpl: opts.fetchImpl,
       timeoutMs: opts.timeoutMs,
       log,

@@ -52,10 +52,16 @@ private final class StubPushTransport: PushTransport {
     var deletes: [String] = []
     var bodies: [NotifyBody] = []
 
+    /// v5 §6: every `register_live_activity_token` call, and every token this
+    /// device asked the server to forget.
+    var liveActivityRegistrations: [LiveActivityRegistration] = []
+    var liveActivityDeletes: [String] = []
+
     var reply: NotifyReply = NotifyReply(ok: true, kind: nil, sent: true, reason: nil)
     var upsertError: (any Error)?
     var deleteError: (any Error)?
     var notifyError: (any Error)?
+    var liveActivityError: (any Error)?
 
     func registerDevice(_ device: RemoteDevice) async throws {
         if let upsertError { throw upsertError }
@@ -71,6 +77,16 @@ private final class StubPushTransport: PushTransport {
         bodies.append(body)
         if let notifyError { throw notifyError }
         return reply
+    }
+
+    func registerLiveActivityToken(_ registration: LiveActivityRegistration) async throws {
+        if let liveActivityError { throw liveActivityError }
+        liveActivityRegistrations.append(registration)
+    }
+
+    func deleteLiveActivityToken(token: String) async throws {
+        if let liveActivityError { throw liveActivityError }
+        liveActivityDeletes.append(token)
     }
 }
 
@@ -723,6 +739,179 @@ final class PushRegistrarTests: XCTestCase {
         let remote: UNNotificationPresentationOptions = AppDelegate.presentationOptions(remote: true)
         XCTAssertTrue(remote.contains(.banner))
         XCTAssertTrue(remote.contains(.sound))
+    }
+
+    // MARK: - Live Activity tokens (v5 §6)
+
+    private func liveActivity(token: String = "act-1",
+                              kind: LiveActivityTokenKind = .update,
+                              activityID: String? = "A1",
+                              dayKey: String? = "2026-08-28",
+                              prayer: Prayer? = .asr,
+                              endsAt: Date? = Date(timeIntervalSince1970: 1_756_000_000),
+                              utcOffset: Int = AppClock.utcOffsetSeconds)
+        -> LiveActivityRegistration {
+        LiveActivityRegistration(token: token, kind: kind, activityID: activityID,
+                                 dayKey: dayKey, prayer: prayer, endsAt: endsAt,
+                                 environment: APNsEnvironment.current,
+                                 utcOffset: utcOffset)
+    }
+
+    func testAnActivityTokenReachesTheServerWithItsWindow() async {
+        let rig: Rig = await registeredRig()
+        let sent: Bool = await rig.push.registerLiveActivityToken(liveActivity())
+        XCTAssertTrue(sent)
+        XCTAssertEqual(rig.transport.liveActivityRegistrations.count, 1)
+        let written: LiveActivityRegistration? = rig.transport.liveActivityRegistrations.first
+        XCTAssertEqual(written?.token, "act-1")
+        XCTAssertEqual(written?.kind, .update)
+        // `ends_at` is the one piece of schedule the server holds, and it is
+        // what buys a correct `stale-date` and an `end` push for a window that
+        // closed while the phone was asleep. A registration that drops it is a
+        // Lock Screen nothing can retire.
+        XCTAssertNotNil(written?.endsAt)
+        XCTAssertEqual(written?.prayer, .asr)
+        XCTAssertEqual(written?.utcOffset, AppClock.utcOffsetSeconds)
+    }
+
+    /// SPEC-V4 §1 and §9-03 together: the SURFACE works for a solo user, the
+    /// PUSH half needs friends. A demo circle's Live Activity is local, and this
+    /// device has no account for a token to belong to.
+    func testDemoAndSoloNeverRegisterAnActivityToken() async {
+        let rig: Rig = makeRig()
+        await rig.push.refresh(userID: nil, hasCircle: false)
+        let sent: Bool = await rig.push.registerLiveActivityToken(liveActivity())
+        XCTAssertFalse(sent)
+        XCTAssertTrue(rig.transport.liveActivityRegistrations.isEmpty)
+
+        // Signed in, but no circle — still nobody to be pushed about.
+        await rig.push.refresh(userID: me, hasCircle: false)
+        await rig.push.registerLiveActivityToken(liveActivity())
+        XCTAssertTrue(rig.transport.liveActivityRegistrations.isEmpty)
+    }
+
+    func testNoActivityTokenIsRegisteredWhileOffline() async {
+        let rig: Rig = makeRig(online: false)
+        rig.system.status = .authorized
+        await rig.push.refresh(userID: me, hasCircle: true)
+        let sent: Bool = await rig.push.registerLiveActivityToken(liveActivity())
+        XCTAssertFalse(sent)
+        XCTAssertTrue(rig.transport.liveActivityRegistrations.isEmpty)
+    }
+
+    /// ActivityKit re-emits the SAME token from `pushTokenUpdates` on every
+    /// launch and after every state change. A round trip per emission, on a path
+    /// that runs five times a day, is what the fingerprint exists to stop.
+    func testTheSameActivityTokenReEmittedCostsNoRoundTrip() async {
+        let rig: Rig = await registeredRig()
+        await rig.push.registerLiveActivityToken(liveActivity())
+        let again: Bool = await rig.push.registerLiveActivityToken(liveActivity())
+        // Reported as SUCCESS, not as a skip: the server already says this.
+        XCTAssertTrue(again)
+        XCTAssertEqual(rig.transport.liveActivityRegistrations.count, 1)
+    }
+
+    /// ...and the converse, because a fingerprint that ignored a field would
+    /// make that field unwritable after the first registration. The window and
+    /// the zone are the two that move under a token that has not.
+    func testAChangedWindowOrZoneIsANewRegistration() async {
+        let rig: Rig = await registeredRig()
+        await rig.push.registerLiveActivityToken(liveActivity())
+        await rig.push.registerLiveActivityToken(liveActivity(prayer: .maghrib))
+        await rig.push.registerLiveActivityToken(
+            liveActivity(prayer: .maghrib, utcOffset: AppClock.utcOffsetSeconds + 3600))
+        XCTAssertEqual(rig.transport.liveActivityRegistrations.count, 3)
+    }
+
+    func testAFailedRegistrationIsNotRememberedAsDone() async {
+        let rig: Rig = await registeredRig()
+        rig.transport.liveActivityError = StubFailure()
+        let sent: Bool = await rig.push.registerLiveActivityToken(liveActivity())
+        XCTAssertFalse(sent)
+        XCTAssertTrue(rig.transport.liveActivityRegistrations.isEmpty)
+
+        // The next emission must try again rather than read as already written.
+        rig.transport.liveActivityError = nil
+        await rig.push.registerLiveActivityToken(liveActivity())
+        XCTAssertEqual(rig.transport.liveActivityRegistrations.count, 1)
+    }
+
+    /// The activity ended, so its address goes. Not owed and not retried — the
+    /// server's sweep collects a missed one within twelve hours.
+    func testEndingAnActivityDeletesItsRowAndForgetsOnlyItsFingerprint() async {
+        let rig: Rig = await registeredRig()
+        await rig.push.registerLiveActivityToken(liveActivity(token: "act-1"))
+        await rig.push.registerLiveActivityToken(
+            liveActivity(token: "act-2", activityID: "A2", prayer: .isha))
+        XCTAssertEqual(rig.transport.liveActivityRegistrations.count, 2)
+
+        await rig.push.forgetLiveActivityToken("act-1")
+        XCTAssertEqual(rig.transport.liveActivityDeletes, ["act-1"])
+
+        // The forgotten one costs a round trip again...
+        await rig.push.registerLiveActivityToken(liveActivity(token: "act-1"))
+        XCTAssertEqual(rig.transport.liveActivityRegistrations.count, 3)
+        // ...and the OTHER activity's fingerprint survived, which is what the
+        // token-prefix filter is for. Clearing the whole set here would make
+        // every still-running activity re-register on the next emission.
+        await rig.push.registerLiveActivityToken(
+            liveActivity(token: "act-2", activityID: "A2", prayer: .isha))
+        XCTAssertEqual(rig.transport.liveActivityRegistrations.count, 3)
+    }
+
+    /// A token whose value is a PREFIX of another's must not take that other
+    /// one's fingerprint with it — the separator is what makes the filter a
+    /// token match rather than a string match.
+    func testForgettingATokenDoesNotForgetOneItMerelyPrefixes() async {
+        let rig: Rig = await registeredRig()
+        await rig.push.registerLiveActivityToken(liveActivity(token: "act"))
+        await rig.push.registerLiveActivityToken(
+            liveActivity(token: "act-1", activityID: "A2"))
+        XCTAssertEqual(rig.transport.liveActivityRegistrations.count, 2)
+
+        await rig.push.forgetLiveActivityToken("act")
+        await rig.push.registerLiveActivityToken(
+            liveActivity(token: "act-1", activityID: "A2"))
+        XCTAssertEqual(rig.transport.liveActivityRegistrations.count, 2)
+    }
+
+    /// A delete that fails is swallowed, unlike `devices`' — the row expires by
+    /// itself, so a pending-delete ledger would be machinery for nothing.
+    func testAFailedActivityDeleteIsNotOwed() async {
+        let rig: Rig = await registeredRig()
+        await rig.push.registerLiveActivityToken(liveActivity())
+        rig.transport.liveActivityError = StubFailure()
+        await rig.push.forgetLiveActivityToken("act-1")
+        XCTAssertTrue(rig.transport.liveActivityDeletes.isEmpty)
+        XCTAssertNil(rig.system.owedDelete, "an activity token is never owed a delete")
+    }
+
+    /// The wire contract with `public.register_live_activity_token(...)`. Eight
+    /// snake_cased params, and a nil field OMITTED rather than sent as null —
+    /// PostgREST resolves the overload by the names in the body, and the RPC's
+    /// own defaults are what should apply to what is missing.
+    func testTheActivityRegisterParamsMatchTheRPCSignature() throws {
+        let update: Data = try JSONEncoder().encode(liveActivity().registerParams)
+        let body: [String: Any] = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: update) as? [String: Any])
+        XCTAssertEqual(Set(body.keys),
+                       ["p_token", "p_kind", "p_activity_id", "p_day_key", "p_prayer",
+                        "p_ends_at", "p_environment", "p_utc_offset"])
+        XCTAssertEqual(body["p_kind"] as? String, "update")
+        // The rawValue IS the `prayer_kind` label.
+        XCTAssertEqual(body["p_prayer"] as? String, "asr")
+        XCTAssertEqual(body["p_ends_at"] as? String, "2025-08-24T01:46:40Z")
+
+        // A push-to-start token names no window, and the RPC refuses one that
+        // does — so the encoder must not manufacture nulls for the absent keys.
+        let start: Data = try JSONEncoder().encode(
+            liveActivity(token: "start-1", kind: .start, activityID: nil,
+                         dayKey: nil, prayer: nil, endsAt: nil).registerParams)
+        let startBody: [String: Any] = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: start) as? [String: Any])
+        XCTAssertEqual(Set(startBody.keys),
+                       ["p_token", "p_kind", "p_environment", "p_utc_offset"])
+        XCTAssertEqual(startBody["p_kind"] as? String, "start")
     }
 
     // MARK: - Receiving a push (v4 Phase D)

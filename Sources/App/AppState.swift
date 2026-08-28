@@ -1,5 +1,9 @@
 import Foundation
 import SwiftUI
+// v5 §5-B: `UIApplication.applicationState` — the one thing that tells
+// `publishWidgetSnapshot` whether anybody can see the home screen it is
+// writing for. Imported explicitly rather than leaned on through SwiftUI.
+import UIKit
 
 /// What one tap on Post would actually write — see `AppState.postOutlook`.
 ///
@@ -43,6 +47,14 @@ final class AppState: ObservableObject {
             // change a prayer time. `circleMode` is in the list because
             // `refresh` also applies the time-travel policy.
             if settings.affectsSchedule(comparedTo: oldValue) { refresh() }
+            // v5 §7/§9-02: the widget photo setting lives in here too, and it
+            // changes what `widget.json` is allowed to say. Unconditional
+            // rather than another whitelist entry, because the write itself is
+            // already conditional (`hasSameContent`) — a settings change that
+            // moves nothing the home screen shows costs a build and no disk,
+            // and this way the NEXT field that reaches the file cannot be
+            // forgotten here.
+            publishWidgetSnapshot()
             // Reschedule stays unconditional: the notification TOGGLES are
             // themselves a reason to requeue, and this only starts a Task.
             NotificationManager.shared.reschedule()
@@ -982,6 +994,18 @@ final class AppState: ObservableObject {
     /// last sync left on disk. That is the seam being in place, not wired.
     func applyCircleSnapshot(_ snapshot: CircleSnapshot) {
         circleSnapshot = snapshot
+        // v5 §3: a pull that brought in a friend's post is exactly the change
+        // the home screen exists to show. The file is rewritten here; the
+        // reload is the next backgrounding, a window boundary, or — when this
+        // pull was the quiet §5 push waking the app — `publishWidgetSnapshot`
+        // itself, which reloads when a changed file lands in the background.
+        publishWidgetSnapshot()
+        // §3's photo fix. The file now NAMES this window's pictures; this is
+        // what puts them on the disk the extension reads. It runs AFTER the
+        // write on purpose (the list is read off the same state the file was
+        // built from) and carries its own reload, because the one above is
+        // spent long before a download finishes.
+        prefetchWidgetPhotos()
     }
 
     /// v3.6: the circle as the user shaped it (removals + accepted invites).
@@ -1128,7 +1152,50 @@ final class AppState: ObservableObject {
     /// so it never reaches the network.
     func sendNudge(to member: CircleMember, prayer: Prayer, dayKey: String) {
         nudgesSent.insert(nudgeKey(member: member, prayer: prayer, dayKey: dayKey))
+        // v5 §3: `waiting[].nudgedThisWindow` is what P4's widget button reads
+        // to know it has already been spent. Nudges are session-scoped and
+        // never touch `persist()`, so this is their only way into the file.
+        publishWidgetSnapshot()
         Task { await PushRegistrar.shared.nudge(member: member, dayKey: dayKey, prayer: prayer) }
+    }
+
+    // MARK: - The widget handed one back (v5 §2 tooth #3, §4)
+
+    /// A nudge the extension could not send itself.
+    ///
+    /// SPEC-V5 §2's third tooth is the whole reason this type exists: two
+    /// processes rotating one refresh token invalidate each other, so the
+    /// extension NEVER refreshes — an expired session means "deep-link into the
+    /// app", not "refresh it myself". This is what arrives on the other end of
+    /// that link. Everything in it was already in `widget.json`; nothing new
+    /// crosses.
+    struct WidgetNudgeTarget: Equatable, Sendable {
+        var memberID: String?
+        var prayer: Prayer?
+        var dayKey: String?
+    }
+
+    /// Set by `handleDeepLink`, cleared by `RootView` once it has put the Today
+    /// screen up. Not acted on here: which tab is showing is a view's business,
+    /// and the nudge itself is deliberately NOT re-sent — a person who has been
+    /// bounced into the app to sign in should be looking at the grid, deciding,
+    /// rather than discovering a push went out while they were being redirected.
+    @Published var pendingWidgetNudge: WidgetNudgeTarget?
+
+    /// True when the URL was ours. `SalahBuddyApp` hands anything else to
+    /// `AuthService` — Google's OAuth callback comes through the same door.
+    @discardableResult
+    func handleDeepLink(_ url: URL) -> Bool {
+        guard let target = SharedBackend.nudgeDeepLinkTarget(url) else { return false }
+        pendingWidgetNudge = WidgetNudgeTarget(
+            memberID: target.memberID,
+            prayer: target.prayer.flatMap { Prayer(rawValue: $0) },
+            dayKey: target.dayKey)
+        return true
+    }
+
+    func clearPendingWidgetNudge() {
+        pendingWidgetNudge = nil
     }
 
     /// Grid order: buddies first, you LAST (isYou flag set).
@@ -1959,6 +2026,12 @@ final class AppState: ObservableObject {
         reconcileStreakIfNeeded(now: now, calendar: calendar)
         awardNewlyCompletedChallenges()
 
+        // v5 §3, LAST: the schedule this just recomputed is what decides which
+        // window the home screen is about, and refresh() is the one call that
+        // runs on launch, on foreground, on a day change and on a settings
+        // change. Everything above it may have moved what the widget says.
+        publishWidgetSnapshot()
+
         if settings.useDeviceLocation {
             location.refreshLocation()
         }
@@ -2059,10 +2132,259 @@ final class AppState: ObservableObject {
     private func persist() {
         Store.save(profile, to: Store.profileFile)
         Store.save(logs, to: Store.logsFile)
+        publishWidgetSnapshot()
     }
 
     private func persistProfile() {
         Store.save(profile, to: Store.profileFile)
+        publishWidgetSnapshot()
+    }
+
+    // MARK: - The home screen (v5 §3)
+
+    /// The last thing written to `widget.json`, so an unchanged state costs no
+    /// disk write. Every mutation in this class ends in `persist()` or
+    /// `persistProfile()` and most of them — a tasbih tap, a saved place, a
+    /// settings toggle — move nothing the home screen shows.
+    private var publishedWidgetSnapshot: WidgetSnapshot?
+
+    /// v5 §3: rewrite `widget.json` from the current state.
+    ///
+    /// The widget is a separate process that re-derives NOTHING: no Adhan, no
+    /// `GameEngine`, no simulator, no network. Everything it draws is decided
+    /// here and handed over as a file in the shared container, which is why
+    /// this is called from `persist()`/`persistProfile()` (every local change),
+    /// from `applyCircleSnapshot` (every synced change) and from `refresh()`
+    /// (the clock, the schedule and the day rolling over).
+    ///
+    /// `gridEntries` is the same call the Today grid makes, through the same
+    /// `CircleDataSource` seam — that is §9-03's "demo renders too", and it is
+    /// structural rather than remembered: by the time the builder sees them, a
+    /// simulated buddy and a real friend are the same value type.
+    ///
+    /// `reloadTimelines` is FALSE by default and true from exactly one caller
+    /// (backgrounding, in `RootView`). Writing is cheap; a reload is rationed —
+    /// §5-A's budget is ~40–70 a day — and while the app is on screen the
+    /// widget behind it has nothing to show anybody.
+    func publishWidgetSnapshot(reloadTimelines: Bool = false) {
+        let now: Date = AppClock.now
+        let carryOver: (window: PrayerWindow, dayKey: String)? = liveCarryOverIsha()
+        let target: (window: PrayerWindow, dayKey: String)? =
+            WidgetSnapshotBuilder.window(in: todaySchedule, carryOver: carryOver, now: now)
+        // Whether the window we landed on is yesterday's isha. The builder
+        // cannot tell from the tuple (a dayKey is not a provenance) and the
+        // nudge gate has to know: the Today screen refuses to nudge in that
+        // block, so the home screen must too.
+        let isCarryOver: Bool = target != nil && carryOver != nil
+            && target?.dayKey == carryOver?.dayKey
+
+        var entries: [GridEntry] = []
+        var photoPaths: [String: String] = [:]
+        var nudged: Set<String> = []
+        if let target {
+            let prayer: Prayer = target.window.prayer
+            entries = gridEntries(for: prayer, dayKey: target.dayKey)
+            let source: any CircleDataSource = circleSource
+            for member in source.members {
+                if let path: String = source.photoPath(forMember: member.id, prayer: prayer,
+                                                       dayKey: target.dayKey, asOf: now) {
+                    photoPaths[member.id] = path
+                }
+                if nudgesSent.contains(nudgeKey(member: member, prayer: prayer,
+                                                dayKey: target.dayKey)) {
+                    nudged.insert(member.id)
+                }
+            }
+        }
+
+        let snapshot: WidgetSnapshot = WidgetSnapshotBuilder.make(
+            writtenAt: now,
+            mode: settings.circleMode,
+            streak: profile.streak,
+            window: target,
+            entries: entries,
+            isCarryOverWindow: isCarryOver,
+            photoPaths: photoPaths,
+            nudgedMemberIDs: nudged,
+            // SPEC-V5 §7: the report hide is applied HERE, as the file is
+            // written, so a photo somebody reported can never surface on their
+            // home screen. See `WidgetSnapshotBuilder.thumb`.
+            hiddenPhotoPaths: PhotoReports.shared.hiddenPaths,
+            // §9-02's setting. `.namesAndTier` is applied by the builder (no
+            // `thumb` is written at all); `.blurred` rides into the file for
+            // the extension to apply. See `WidgetPhotoStyle`.
+            photoStyle: settings.widgetPhotoStyle)
+
+        // v5 §6 (P4): the Lock Screen, from the SAME snapshot at the SAME
+        // instant. Deriving it separately is how two surfaces on one phone come
+        // to disagree about one window — the tile saying "3 of 5" while the
+        // Dynamic Island says 2, neither of them wrong about its own source.
+        // It is outside the changed-content check on purpose: an activity has
+        // to be STARTED when the window opens and ENDED when it closes, and
+        // both of those are moments when the file's content has not moved.
+        LiveActivityController.shared.apply(snapshot: snapshot, now: now)
+
+        if publishedWidgetSnapshot?.hasSameContent(as: snapshot) != true {
+            // The memo records what is ON DISK, so it is only earned by a write
+            // that succeeded. Set it first and a single failure (no space, or
+            // `widget.json` replaced by something that is not a file) would be
+            // permanent: every later publish of the same content would take the
+            // unchanged early-out and the home screen would keep drawing the
+            // previous file until something else moved.
+            if WidgetFile.write(snapshot, to: Store.url(for: Store.widgetFile)) {
+                publishedWidgetSnapshot = snapshot
+                // v5 §5-B. A CHANGED file while the app is in the background is
+                // the one case P2's rationing does not cover: the app was woken
+                // by the quiet reload push, it pulled, and the home screen in
+                // front of the person right now is showing the old counts. A
+                // reload is what makes the quiet push worth sending — without
+                // it the app would wake, rewrite the file and go back to sleep
+                // without anybody's tile changing. Foreground stays as it was
+                // (nobody is looking at a widget behind an open app), and so
+                // does the unchanged case (a reload that redraws the same
+                // numbers is a reload spent out of §5-A's ~40–70 a day).
+                if !reloadTimelines, isBackgrounded {
+                    WidgetBridge.reloadAllTimelines()
+                }
+            }
+        }
+        if reloadTimelines { WidgetBridge.reloadAllTimelines() }
+    }
+
+    /// v5 §3 (P3) — put this window's buddy photos on disk before the home
+    /// screen asks for them.
+    ///
+    /// **Why this is here and not in the widget.** Buddy photos download when a
+    /// `PhotoSquare` scrolls into view, so the newest post — the one the tile is
+    /// about — is exactly the one that is not cached. The extension has no
+    /// network and must not grow one (§3), so the app has to have fetched it
+    /// already or the chip draws an emoji. A pull landing is the event that
+    /// brings the post in, which is why the call site is `applyCircleSnapshot`.
+    ///
+    /// What gets fetched is `WidgetSnapshotBuilder.orderedPosts` — the same four
+    /// posts the file names, through the same hide and the same setting — so a
+    /// reported photo is never re-downloaded and `.namesAndTier` costs no
+    /// network at all.
+    ///
+    /// **It reloads when a picture actually lands.** `publishWidgetSnapshot`
+    /// has already written the file and, in the background, already spent its
+    /// reload — a second or more before the download it names comes back. Draw
+    /// the tile at that instant and the newest face is an emoji, and nothing
+    /// else reloads until the window ENDS. See
+    /// `WidgetBridge.prefetchOwesReload` for the two conditions.
+    ///
+    /// ONE at a time, and it QUEUES rather than drops. A burst of pulls
+    /// (realtime, then the reconciling read moments later) must not stack four
+    /// downloads each — but the second of those pulls is usually the one
+    /// carrying the newest post, and simply returning would leave that post's
+    /// picture unfetched until some later pull. On a background wake there may
+    /// be no later pull for hours: the app is suspended again shortly after,
+    /// and the home screen is left naming a key with no file behind it. So a
+    /// request that arrives mid-flight is remembered and re-asked when the
+    /// current one finishes, with a FRESH list — anything the first pass
+    /// already cached costs a `stat` the second time.
+    private func prefetchWidgetPhotos() {
+        // The fence every outbound path in this class sits behind, and it has
+        // to be here too: a prefetch is a network fetch. `circleSync` is
+        // attached by the launch sequence, which is also the only thing that
+        // can make a pull land, so nothing is lost — while a solo install,
+        // demo mode (where a buddy's post is a seeded illustration and carries
+        // no Storage path at all) and every unit test reach nothing, exactly as
+        // they do for every other call in here that would leave the device.
+        guard mirrorsToCircle, circleSync != nil else { return }
+        guard widgetPhotoPrefetch == nil else {
+            widgetPhotoPrefetchOwed = true
+            return
+        }
+        widgetPhotoPrefetchOwed = false
+        let paths: [String] = widgetPhotoPathsToCache()
+        guard !paths.isEmpty else { return }
+
+        // The assignment lands before the body runs — a `Task` never begins
+        // until the code that created it suspends — so the guard above cannot
+        // be defeated by a prefetch that finished first.
+        widgetPhotoPrefetch = Task { [weak self] in
+            let written: Int = await PhotoSync.prefetchWidgetPhotos(paths: paths)
+            guard let self else { return }
+            self.widgetPhotoPrefetch = nil
+            // The picture the file already NAMES has only just arrived; the
+            // reload that would have drawn it was spent before the download
+            // started. See `WidgetBridge.prefetchOwesReload`.
+            if WidgetBridge.prefetchOwesReload(wrote: written,
+                                               backgrounded: self.isBackgrounded) {
+                WidgetBridge.reloadAllTimelines()
+            }
+            // Terminates: `widgetPhotoPrefetchOwed` is only ever set by a call
+            // that arrived while a task was running, and it is cleared above
+            // before the re-run starts.
+            if self.widgetPhotoPrefetchOwed { self.prefetchWidgetPhotos() }
+        }
+    }
+
+    /// The buddy photos this window's `widget.json` NAMES, newest first — the
+    /// exact list `prefetchWidgetPhotos` fetches.
+    ///
+    /// Split out from the fetch so the decision is testable without a network:
+    /// what belongs here is the whole wiring question (does the app cache the
+    /// pictures the file points at?), and the download that follows it is the
+    /// one part of this a unit test could never reach.
+    ///
+    /// Empty for a demo circle (a seeded illustration has no Storage path),
+    /// for a window nobody has posted in, and — deliberately — for
+    /// `.namesAndTier`, which then costs no network and no disk at all.
+    func widgetPhotoPathsToCache() -> [String] {
+        let now: Date = AppClock.now
+        let carryOver: (window: PrayerWindow, dayKey: String)? = liveCarryOverIsha()
+        guard let target: (window: PrayerWindow, dayKey: String) =
+                WidgetSnapshotBuilder.window(in: todaySchedule, carryOver: carryOver, now: now)
+        else { return [] }
+
+        let prayer: Prayer = target.window.prayer
+        let source: any CircleDataSource = circleSource
+        var photoPaths: [String: String] = [:]
+        for member in source.members {
+            if let path: String = source.photoPath(forMember: member.id, prayer: prayer,
+                                                   dayKey: target.dayKey, asOf: now) {
+                photoPaths[member.id] = path
+            }
+        }
+        guard !photoPaths.isEmpty else { return [] }
+
+        // The SAME call `publishWidgetSnapshot` folds into the file, through
+        // the same hide and the same setting — which is what makes "the app
+        // cached what the home screen names" structural rather than a habit.
+        return WidgetSnapshotBuilder.orderedPosts(
+            entries: gridEntries(for: prayer, dayKey: target.dayKey),
+            photoPaths: photoPaths,
+            hiddenPhotoPaths: PhotoReports.shared.hiddenPaths,
+            photoStyle: settings.widgetPhotoStyle)
+            .compactMap { $0.photoPath }
+    }
+
+    /// The one prefetch in flight, if any. See `prefetchWidgetPhotos`.
+    private var widgetPhotoPrefetch: Task<Void, Never>?
+
+    /// A pull that landed while that one was running, owed a pass of its own.
+    private var widgetPhotoPrefetchOwed: Bool = false
+
+    /// Whether the app is off screen — so a widget reload has somebody who
+    /// could be looking at its result. Read by `publishWidgetSnapshot` and by
+    /// the photo prefetch, in one place so the two cannot come to different
+    /// answers about the same moment. §5-A's budget is ~40–70 reloads a day and
+    /// nobody is looking at a widget behind an open app.
+    private var isBackgrounded: Bool {
+        UIApplication.shared.applicationState == .background
+    }
+
+    /// Yesterday's isha while it is still the block you are standing in — the
+    /// one window whose schedule day is not today's. `targetWindow` owns that
+    /// decision (it also weighs whether the prayer has been logged), so it is
+    /// asked rather than re-derived; this only names the answer.
+    private func liveCarryOverIsha() -> (window: PrayerWindow, dayKey: String)? {
+        guard let target = targetWindow(for: .isha), target.dayKey == previousDayKey else {
+            return nil
+        }
+        return target
     }
 
     // MARK: - Profile edits
@@ -2223,11 +2545,34 @@ final class AppState: ObservableObject {
         circleSnapshot = .empty
         CircleSnapshot.clear()
         CircleOutbox.clear()
+        // v5 §2: BEFORE the fresh settings are written, not after. `Store.delete`
+        // reaches every directory the file could be in (see
+        // `Store.allDirectories`) — including the copy the container migration
+        // leaves in Documents — and everything else here is a delete, so this
+        // is the one file that would otherwise keep its old shadow while the
+        // live one was replaced.
+        Store.delete(Store.settingsFile)
+        // v5 §3: and the home screen, which is the one surface a reset cannot
+        // reach by redrawing. `Store.delete` visits every directory the file
+        // could be in; the memo goes with it so the republish below is not
+        // skipped as "unchanged".
+        Store.delete(Store.widgetFile)
+        publishedWidgetSnapshot = nil
         settings = AppSettings()       // didSet persists + refreshes
         PhotoStore.deleteAll()
+        BuddyPhotoCache.deleteAll()
         Store.delete(Store.logsFile)
         Store.delete(Store.profileFile)
         persist()
         refresh()
+        // The file is current by now (`persist` wrote it), but the tile on the
+        // home screen is still drawing the circle this just erased.
+        WidgetBridge.reloadAllTimelines()
+        // v5 §6: and so is the Lock Screen. `publishWidgetSnapshot` above has
+        // already re-planned it, but only to the extent the new file says —
+        // and if the window is still open it says "keep running", with a circle
+        // of one. An erased circle is the one case the plan cannot express, so
+        // it is torn down explicitly.
+        Task { await LiveActivityController.shared.endAll() }
     }
 }

@@ -17,6 +17,11 @@
 //   * `.order()` really sorts. A fake that silently ignores it is a fake that
 //     lies, and `devicesFor` orders for a reason (the newest registration wins
 //     the 80-row cap).
+//   * `storage.from(b).remove(paths)` records what was asked for and answers
+//     what the test told it to. `retention` confirms only the batches Storage
+//     ACCEPTED, which is the difference between a resumable sweep and a
+//     permanent orphan, and that is not testable against a fake that always says
+//     yes.
 //   * `.select()` really PROJECTS — a column the caller did not ask for does not
 //     come back. This one is load-bearing rather than decorative: the relevance
 //     filter reads `devices.utc_offset` and `posts.logged_at`, and dropping
@@ -237,6 +242,12 @@ class FakeQuery implements PromiseLike<Result<Row[] | null>> {
   }
 }
 
+/// One `storage.from(bucket).remove(paths)` call, as it was issued.
+export interface RecordedRemoval {
+  bucket: string;
+  paths: string[];
+}
+
 export class FakeSupabase {
   /// Every query that has run, in order.
   readonly queries: RecordedQuery[] = [];
@@ -276,6 +287,29 @@ export class FakeSupabase {
       update: (patch: Row) =>
         new FakeQuery(this, table, "update", patch, false),
       delete: () => new FakeQuery(this, table, "delete", null, false),
+    };
+  }
+
+  /// Every Storage removal, in order — `retention` confirms only the batches
+  /// Storage accepted, so which batches were ATTEMPTED is the fact a test reads.
+  readonly removals: RecordedRemoval[] = [];
+
+  /// What `remove()` answers. Removing everything by default; a test that wants
+  /// a batch to fail replaces this. It is a function rather than a canned value
+  /// so a test can fail one batch and pass the next, which is the whole of
+  /// "one bad batch must not strand the rest of the sweep".
+  removeResult: (bucket: string, paths: readonly string[]) => Result<Row[]> =
+    (_bucket, paths) => ({ data: paths.map((name) => ({ name })), error: null });
+
+  /// The slice of `SupabaseClient["storage"]` retention touches, and no wider.
+  get storage() {
+    return {
+      from: (bucket: string) => ({
+        remove: (paths: string[]): Promise<Result<Row[]>> => {
+          this.removals.push({ bucket, paths: [...paths] });
+          return Promise.resolve(this.removeResult(bucket, paths));
+        },
+      }),
     };
   }
 

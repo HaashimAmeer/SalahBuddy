@@ -58,6 +58,18 @@ struct RootView: View {
             // one through. `.empty` in demo mode, which costs a tile nothing.
             .environment(\.circleMirror, state.circleSnapshot)
             .onPreferenceChange(TutorialFramesKey.self) { tourFrames = $0 }
+            // v5 §2 tooth #3 / §4: the widget's nudge button could not
+            // authenticate and handed the tap back through
+            // `salahbuddy://nudge`. All this owes the person is the screen the
+            // nudge lives on — the chip is there, with the same names on it.
+            // Deliberately NOT a nudge sent on their behalf: they were bounced
+            // here to sign in, and a push going out during the bounce is
+            // something nobody asked for.
+            .onChange(of: state.pendingWidgetNudge) { _, target in
+                guard target != nil else { return }
+                withAnimation(Theme.spring) { selectedTab = 0 }
+                state.clearPendingWidgetNudge()
+            }
             .onAppear { maybeStartTour() }
             .onChange(of: state.settings.hasOnboarded) { _, onboarded in
                 if onboarded { maybeStartTour() }
@@ -107,6 +119,14 @@ struct RootView: View {
                     NotificationManager.shared.reschedule()
                     Task { await foregroundCircleSync() }
                 } else if phase == .background {
+                    // v5 §3/§5-A: the moment the app leaves the screen is the
+                    // moment the widget becomes the thing the person is looking
+                    // at — and the only moment worth spending one of the day's
+                    // ~40–70 reloads on. The file itself is already current
+                    // (every mutation rewrites it); this republishes anyway
+                    // because it costs nothing when nothing changed, and asks
+                    // WidgetKit to come and read it.
+                    state.publishWidgetSnapshot(reloadTimelines: true)
                     Task { await backgroundCircleSync() }
                 }
             }
@@ -153,7 +173,7 @@ struct RootView: View {
         // keeps the bound honest for someone who mostly reads the grid. Off the
         // main actor — it is a directory scan.
         Task.detached(priority: .utility) {
-            _ = BuddyPhotoCache.sweep()
+            _ = BuddyPhotoCache.sweepEverywhere()
         }
     }
 

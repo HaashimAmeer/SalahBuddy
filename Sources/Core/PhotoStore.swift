@@ -1,7 +1,8 @@
 import UIKit
 
-/// Local photo persistence for prayer posts. JPEGs live in
-/// Documents/photos/; logs reference them by bare filename.
+/// Local photo persistence for prayer posts. JPEGs live in `photos/` under
+/// `Store.directory` — the App Group container since v5 §2, Documents before
+/// it and on a build with no container; logs reference them by bare filename.
 /// Saves downscale to max 1200px on the long edge (JPEG 0.7) so grids never
 /// need to hold huge images.
 enum PhotoStore {
@@ -9,8 +10,13 @@ enum PhotoStore {
     static let maxDimension: CGFloat = 1200
     static let jpegQuality: CGFloat = 0.7
 
+    /// v5: a constant rather than a literal in three places, because
+    /// `ContainerMigration` is now the fourth and a typo there would move an
+    /// empty directory and leave every photo behind.
+    static let directoryName: String = "photos"
+
     static var directory: URL {
-        let dir = Store.directory.appendingPathComponent("photos", isDirectory: true)
+        let dir = Store.directory.appendingPathComponent(directoryName, isDirectory: true)
         if !FileManager.default.fileExists(atPath: dir.path) {
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         }
@@ -19,6 +25,23 @@ enum PhotoStore {
 
     static func url(for filename: String) -> URL {
         directory.appendingPathComponent(filename)
+    }
+
+    /// Every place a stored photo could be, live directory first.
+    ///
+    /// v5 §2. One entry in the ordinary case. Two only while a v4 install's
+    /// photos are still crossing into the container — that copy runs off the
+    /// main thread so it is not in front of the first frame, which means the
+    /// first launch after an update renders out of Documents while it happens —
+    /// and on a build that fell back to Documents entirely.
+    ///
+    /// Nothing here creates a directory: these are the read and erase paths,
+    /// and `directory` is the only thing that writes.
+    private static func candidates(for filename: String) -> [URL] {
+        Store.allDirectories.map {
+            $0.appendingPathComponent(directoryName, isDirectory: true)
+                .appendingPathComponent(filename)
+        }
     }
 
     /// Downscale + save a captured photo. Returns the stored filename, or ""
@@ -31,14 +54,24 @@ enum PhotoStore {
     }
 
     static func load(_ filename: String) -> UIImage? {
-        guard !filename.isEmpty,
-              let data = try? Data(contentsOf: url(for: filename)) else { return nil }
-        return UIImage(data: data)
+        guard !filename.isEmpty else { return nil }
+        for candidate in candidates(for: filename) {
+            if let data = try? Data(contentsOf: candidate) { return UIImage(data: data) }
+        }
+        return nil
     }
 
+    /// Erase one photo — from EVERY directory it could be in.
+    ///
+    /// The undo path (`deleteIfOrphaned`) is the reason this is not just the
+    /// live directory: while the v5 migration is still owed, a photo deleted
+    /// out of the container and left in Documents is a photo the next launch's
+    /// migration copies straight back.
     static func delete(_ filename: String) {
         guard !filename.isEmpty else { return }
-        try? FileManager.default.removeItem(at: url(for: filename))
+        for candidate in candidates(for: filename) {
+            try? FileManager.default.removeItem(at: candidate)
+        }
     }
 
     /// v4.1: the other half of `save` — take a JPEG back off the disk unless
@@ -54,9 +87,17 @@ enum PhotoStore {
         delete(filename)
     }
 
-    /// Deletes the whole photos directory (reset-all-data path).
+    /// Deletes the whole photos directory (reset-all-data path) — in every
+    /// place there is one.
+    ///
+    /// "Reset all data" that leaves a full copy of the photo library sitting in
+    /// Documents is not a reset; it is a copy the app cannot see and one nil
+    /// `containerURL` away from reading again.
     static func deleteAll() {
-        try? FileManager.default.removeItem(at: Store.directory.appendingPathComponent("photos", isDirectory: true))
+        for directory in Store.allDirectories {
+            try? FileManager.default.removeItem(
+                at: directory.appendingPathComponent(directoryName, isDirectory: true))
+        }
     }
 
     // MARK: - Demo images

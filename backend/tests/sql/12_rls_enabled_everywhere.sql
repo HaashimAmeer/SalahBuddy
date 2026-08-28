@@ -53,6 +53,9 @@ begin
            ('recovery_weeks',    'DELETE'),
            ('custom_challenges', 'DELETE,SELECT'),
            ('devices',           'DELETE,SELECT'),
+           -- v5 §6: an ActivityKit push address. Same shape as devices —
+           -- select/delete your own rows, insert/update column-scoped below.
+           ('live_activity_tokens', 'DELETE,SELECT'),
            ('nudges',            'SELECT')
   );
   if v_bad is not null then
@@ -89,6 +92,16 @@ begin
       ('custom_challenges','created_by','UPDATE'),
       ('custom_challenges','id','UPDATE'),
       ('devices','updated_at','INSERT'), ('devices','updated_at','UPDATE'),
+      -- v5 §6: expires_at is the live-activity sweep's clock, and a writable
+      -- one is an opt-out from it — a client could park a dead token on the
+      -- fan-out's books until 2126. created_at/updated_at are the server's for
+      -- the same reason they are everywhere else.
+      ('live_activity_tokens','expires_at','INSERT'),
+      ('live_activity_tokens','expires_at','UPDATE'),
+      ('live_activity_tokens','created_at','INSERT'),
+      ('live_activity_tokens','created_at','UPDATE'),
+      ('live_activity_tokens','updated_at','INSERT'),
+      ('live_activity_tokens','updated_at','UPDATE'),
       ('profiles','created_at','INSERT'),('profiles','created_at','UPDATE'),
       ('profiles','updated_at','INSERT'),('profiles','updated_at','UPDATE'),
       ('profiles','id','UPDATE'),
@@ -138,6 +151,18 @@ begin
       ('devices','apns_token','INSERT'),
       ('devices','notify_friend_activity','INSERT'),
       ('devices','notify_friend_activity','UPDATE'),
+      -- v5 §6. The app writes these through register_live_activity_token, but
+      -- the direct grant is what lets it DELETE its own row at window close
+      -- without an RPC, and the insert columns are pinned so a copy-paste
+      -- cannot silently narrow the RPC's own reach either.
+      ('live_activity_tokens','token','INSERT'),
+      ('live_activity_tokens','kind','INSERT'),
+      ('live_activity_tokens','day_key','INSERT'),
+      ('live_activity_tokens','prayer','INSERT'),
+      ('live_activity_tokens','ends_at','INSERT'),
+      ('live_activity_tokens','activity_id','INSERT'),
+      ('live_activity_tokens','environment','INSERT'),
+      ('live_activity_tokens','utc_offset','INSERT'),
       ('profiles','name','UPDATE'),      ('profiles','id','INSERT'),
       ('nudges','day_key','INSERT'),
       -- The other half of the reports matrix. Write-only is not "no grant at
@@ -159,7 +184,7 @@ begin
   from unnest(array['profiles','circles','circle_members','circle_departures',
                     'photo_tombstones','posts','excused_days',
                     'recovery_weeks','custom_challenges','devices','nudges',
-                    'retention_runs','reports']) t
+                    'live_activity_tokens','retention_runs','reports']) t
   where to_regclass('public.' || t) is null;
   if v_bad is not null then
     raise exception 'missing tables: %', v_bad;
@@ -206,6 +231,7 @@ begin
   from unnest(array['public.purge_expired_photo_rows(int,int)',
                     'public.confirm_photo_deletions(text[])',
                     'public.charge_join_attempt()',
+                    'public.purge_expired_live_activity_tokens()',
                     'public.claim_retention_run(interval)',
                     'public.open_report_stats()']) f
   where has_function_privilege('authenticated', f, 'execute')
@@ -227,6 +253,7 @@ begin
                     'public.leave_circle()', 'public.rename_circle(text,text)',
                     'public.delete_account()',
                     'public.record_nudge(uuid,text,public.prayer_kind)',
+                    'public.register_live_activity_token(text,text,text,text,public.prayer_kind,timestamptz,text,int)',
                     'public.current_circle_id()']) f
   where has_function_privilege('anon', f, 'execute');
   if v_bad is not null then
@@ -238,6 +265,7 @@ begin
                     'public.leave_circle()', 'public.rename_circle(text,text)',
                     'public.delete_account()',
                     'public.record_nudge(uuid,text,public.prayer_kind)',
+                    'public.register_live_activity_token(text,text,text,text,public.prayer_kind,timestamptz,text,int)',
                     'public.current_circle_id()']) f
   where not has_function_privilege('authenticated', f, 'execute');
   if v_bad is not null then

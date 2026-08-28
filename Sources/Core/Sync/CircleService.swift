@@ -1059,6 +1059,20 @@ final class PhotoReports: ObservableObject {
 
     func isHidden(_ path: String) -> Bool { hiddenPaths.contains(path) }
 
+    #if DEBUG
+    /// Tests only: forget one hide again.
+    ///
+    /// The app has no unhide and must not grow one — a report is meant to
+    /// stick, and §7 is explicit that a hidden photo coming back is the worst
+    /// outcome here. But `shared` is process-wide, so a test that files a
+    /// report leaves it in place for every test that runs after it. Same
+    /// reasoning, and the same DEBUG fence, as `LocationProvider`'s
+    /// `simulateDeviceFix`.
+    func forgetHideForTesting(_ path: String) {
+        hiddenPaths.remove(path)
+    }
+    #endif
+
     /// Reports still owed to the server — for tests, and for anything that
     /// wants to know the queue is empty.
     var pendingCount: Int { pending.count }
@@ -1084,9 +1098,13 @@ final class PhotoReports: ObservableObject {
         if let path: String = post.photoPath, !path.isEmpty {
             hiddenPaths.insert(path)
             // The bytes go too. They are a disposable cache entry (§4), and
-            // leaving them on disk would mean a reported photo sitting in
-            // Documents until retention swept the path that no longer renders.
-            if persists { BuddyPhotoCache.remove(forRemotePath: path) }
+            // leaving them on disk would mean a reported photo still sitting in
+            // the cache until retention swept the path that no longer renders.
+            // Everywhere, not just the live directory: while the v5 migration
+            // is owed there is a second copy in Documents, and SPEC-V5 §7 is
+            // explicit that a hidden photo coming back is worse than it never
+            // having been hideable.
+            if persists { BuddyPhotoCache.removeEverywhere(forRemotePath: path) }
         }
         guard let reporter: UUID = currentUserID() else {
             // No session, no report: `reporter_id = auth.uid()` is the insert

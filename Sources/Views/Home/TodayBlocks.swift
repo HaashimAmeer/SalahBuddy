@@ -113,10 +113,15 @@ struct CurrentPrayerBlock: View {
 
     /// 30+ minutes into the window (not computable for the pre-fajr
     /// yesterday-isha block — no nudges there).
+    ///
+    /// v5 §3: the grace period is `WidgetSnapshotBuilder.nudgeGrace` rather
+    /// than a literal, because the home screen offers the same nudges out of
+    /// `widget.json`'s `waiting[]` and two copies of "30 minutes" is two
+    /// numbers that can disagree about who is late.
     private var nudgeEligible: Bool {
         guard !block.isYesterdayIsha,
               let start = state.todaySchedule?.window(for: block.prayer)?.start else { return false }
-        return now >= start.addingTimeInterval(30 * 60)
+        return now >= start.addingTimeInterval(WidgetSnapshotBuilder.nudgeGrace)
     }
 
     /// Tier the log would earn now — against the combined window when traveling.

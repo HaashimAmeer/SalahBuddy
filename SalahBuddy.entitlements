@@ -12,5 +12,41 @@
 	     "production" automatically, so one file serves both. -->
 	<key>aps-environment</key>
 	<string>development</string>
+	<!-- v5 §2: the shared container. A widget is a separate process with its
+	     own sandbox and cannot read this app's Documents directory, so
+	     `Store.directory` points here instead and everything derived from it
+	     (the mirror, the outbox, settings, photos, the buddy photo cache)
+	     follows.
+
+	     This is the APP's file. The widget target arriving in P2 gets its own
+	     entitlements file naming the same App Group and the same shared
+	     keychain group — additive, no edit to this one. -->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.org.amacvoters.salahbuddymock</string>
+	</array>
+	<!-- v5 §2 teeth #1 and #2. App Groups and keychain access groups are
+	     DIFFERENT entitlements; the container above shares files, this shares
+	     the Supabase session so the §4 nudge button can authenticate from the
+	     extension.
+
+	     ORDER IS LOAD-BEARING. The first entry becomes this process's DEFAULT
+	     access group — where every Keychain item written WITHOUT a named group
+	     lands, which is what Google's sign-in SDK does and what the Supabase
+	     SDK did before v5. Listing the app-identifier group first leaves that
+	     default exactly where it has always been, so nothing already in the
+	     Keychain moves out from under its owner. Put the shared group first
+	     and Google's stored authorization is suddenly written somewhere its
+	     next read does not look.
+
+	     (The Supabase session does not rely on that ordering: it is carried
+	     over by `SessionKeychain`, which names BOTH groups explicitly — an
+	     unnamed query searches every entitled group rather than just the
+	     default, and a delete matches the same way.) -->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)org.amacvoters.salahbuddymock</string>
+		<string>$(AppIdentifierPrefix)group.org.amacvoters.salahbuddymock</string>
+	</array>
 </dict>
 </plist>

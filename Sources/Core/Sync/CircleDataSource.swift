@@ -49,6 +49,29 @@ protocol CircleDataSource {
     /// The member's dhikr/deeds XP for those weeks — one opaque total per
     /// week, never the underlying deeds (SPEC-V4 §3).
     func recoveryXP(forMember id: String, weekKeys: [String]) -> Int
+
+    /// The Storage path behind this member's post for one square, when there is
+    /// one — the key `BuddyPhotoCache` resolves to bytes.
+    ///
+    /// v5 §3: the widget file names each post's photo, so the path has to come
+    /// through the seam rather than through a cast to `RemoteCircleDataSource`
+    /// at the one call site that happens to know. `now` is not decoration — a
+    /// traveller's slot can hold two posts, and the path has to be resolved by
+    /// the same rule at the same instant the tier was.
+    func photoPath(forMember id: String, prayer: Prayer, dayKey: String,
+                   asOf now: Date) -> String?
+}
+
+extension CircleDataSource {
+
+    /// Most sources have no photo to name. A simulated buddy's post is a seeded
+    /// illustration and an empty circle has no posts at all, so only the mirror
+    /// overrides this — and it already did, with this exact signature, since v4
+    /// Phase C.
+    func photoPath(forMember id: String, prayer: Prayer, dayKey: String,
+                   asOf now: Date) -> String? {
+        nil
+    }
 }
 
 /// A circle with nobody in it.

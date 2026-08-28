@@ -8,6 +8,30 @@ struct SalahBuddyApp: App {
     /// notifications stay `NotificationManager`'s.
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
+    /// v5 §2: move Documents into the App Group container BEFORE anything reads
+    /// a file.
+    ///
+    /// This is the earliest hook there is, and it has to be. `AppState()` loads
+    /// the profile and the logs in its own initialiser, and `CircleStack.start`
+    /// — which is otherwise THE launch sequence — runs long after both objects
+    /// exist. The two `@StateObject` initialisers below are `@autoclosure`, so
+    /// neither has run yet when this does.
+    ///
+    /// Only the JSON half blocks: five small files, which is what `AppState()`
+    /// is about to read. The photo library follows on a utility queue — it has
+    /// no ceiling (`photos/` never prunes, `circlephotos/` runs to 400), and a
+    /// few hundred megabytes of read-and-rewrite in front of the first frame,
+    /// on the launch straight after an update, is how a release earns a
+    /// watchdog kill it cannot recover from. `PhotoStore.load` reads out of
+    /// Documents while that is in flight, so nothing on screen waits for it.
+    ///
+    /// Idempotent and marker-guarded, so this is one `UserDefaults` read on
+    /// every launch after the first, and the whole move exactly once. A build
+    /// with no container (see `Store.directory`) does nothing at all here.
+    init() {
+        SharedContainer.prepareOnLaunch()
+    }
+
     @StateObject private var state = AppState()
     /// v4: the session and the circle it belongs to. They are created together
     /// because the service binds to the session (`CircleService(auth:)`), and
@@ -24,6 +48,12 @@ struct SalahBuddyApp: App {
                 .environmentObject(circles.circle)
                 .task { await circles.start(host: state) }
                 .onOpenURL { url in
+                    // v5 §2 tooth #3: the widget's nudge button holds a session
+                    // it may not refresh, so an expired one arrives here as a
+                    // `salahbuddy://nudge` link instead of a silent failure.
+                    // FIRST, because Google's handler is given every URL it is
+                    // offered and there is no reason to offer it ours.
+                    guard !state.handleDeepLink(url) else { return }
                     // Google's OAuth callback returns through the app's
                     // reversed-client-id scheme (Info.plist CFBundleURLTypes).
                     circles.auth.handleOpenURL(url)
@@ -111,6 +141,17 @@ final class CircleStack: ObservableObject {
         // drain whatever last session's flight left queued, reconcile, and open
         // the channel.
         await sync.start()
+        // v5 §6: adopt whatever Live Activity survived the last process and
+        // start listening for a push-to-start token. BEFORE `refreshPush`,
+        // which can put a permission sheet on screen, and after the session is
+        // restored — the token registration is a network write scoped to a real
+        // circle, and `adoptRunningActivity` itself only reads ActivityKit.
+        //
+        // Adoption is the half that matters here: an activity outlives the app,
+        // so a controller that assumed none was running would start a SECOND
+        // one for the same window, and orphan the first with a token the server
+        // still pushes to.
+        LiveActivityController.shared.adoptRunningActivity()
         // LAST, deliberately. `PushRegistrar.refresh` can put a system
         // permission sheet on screen, and nothing above should wait behind a
         // person deciding. It is also the step that needs everything above to
@@ -184,6 +225,12 @@ final class CircleStack: ObservableObject {
         // this phone.
         let signOut: (() async -> Void)? = circle.signOutHandler
         circle.signOutHandler = {
+            // v5 §6, and FIRST for the same reason the device row goes first:
+            // ending the activity deletes its `live_activity_tokens` row, and
+            // that delete needs the session that owns it. A Lock Screen still
+            // counting a circle you have signed out of is the same bug as a
+            // phone still receiving its pushes.
+            await LiveActivityController.shared.endAll()
             await push.unregister()
             await signOut?()
         }

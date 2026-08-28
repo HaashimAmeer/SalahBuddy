@@ -32,6 +32,31 @@ so one repo costs one CI run per change, not two.
   free tier covers ~100 builds/month. Keeping the workflow scoped to
   `staging` (not every branch) preserves that budget.
 
+### A new TARGET is a portal step, and it gates the merge
+
+Adding an app extension adds a second thing to sign. `make test`, `ios.yml` and
+the pre-push hook all build for the simulator **unsigned**, so they stay green
+and tell you nothing; the first signal is a red *Archive* on `staging` and no
+build reaching TestFlight.
+
+So before merging a branch that adds a target, its bundle id needs an explicit
+**App ID in the developer portal** carrying every capability its
+`.entitlements` file names. There are TWO owed as of v5 P3, and both gate the
+merge:
+
+| Bundle id | Target | Capabilities to enable |
+|---|---|---|
+| `org.amacvoters.salahbuddymock.widget` | `SalahBuddyWidget` (§3, P2) | **App Groups** (`group.org.amacvoters.salahbuddymock`) and **Keychain Sharing** — the same two the app's own App ID gained in v5 §2 |
+| `org.amacvoters.salahbuddymock.notify` | `SalahBuddyNotify` (§5-B, P3) | **none** — it reads nothing, authenticates nothing, and ships no `.entitlements` file. It still needs the App ID to exist. |
+
+Only Haashim can do this, and it is a toggle on a new identity rather than any
+code change.
+
+**The app's own App ID needs nothing new for P3.** `UIBackgroundModes:
+remote-notification` (v5 §5's quiet reload push) is an Info.plist key, not a
+capability — `aps-environment` is already on the identity, and background
+delivery rides on the same push entitlement.
+
 ## One-time setup (needs the Mac + Xcode, ~10 minutes)
 
 1. Open `SalahBuddy.xcodeproj` → **Integrate ▸ Create Workflow…** (or the

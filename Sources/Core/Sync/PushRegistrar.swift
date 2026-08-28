@@ -149,6 +149,134 @@ struct RegisterDeviceParams: Encodable, Equatable, Sendable {
     }
 }
 
+// MARK: - The Live Activity's push tokens (v5 §6)
+
+/// Which of ActivityKit's two token kinds this is.
+///
+/// They are different things with different lifetimes and the server treats
+/// them differently (`live_activity_tokens.kind`, 20260828000100):
+///
+/// - `.start` is the app-wide **push-to-start** token. It exists before any
+///   activity does, so it names no window.
+/// - `.update` belongs to ONE running activity and dies with it — a few hours
+///   at the outside, five a day if every prayer window gets one.
+///
+/// Neither can live on `devices`, which is keyed on a stable `apns_token` that
+/// one install keeps for its whole life. §6 says exactly that, and the schema
+/// comment says it again.
+enum LiveActivityTokenKind: String, Equatable, Sendable {
+    case start
+    case update
+}
+
+/// What `register_live_activity_token` is called with, as a value the registrar
+/// can reason about.
+///
+/// Same shape and the same discipline as `RemoteDevice`: only the columns the
+/// grants name, `user_id` deliberately absent (the RPC reads `auth.uid()`, so a
+/// caller cannot register a token in somebody else's name), and no `Encodable`
+/// conformance at all — the wire format is `RegisterLiveActivityTokenParams`.
+struct LiveActivityRegistration: Equatable, Sendable {
+    var token: String
+    var kind: LiveActivityTokenKind
+    /// ActivityKit's `Activity.id`, so this device can delete precisely the row
+    /// for an activity it just ended. Opaque to the server.
+    var activityID: String?
+    /// The window a running activity is about. nil for `.start`, and the RPC
+    /// refuses the two mismatched combinations rather than storing a row the
+    /// fan-out cannot use.
+    var dayKey: String?
+    var prayer: Prayer?
+    /// When that window closes, as THIS device computed it.
+    ///
+    /// It is the one piece of schedule the server holds, and it is one already-
+    /// running activity's own end rather than a schedule: it cannot go stale,
+    /// and it is what lets the fan-out set a correct `stale-date` and retire an
+    /// activity whose window closed while the phone was asleep.
+    var endsAt: Date?
+    var environment: String
+    var utcOffset: Int
+
+    var registerParams: RegisterLiveActivityTokenParams {
+        RegisterLiveActivityTokenParams(
+            token: token,
+            kind: kind.rawValue,
+            activityID: activityID,
+            dayKey: dayKey,
+            prayer: prayer,
+            endsAt: endsAt,
+            environment: environment,
+            utcOffset: utcOffset)
+    }
+
+    /// Everything a write would put on the server, in one comparable line —
+    /// same job as `RemoteDevice.fingerprint`.
+    ///
+    /// ActivityKit re-emits the SAME token from its update stream on every
+    /// launch and after every state change, and a round trip per emission for a
+    /// row that already says this is waste on a path that runs five times a day.
+    var fingerprint: String {
+        [token, kind.rawValue, activityID ?? "", dayKey ?? "", prayer?.rawValue ?? "",
+         endsAt.map { String(Int($0.timeIntervalSince1970)) } ?? "",
+         environment, String(utcOffset)]
+            .joined(separator: "\u{1}")
+    }
+}
+
+/// The params
+/// `public.register_live_activity_token(p_token, p_kind, p_activity_id,
+/// p_day_key, p_prayer, p_ends_at, p_environment, p_utc_offset)` is called with.
+struct RegisterLiveActivityTokenParams: Encodable, Equatable, Sendable {
+    var token: String
+    var kind: String
+    var activityID: String?
+    var dayKey: String?
+    var prayer: Prayer?
+    var endsAt: Date?
+    var environment: String
+    var utcOffset: Int
+
+    enum CodingKeys: String, CodingKey {
+        case token = "p_token"
+        case kind = "p_kind"
+        case activityID = "p_activity_id"
+        case dayKey = "p_day_key"
+        case prayer = "p_prayer"
+        case endsAt = "p_ends_at"
+        case environment = "p_environment"
+        case utcOffset = "p_utc_offset"
+    }
+
+    /// `timestamptz` as PostgREST wants it. Spelled out rather than left to the
+    /// encoder's date strategy, because this struct is handed to the SDK's own
+    /// encoder and inheriting whatever that is configured for is how a column
+    /// silently becomes NULL.
+    static let timestampFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        return formatter
+    }()
+
+    /// A nil field is OMITTED rather than sent as null — the RPC's own defaults
+    /// then apply, and PostgREST resolves an overload by the argument names in
+    /// the body.
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(token, forKey: .token)
+        try c.encode(kind, forKey: .kind)
+        try c.encodeIfPresent(activityID, forKey: .activityID)
+        try c.encodeIfPresent(dayKey, forKey: .dayKey)
+        // `Prayer`'s rawValues ARE the `prayer_kind` labels.
+        try c.encodeIfPresent(prayer?.rawValue, forKey: .prayer)
+        try c.encodeIfPresent(
+            endsAt.map { RegisterLiveActivityTokenParams.timestampFormatter.string(from: $0) },
+            forKey: .endsAt)
+        try c.encode(environment, forKey: .environment)
+        try c.encode(utcOffset, forKey: .utcOffset)
+    }
+}
+
 // MARK: - The notify request
 
 /// The body `functions/v1/notify` parses (`_shared/validate.ts`). Three kinds,
@@ -314,6 +442,14 @@ protocol PushTransport: AnyObject {
     func registerDevice(_ device: RemoteDevice) async throws
     func deleteDevice(token: String) async throws
     func notify(_ body: NotifyBody) async throws -> NotifyReply
+
+    /// v5 §6: the same claim, for an ActivityKit token. A SEPARATE call rather
+    /// than a widened `registerDevice`, because it writes a different table
+    /// with a different lifetime — see `LiveActivityTokenKind`.
+    func registerLiveActivityToken(_ registration: LiveActivityRegistration) async throws
+    /// The activity ended. Scoped by token alone; the row-level policy narrows
+    /// it to this account's rows anyway.
+    func deleteLiveActivityToken(token: String) async throws
 }
 
 /// The phone half: the permission prompt, the APNs registration call, the two
@@ -692,6 +828,58 @@ final class PushRegistrar {
         }
     }
 
+    // MARK: - Live Activity tokens (v5 §6)
+
+    /// Fingerprints of the registrations this process has already written.
+    ///
+    /// IN MEMORY, unlike `devices`' — which is deliberate and is the difference
+    /// between the two tables. A `devices` fingerprint has to survive relaunch
+    /// because iOS hands back the SAME apns token on every single launch and a
+    /// round trip per launch is waste. An ActivityKit token is ephemeral: the
+    /// update token dies with its activity, and a relaunch that re-registers
+    /// one is re-registering something the server may well have swept.
+    private var liveActivityRegistrations: Set<String> = []
+
+    /// Register an ActivityKit token (§6).
+    ///
+    /// Best-effort like everything else here, and gated exactly as `send` is:
+    /// demo mode and a solo install never reach the network, so a simulated
+    /// circle's Live Activity is purely local — which is what §9-03 asks for
+    /// (the surface works for every user; only the push half needs friends).
+    @discardableResult
+    func registerLiveActivityToken(_ registration: LiveActivityRegistration) async -> Bool {
+        guard isInRealCircle, isOnline else { return false }
+        let fingerprint: String = registration.fingerprint
+        guard !liveActivityRegistrations.contains(fingerprint) else { return true }
+        do {
+            try await transport.registerLiveActivityToken(registration)
+            liveActivityRegistrations.insert(fingerprint)
+            return true
+        } catch {
+            lastFailure = CircleError.from(error)
+            return false
+        }
+    }
+
+    /// The activity ended — take its address off the books.
+    ///
+    /// Not owed and not retried, unlike a `devices` row's delete: the sweep
+    /// (`purge_expired_live_activity_tokens`) collects a missed one within
+    /// twelve hours, and the fan-out's own 410 handling drops it sooner than
+    /// that. A pending-delete ledger for a token that expires by itself would be
+    /// machinery for nothing.
+    func forgetLiveActivityToken(_ token: String) async {
+        liveActivityRegistrations = liveActivityRegistrations.filter {
+            !$0.hasPrefix("\(token)\u{1}")
+        }
+        guard isInRealCircle, isOnline else { return }
+        do {
+            try await transport.deleteLiveActivityToken(token: token)
+        } catch {
+            lastFailure = CircleError.from(error)
+        }
+    }
+
     // MARK: - Receiving (SPEC-V4 §6)
 
     /// A remote notification was DELIVERED to this device — presented while the
@@ -896,6 +1084,23 @@ final class SupabasePushTransport: PushTransport {
             .from("devices")
             .delete(returning: .minimal)
             .eq("apns_token", value: token)
+            .execute()
+    }
+
+    /// v5 §6. Same shape as `registerDevice` and for the same reason: the token
+    /// is the primary key, and a row that changed hands cannot be claimed with
+    /// an upsert under a `user_id = auth.uid()` policy.
+    func registerLiveActivityToken(_ registration: LiveActivityRegistration) async throws {
+        let _: PostgrestResponse<Void> = try await Supa.client
+            .rpc("register_live_activity_token", params: registration.registerParams)
+            .execute()
+    }
+
+    func deleteLiveActivityToken(token: String) async throws {
+        let _: PostgrestResponse<Void> = try await Supa.client
+            .from("live_activity_tokens")
+            .delete(returning: .minimal)
+            .eq("token", value: token)
             .execute()
     }
 

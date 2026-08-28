@@ -382,7 +382,8 @@ extension EnvironmentValues {
 /// never resolves lands on a tile that already looks finished. Nothing here
 /// shows a spinner, and nothing here shows an error.
 ///
-/// Buddy photos live in `Documents/circlephotos/` and never in `PhotoStore`:
+/// Buddy photos live in `circlephotos/` (under `Store.directory`) and never in
+/// `PhotoStore`:
 /// they are disposable, they age out with the server's retention, and they
 /// must never reach Memories (§4).
 private struct BuddyRemotePhoto: View {
