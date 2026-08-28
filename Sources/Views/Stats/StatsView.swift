@@ -1182,7 +1182,7 @@ struct ScoringExplainerContent: View {
                     }
                     section("🏆 The circle") {
                         bullet("Weekly scores reset every Monday and count prayer XP + bonuses + dhikr.")
-                        bullet("The crown goes to the first to the weekly target (prayer XP).")
+                        bullet("The crown goes to the first to the weekly target (prayer XP + bonuses — dhikr doesn't race).")
                     }
                 }
                 .padding(.bottom, 4)

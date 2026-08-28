@@ -231,6 +231,12 @@ jobs:
             [ "$cleared" -ge "$BATCH" ] || break
             body='{"minIntervalMinutes":0}'
           done
+          # The loop above breaks when a pass comes back under-full. Running out
+          # of passes on a STILL-full batch means the backlog outlasted us, and
+          # that must not look identical to "finished".
+          if [ "$passes" -eq "$MAX_PASSES" ] && [ "${cleared:-0}" -ge "$BATCH" ]; then
+            echo "::warning title=Retention drain capped::pass $MAX_PASSES still returned a full batch of $BATCH paths; more is queued — dispatch the workflow again to keep draining."
+          fi
 
           # ---- orphaned auth.users -------------------------------------------
           sweep_body='{}'
@@ -255,7 +261,7 @@ jobs:
           echo "sweep-orphans: scanned $scanned, deletable $deletable, deleted $deleted"
           echo "sweep-orphans: kept $kept"
           if [ "$(printf '%s' "$RESP" | jq -r '.scanCapped // false')" = "true" ]; then
-            echo "::warning title=User scan capped::more accounts than one run reads; the remainder is picked up tomorrow."
+            echo "::warning title=User scan capped::more accounts than one run reads — and every run reads the SAME first pages, so the tail is never reached. Raise SWEEP_MAX_USERS_SCANNED if this persists."
           fi
           if [ "$delete_errors" != "0" ]; then
             echo "::warning title=Account deletions failed::$delete_errors could not be removed; see the function logs."

@@ -50,17 +50,22 @@ final class SavedPlacesTests: XCTestCase {
 
     /// An `AppState` whose `settings.json` starts as `places`.
     ///
-    /// Also snapshots the file and restores it afterwards: the test host is a
-    /// real app with a real Documents directory, and a suite that leaves saved
-    /// places lying around there is a suite that edits the next run's world.
+    /// Also snapshots the files and restores them afterwards: the test host is
+    /// a real app with a real Documents directory, and a suite that leaves
+    /// saved places lying around there is a suite that edits the next run's
+    /// world. `profile.json` is snapshotted too — constructing an `AppState`
+    /// runs `refresh()`, which can reconcile a streak and restamp the profile,
+    /// and none of that should outlive the suite on a shared simulator.
     private func makeState(_ places: [SavedPlace]) -> AppState {
-        let url: URL = Store.url(for: Store.settingsFile)
-        let original: Data? = try? Data(contentsOf: url)
-        addTeardownBlock {
-            if let original {
-                try? original.write(to: url, options: .atomic)
-            } else {
-                try? FileManager.default.removeItem(at: url)
+        for file in [Store.settingsFile, Store.profileFile] {
+            let url: URL = Store.url(for: file)
+            let original: Data? = try? Data(contentsOf: url)
+            addTeardownBlock {
+                if let original {
+                    try? original.write(to: url, options: .atomic)
+                } else {
+                    try? FileManager.default.removeItem(at: url)
+                }
             }
         }
 

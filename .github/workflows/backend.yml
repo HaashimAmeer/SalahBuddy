@@ -214,7 +214,7 @@ jobs:
             echo "### Staging deploy"
             echo
             echo "- migrations pushed"
-            echo "- edge functions deployed (\`notify\`, \`retention\`)"
+            echo "- edge functions deployed (\`notify\`, \`retention\`, \`sweep-orphans\`)"
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------------

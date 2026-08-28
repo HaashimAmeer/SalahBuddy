@@ -41,6 +41,7 @@ const YUSUF = "a1000000-0000-4000-8000-000000000001"; // the poster, in Seattle
 const AMINA = "a1000000-0000-4000-8000-000000000002"; // Seattle too
 const BILAL = "a1000000-0000-4000-8000-000000000003"; // Mumbai, +5:30
 const HANIF = "a1000000-0000-4000-8000-000000000004"; // an iPad with no offset
+const MARYAM = "a1000000-0000-4000-8000-000000000005"; // Seattle, friend-activity off
 const POST = "b1000000-0000-4000-8000-000000000001";
 
 const SEATTLE = -7 * 3600; // PDT
@@ -70,13 +71,17 @@ function phone(user: string, token: string, zone: number | null): Phone {
 const AMINA_PHONE = phone(AMINA, "amina-phone", SEATTLE);
 const BILAL_PHONE = phone(BILAL, "bilal-phone", MUMBAI);
 const HANIF_IPAD = phone(HANIF, "hanif-ipad", null);
+const MARYAM_PHONE = phone(MARYAM, "maryam-phone", SEATTLE);
 
 /// Yusuf's circle, his 05:00 Fajr already in `posts`, and one device row per
 /// phone. `posterZone` is the post's own `utc_offset` — nullable forever, and
 /// null there means "filter nobody".
 function circleWith(
   phones: readonly Phone[],
-  opts: { posterZone?: number | null } = {},
+  opts: {
+    posterZone?: number | null;
+    friendActivityOff?: readonly string[];
+  } = {},
 ): FakeSupabase {
   const members = [YUSUF, ...new Set(phones.map((p) => p.user))];
   return new FakeSupabase({
@@ -102,10 +107,11 @@ function circleWith(
       user_id: p.user,
       apns_token: p.token,
       environment: "production",
-      // The friend-activity toggle is a separate opt-in (§6) and every phone
-      // here has it on, so the only thing that can move these counts is the
-      // relevance rule.
-      notify_friend_activity: true,
+      // The friend-activity toggle is a separate opt-in (§6). It defaults ON
+      // so that in most tests the only thing that can move these counts is
+      // the relevance rule; the one test ABOUT the toggle turns it off by
+      // token.
+      notify_friend_activity: !(opts.friendActivityOff ?? []).includes(p.token),
       utc_offset: p.zone,
       updated_at: `2026-08-22T00:00:0${index}Z`,
     })),
@@ -251,6 +257,39 @@ Deno.test("a post whose poster never said where they were filters nobody", async
   assert.equal(body.devices, 3);
   assert.equal(body.outOfZone, 0);
   assert.equal(pushedTo, 3);
+});
+
+Deno.test("a post respects the friend-activity opt-out; a join is not gated by it", async () => {
+  // Maryam is beside the poster — same zone, same morning — so relevance
+  // cannot be what drops her: only the toggle can. Delete `friendActivityOnly`
+  // from `notifyPost`'s fan-out and the first half of this test goes to two.
+  // The join half pins the other edge: the toggle gates friend ACTIVITY, and a
+  // member arriving is not activity, so her phone still hears that.
+  const opts = { friendActivityOff: [MARYAM_PHONE.token] };
+
+  const posted = await send(
+    FAJR,
+    () =>
+      notifyPost(
+        circleWith([AMINA_PHONE, MARYAM_PHONE], opts).asClient(),
+        CALLER,
+        POST,
+      ),
+  );
+  assert.equal(posted.body.devices, 1, "Amina only — Maryam opted out");
+  assert.equal(posted.body.outOfZone, 0, "and not because of any window");
+  assert.equal(posted.pushedTo, 1);
+
+  const joined = await send(
+    FAJR,
+    () =>
+      notifyJoin(
+        circleWith([AMINA_PHONE, MARYAM_PHONE], opts).asClient(),
+        CALLER,
+      ),
+  );
+  assert.equal(joined.body.devices, 2, "the opt-out gates posts, not joins");
+  assert.equal(joined.pushedTo, 2);
 });
 
 // -------------------------------------------------------------------- joins

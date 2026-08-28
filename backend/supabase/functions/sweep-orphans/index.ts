@@ -135,8 +135,10 @@ async function handle(req: Request): Promise<Response> {
 
 /// Every account, in admin-API pages, bounded so one runaway call cannot outlive
 /// the function's wall clock. Hitting the cap is reported, never silent: the
-/// sweep is still correct (it only ever deletes rows it looked at), it just has
-/// more to do next time.
+/// sweep is still correct (it only ever deletes rows it looked at) — but note
+/// that pagination always restarts at page 1, so a capped scan rereads the same
+/// accounts next run and never reaches the tail. The cap is a safety valve, not
+/// a cursor; raise SWEEP_MAX_USERS_SCANNED if the capped warning persists.
 async function listUsers(
   admin: Client,
 ): Promise<{ users: AuthUserLike[]; capped: boolean }> {
