@@ -38,6 +38,7 @@ backend/
       20260822000300_post_identity_offset.sql # ...and put it in the posts unique key
       20260822000400_post_zone_wildcard.sql   # a NULL offset is a wildcard, not a third zone
       20260822000500_device_utc_offset.sql    # the RECIPIENT's zone, so push can skip a stale day
+      20260828000100_reports_triage.sql   # a report can be CLOSED — handled_at + what was done
     functions/
       _shared/                      # apns.ts, auth.ts, db.ts, http.ts, messages.ts, sweep.ts,
                                     #   util.ts, validate.ts, zones.ts
@@ -45,9 +46,12 @@ backend/
       notify/handlers.ts            # post / join / nudge push fan-out (APNs, signed in-function)
       retention/index.ts            # the ~30-day photo sweep
       sweep-orphans/index.ts        # deletes the auth.users shells delete_account() cannot
+  scripts/
+    triage_reports.sh               # READ and act on `reports` — the guideline 1.2 desk
+                                    #   (service_role key from the environment; never printed)
   tests/
     shim/00_supabase_shim.sql       # fakes auth.*/storage.*/the API roles on vanilla Postgres
-    sql/01..29_*.sql                # assertion tests — RLS, caps, privacy, constraints
+    sql/01..30_*.sql                # assertion tests — RLS, caps, privacy, constraints
     run_sql_tests.sh                # scratch DB -> shim -> migrations -> assertions
     deno/*_test.ts                  # unit tests for the function helpers (offline, no permissions)
     deno/fake_supabase.ts           # PostgREST-shaped fake client, so db.ts runs against real rows
@@ -599,9 +603,10 @@ own immediately, photos included.
 ## Scheduled maintenance
 
 `.github/workflows/maintenance.yml`, nightly at 09:17 UTC plus a manual
-`workflow_dispatch`. It POSTs `retention` and then `sweep-orphans`. Until this
-existed nothing called either one — `grep functions.invoke Sources/` finds only
-`notify` — so the ~30-day photo promise had no caller at all.
+`workflow_dispatch`. It POSTs `retention`, then `sweep-orphans`, then counts the
+reports nobody has triaged. Until this existed nothing called either function —
+`grep functions.invoke Sources/` finds only `notify` — so the ~30-day photo
+promise had no caller at all.
 
 **Why a workflow and not `pg_cron` + `pg_net`.** Neither extension exists in the
 sandbox, so that route can only be configured by hand against the live database
@@ -642,6 +647,15 @@ Two details in the job are load-bearing:
   `jq .`s a whole body. Error bodies are the exception and they are safe by
   construction: `http.ts` answers 5xx with a bare machine code and 4xx with a
   message written for the caller.
+- **The report count is counts-only by return type, not by discipline.** It
+  calls `backend/scripts/triage_reports.sh counts`, which calls
+  `public.open_report_stats()` — two integers, and no column that could carry a
+  reason, a path, a name or an id. Its stderr is discarded, because the CLI's
+  failure messages quote the project's error bodies and this log is forever.
+  When anything is open the step raises a `::warning` with the count and the
+  age; what the reports SAY is read at a terminal (see "Reporting a photo →
+  Triage"). It runs as an `always()` step so a failed photo sweep cannot make a
+  guideline 1.2 obligation go unmentioned.
 
 ---
 
@@ -728,14 +742,23 @@ reported_user_id uuid    -> auth.users     ON DELETE SET NULL   (pinned to posts
 photo_path       text    nullable          (pinned to posts.photo_path)
 reason           text    nullable, <= 500 chars
 created_at       timestamptz  server-owned
+handled_at       timestamptz  server-owned, NULL = open        (20260828000100)
+handled_action   text    'photo_removed' | 'dismissed', NULL = open
 unique (reporter_id, post_id)
+check  ((handled_at is null) = (handled_action is null))
 ```
 
 | role | privileges on `public.reports` |
 |---|---|
 | `anon` | none — explicitly revoked |
 | `authenticated` | `INSERT (id, reporter_id, post_id, circle_id, reported_user_id, photo_path, reason)` — column-scoped, and nothing else |
-| `service_role` | `SELECT, INSERT, UPDATE, DELETE` |
+| `service_role` | `SELECT, INSERT, UPDATE, DELETE` (table-wide, so it covers columns added later) |
+
+That column list is why `20260828000100` needed no new revoke: `handled_at` and
+`handled_action` were added by `ALTER TABLE`, which does **not** re-run the
+project's default privileges, and the INSERT grant beside them names its columns
+one by one. A client can neither read a report's disposition nor write one, and
+test 12 pins that column by column in both directions.
 
 **The reporter writes and cannot read.** That asymmetry is the design. A circle
 is eight people who know each other, so a readable `reports` table is an
@@ -806,12 +829,84 @@ itself, and dropping the pin fails "filed a report that named no member").
   those a bounded number of attempts and charges nothing at all for being
   offline. `PhotoReports.outcome(for:)` is that table.
 
+### Triage — reading them, and acting
+
+`backend/scripts/triage_reports.sh` is the desk. Guideline 1.2 does not ask for
+a table; it asks for a human who can look at flagged content and act on it, and
+until this script existed nothing in the repo could read `reports` at all.
+
+```bash
+export SUPABASE_SERVICE_ROLE_KEY=...     # Project Settings → API Keys → service_role
+
+./backend/scripts/triage_reports.sh list              # everything still open
+./backend/scripts/triage_reports.sh photo   <id>      # a 5-minute signed link — look first
+./backend/scripts/triage_reports.sh remove  <id>      # take the photo down, mark handled
+./backend/scripts/triage_reports.sh dismiss <id>      # mark handled, remove nothing
+./backend/scripts/triage_reports.sh counts            # open=N / oldest_open_hours=N
+```
+
+`<id>` is a report id or any unambiguous prefix — `list` prints both. Both
+actions confirm first (`remove` wants the short id typed back);
+`TRIAGE_ASSUME_YES=1` skips that, and nothing else asks.
+
+**The key comes from the environment and nowhere else.** No flag, no config
+file, no prompt. The script refuses to start without it, rejects a publishable
+key on sight, and never prints it — the headers go to curl through `curl -K -`
+so it does not appear in `ps` either. Keep it in the shell you are triaging in
+and nowhere this public repo can see.
+
+**It never asks for `reporter_id`.** Not a default, not a flag — the select list
+is a single constant at the top of the file and the reporter is always "a
+member". Triage is a decision about content; "three of your friends flagged
+this" is exactly the sentence the write-only grant exists to make unsayable. It
+does count how many open reports name the same *photo*, which is the signal
+without the names.
+
+**`remove` is retention's own machinery, run by hand for one photo.** Nothing
+new, in this order and for these reasons:
+
+1. `update posts set photo_path = null` — the `posts_tombstone_photo` trigger
+   records the path in `photo_tombstones`, and the storage read policy consults
+   that list through `photo_is_pending_deletion()`. **This is the step that takes
+   the photo away from the circle**, and it is done first for that reason.
+   Filtered on the path as well as the post id, so a member who replaced their
+   photo between the report and now does not lose the new one instead.
+2. delete the object from Storage.
+3. `confirm_photo_deletions()` — **only if step 2 succeeded.** A path we could
+   not delete stays on the tombstone list and the nightly sweep retries it,
+   which is the whole reason that table exists. A Storage failure is therefore
+   not fatal here: the photo is already hidden, the bytes are queued, and the
+   report is still marked handled.
+
+It does **not** delete the post row. `delete_account()` deletes rows because the
+account is going; a moderated photo is one picture, and the prayer it records is
+still a fact the circle scored. Retention's job 1 does exactly this UPDATE on a
+clock; this is the same thing on a human's say-so.
+
+**Marking handled writes one field.** The script sends `handled_action`; the
+`reports_stamp_handled` trigger derives `handled_at` from the server's clock,
+the way `touch_updated_at` and `freeze_created_at` do — so an operator's laptop
+clock never lands on the one timestamp an App Review question would be about,
+and the pair can never fall out of step with its check constraint. Re-running
+the same disposition is a no-op; changing it re-dates; setting `handled_action`
+back to `null` re-opens the report and clears the stamp.
+
+**Nightly visibility.** `maintenance.yml` calls `counts` after the two sweeps
+(as an `always()` step, so a failed photo sweep cannot silence it) and raises a
+`::warning` whenever anything is open. It prints **two integers and nothing
+else**, and that ceiling is enforced by a return type rather than by a `jq`
+filter: `public.open_report_stats()` returns `(open_count, oldest_open_hours)`
+and has no column that could carry a reason, a path, a name or an id. The
+script's stderr is discarded in that step for the same reason. These logs are
+public and permanent; reading what a report *says* is a human at a terminal.
+
 ### Two things this deliberately does not do
 
 - **Triage has a deadline.** The reported photo ages out of Storage on the
   normal ~30-day retention clock, so a report older than that points at a post
   whose `photo_path` is already null. The evidence window is the retention
-  window, by design — reports are read on a human cadence well inside it.
+  window, by design — reports are read on a human cadence well inside it, and
+  the nightly "oldest open (hours)" is the number that says whether they are.
 - **`delete_account()` does not touch `reports`.** Deleting your account must
   not retract a complaint you filed about someone else's photo; the FK
   anonymises it instead, when the orphaned `auth.users` shell is swept (see
@@ -865,18 +960,27 @@ itself, and dropping the pin fails "filed a report that named no member").
       circle nobody is in.
 - [ ] **Add the `SUPABASE_STAGING_SERVICE_ROLE_KEY` secret.** Both sweeps above
       are code until it exists; without it every nightly run skips with a notice
-      and **photos are not being aged out**. It is the staging project's
-      `service_role` / secret key, verbatim, from Project Settings → API Keys.
+      and **photos are not being aged out** and **nothing counts the reports
+      waiting for triage**. It is the staging project's `service_role` / secret
+      key, verbatim, from Project Settings → API Keys. The same key, exported as
+      `SUPABASE_SERVICE_ROLE_KEY` in a local shell, is what runs
+      `backend/scripts/triage_reports.sh` — it needs no GitHub secret of its own.
 - [ ] **Move the account sweep from report to apply.** Read a few nightly
       reports first — "would delete" against "accounts scanned" and the keep
       tally — then set the repo variable `SUPABASE_STAGING_USER_SWEEP_APPLY` to
       `true`. Until then the shells are counted, not removed.
 - [ ] **APNs secrets on the real project** (`supabase secrets set APNS_*`).
       Until then every push path logs and skips, by design.
-- [ ] **Triage tooling for `reports`.** The client half shipped in Phase D
-      (the control on a buddy photo, the local hide, the retry queue); what is
-      still missing is somewhere for a human to actually READ the table —
-      triage today means a service-role query by hand. App Store guideline 1.2
-      needs a reader before public release.
+- [x] **Triage tooling for `reports`.** Done: `backend/scripts/triage_reports.sh`
+      lists what is open (subject, photo, age — the reporter is always "a
+      member"), signs a 5-minute link so you can look, and closes each one by
+      taking the photo down through retention's own tombstone path or by
+      dismissing it. `20260828000100_reports_triage.sql` adds the
+      `handled_at` / `handled_action` pair that makes "closed" a thing the
+      database can say, and `maintenance.yml` warns nightly while anything is
+      open. **The service-role key is still needed to run any of it** — see the
+      secret below, which the nightly count shares. What remains is a decision,
+      not code: how quickly Haashim wants to promise to answer a report, since
+      the evidence window is the ~30-day retention clock.
 - [ ] **Cross-timezone circles.** Accepted soft spot today. If circles stop
       being same-city, `day_key` has to grow a timezone story.

@@ -91,7 +91,32 @@ begin
       ('devices','updated_at','INSERT'), ('devices','updated_at','UPDATE'),
       ('profiles','created_at','INSERT'),('profiles','created_at','UPDATE'),
       ('profiles','updated_at','INSERT'),('profiles','updated_at','UPDATE'),
-      ('profiles','id','UPDATE')
+      ('profiles','id','UPDATE'),
+      -- reports is write-only for the reporter, so EVERY column is unreadable
+      -- and unrewritable — spelled out column by column rather than left to
+      -- "there is no grant statement", because the whole table's design is that
+      -- asymmetry. A SELECT anywhere here is an enumeration of who reported
+      -- whom; an UPDATE is a withdrawal button on a filed complaint.
+      ('reports','id','SELECT'),               ('reports','id','UPDATE'),
+      ('reports','reporter_id','SELECT'),      ('reports','reporter_id','UPDATE'),
+      ('reports','post_id','SELECT'),          ('reports','post_id','UPDATE'),
+      ('reports','circle_id','SELECT'),        ('reports','circle_id','UPDATE'),
+      ('reports','reported_user_id','SELECT'), ('reports','reported_user_id','UPDATE'),
+      ('reports','photo_path','SELECT'),       ('reports','photo_path','UPDATE'),
+      ('reports','reason','SELECT'),           ('reports','reason','UPDATE'),
+      ('reports','created_at','SELECT'),       ('reports','created_at','INSERT'),
+      ('reports','created_at','UPDATE'),
+      -- ...and the triage columns are the newest way to get this wrong. They
+      -- were added by ALTER TABLE, which does NOT re-run the project's default
+      -- privileges — but the INSERT grant beside them is column-scoped and
+      -- names its columns one by one, so the day somebody re-issues it as a
+      -- table-wide `grant insert on public.reports`, these three fail. Readable
+      -- would tell the reported member their complaint was dismissed; writable
+      -- would let them close it themselves.
+      ('reports','handled_at','SELECT'),       ('reports','handled_at','INSERT'),
+      ('reports','handled_at','UPDATE'),
+      ('reports','handled_action','SELECT'),   ('reports','handled_action','INSERT'),
+      ('reports','handled_action','UPDATE')
   ) as forbidden(t, c, v)
   where has_column_privilege('authenticated', 'public.' || t, c, v);
   if v_bad is not null then
@@ -114,7 +139,15 @@ begin
       ('devices','notify_friend_activity','INSERT'),
       ('devices','notify_friend_activity','UPDATE'),
       ('profiles','name','UPDATE'),      ('profiles','id','INSERT'),
-      ('nudges','day_key','INSERT')
+      ('nudges','day_key','INSERT'),
+      -- The other half of the reports matrix. Write-only is not "no grant at
+      -- all": the report still has to be FILEABLE, and an over-narrowed copy of
+      -- 20260821000800's grant would fail here rather than on a real phone as a
+      -- 42501 the reporter reads as "reporting is broken".
+      ('reports','id','INSERT'),               ('reports','reporter_id','INSERT'),
+      ('reports','post_id','INSERT'),          ('reports','circle_id','INSERT'),
+      ('reports','reported_user_id','INSERT'), ('reports','photo_path','INSERT'),
+      ('reports','reason','INSERT')
   ) as needed(t, c, v)
   where not has_column_privilege('authenticated', 'public.' || t, c, v);
   if v_bad is not null then
@@ -125,7 +158,8 @@ begin
   select string_agg(t, ', ') into v_bad
   from unnest(array['profiles','circles','circle_members','circle_departures',
                     'photo_tombstones','posts','excused_days',
-                    'recovery_weeks','custom_challenges','devices','nudges','retention_runs']) t
+                    'recovery_weeks','custom_challenges','devices','nudges',
+                    'retention_runs','reports']) t
   where to_regclass('public.' || t) is null;
   if v_bad is not null then
     raise exception 'missing tables: %', v_bad;
@@ -165,15 +199,26 @@ begin
   end if;
 
   -- Retention is service_role only; a user session must never wipe photos.
+  -- open_report_stats() rides along: it answers only in counts, but "how many
+  -- open reports are there" is still triage's own business, and a member who
+  -- can watch the number move can watch their own complaint being closed.
   select string_agg(f, ', ') into v_bad
   from unnest(array['public.purge_expired_photo_rows(int,int)',
                     'public.confirm_photo_deletions(text[])',
                     'public.charge_join_attempt()',
-                    'public.claim_retention_run(interval)']) f
+                    'public.claim_retention_run(interval)',
+                    'public.open_report_stats()']) f
   where has_function_privilege('authenticated', f, 'execute')
      or has_function_privilege('anon', f, 'execute');
   if v_bad is not null then
     raise exception 'retention functions reachable from a user session: %', v_bad;
+  end if;
+
+  -- ...and it must stay executable by the one role that triages. A revoke that
+  -- overshot would leave the nightly count silently failing on a public repo,
+  -- which reads as "nothing is open".
+  if not has_function_privilege('service_role', 'public.open_report_stats()', 'execute') then
+    raise exception 'service_role cannot execute open_report_stats()';
   end if;
 
   -- anon gets no RPCs at all; authenticated gets exactly the user-facing ones.

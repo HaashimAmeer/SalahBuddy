@@ -1,5 +1,5 @@
-# Scheduled backend maintenance: the photo retention sweep, then the orphaned
-# auth.users sweep.
+# Scheduled backend maintenance: the photo retention sweep, the orphaned
+# auth.users sweep, and a count of the reports nobody has triaged yet.
 #
 # Both were built and then left with nothing calling them. Retention is the
 # ~30-day photo promise in SPEC-V4 §4 — until now it only ran when a client
@@ -24,6 +24,14 @@
 #     nothing but counts by design (see sweep-orphans/index.ts), but this log is
 #     readable by anyone on the internet and a `jq .` of a whole body is one
 #     schema change away from printing something that should not be there.
+#
+# THE REPORT COUNT holds that last rule to its strictest reading, because the
+# rows it counts are complaints between named people. It never touches the table
+# itself: it calls `open_report_stats()`, whose RETURN TYPE is two integers and
+# has no column that could carry a reason, a path, a name or an id. A count (and
+# an age in hours) is the ceiling of what may appear here, and nothing about
+# this job can raise it. Reading the reports themselves is a human at a terminal
+# with `backend/scripts/triage_reports.sh` and the same key — never a log.
 #
 # THE CREDENTIAL. Unlike every other job in this repo, this one holds the
 # service-role key: `retention` and `sweep-orphans` both require it verbatim
@@ -297,5 +305,73 @@ jobs:
               echo "Report only. Set the repo **variable**"
               echo "\`SUPABASE_STAGING_USER_SWEEP_APPLY\` to \`true\` to let the"
               echo "nightly run delete them, once these numbers look right."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # A separate step, and `always()`, on purpose: whether anybody has flagged
+      # a photo is an App Store guideline 1.2 obligation, and it must not go
+      # unsaid because the unrelated photo sweep failed first.
+      - name: Count open reports
+        if: always() && steps.guard.outputs.configured == 'true'
+        shell: bash
+        env:
+          # The triage CLI reads BOTH of these from the environment and nowhere
+          # else — no flag, no file — so the secret reaches it the same way it
+          # reaches curl above, never through a `${{ }}` inside a `run:`.
+          SUPABASE_URL: ${{ steps.guard.outputs.url }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_STAGING_SERVICE_ROLE_KEY }}
+        run: |
+          set -uo pipefail
+          # Re-masked rather than relying on the step above having run: this one
+          # is `always()`, so it can be the FIRST thing to see the URL.
+          echo "::add-mask::$SUPABASE_URL"
+          ref="$(printf '%s' "$SUPABASE_URL" | sed -E 's#^https?://([^./]+)\..*#\1#')"
+          if [ -n "$ref" ] && [ "$ref" != "$SUPABASE_URL" ]; then echo "::add-mask::$ref"; fi
+
+          # `counts` prints exactly two key=value lines and nothing else. stderr
+          # is DISCARDED — its failure messages quote the project's own error
+          # bodies, and while those carry no rows today, this log is public and
+          # forever. A count is the ceiling; an unexplained count is the floor.
+          if ! out="$(bash backend/scripts/triage_reports.sh counts 2>/dev/null)"; then
+            echo "::warning title=Open-report count unavailable::open_report_stats() did not answer. Run 'backend/scripts/triage_reports.sh counts' locally with the service_role key to see why. Reports may be waiting."
+            exit 0
+          fi
+
+          open="$(printf '%s\n' "$out" | sed -n 's/^open=//p')"
+          hours="$(printf '%s\n' "$out" | sed -n 's/^oldest_open_hours=//p')"
+          # Anything but digits means the contract changed under us, and "" read
+          # as zero is the silence this whole step exists to break.
+          case "${open:-x}${hours:-x}" in
+            *[!0-9]*)
+              echo "::warning title=Open-report count unreadable::the triage CLI answered in a shape this workflow does not know."
+              exit 0 ;;
+          esac
+
+          echo "open reports: $open (oldest ${hours}h)"
+          if [ "$open" -gt 0 ]; then
+            echo "::warning title=Reports awaiting triage::$open open, oldest ${hours}h. Read and act on them with 'backend/scripts/triage_reports.sh list' — the contents are deliberately not printed here."
+          fi
+
+          {
+            echo "### Open reports"
+            echo
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| open | $open |"
+            echo "| oldest open (hours) | $hours |"
+            echo
+            if [ "$open" -gt 0 ]; then
+              echo "Counts only — what a report SAYS is never printed here."
+              echo "Read them with the service_role key:"
+              echo
+              echo '```'
+              echo 'export SUPABASE_SERVICE_ROLE_KEY=...'
+              echo './backend/scripts/triage_reports.sh list'
+              echo '```'
+              echo
+              echo "The reported photo ages out of Storage on the ~30-day"
+              echo "retention clock, so the evidence window is that window."
+            else
+              echo "Nothing waiting."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
