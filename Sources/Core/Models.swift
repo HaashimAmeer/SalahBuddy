@@ -238,6 +238,17 @@ struct UserProfile: Codable {
     /// sense — nothing is disclosed and nothing syncs — it is the reconcile
     /// walk declining to judge a day that was not a whole day.
     var travelDayKeys: Set<String>
+    /// v4.1: the dayKey whose streak increment ACTUALLY banked a freeze — the
+    /// receipt undo needs and cannot reconstruct.
+    ///
+    /// Freezes cap at 2, so "every 7th day earns one" is not the same statement
+    /// as "this 7th day earned one": a day-21 increment for somebody already
+    /// holding two banks nothing. Afterwards the two profiles are identical
+    /// (streak 21, two freezes), so no pure function of the profile can tell
+    /// them apart, and undo used to guess — spending a freeze earned two weeks
+    /// earlier. Paired with `lastStreakDayKey`; nil means the last increment
+    /// banked nothing (and, for a pre-v4.1 save, that undo declines to guess).
+    var lastStreakFreezeDayKey: String?
 
     init(name: String, totalXP: Int, streak: Int, longestStreak: Int, streakFreezes: Int,
          lastStreakDayKey: String?, lastReconciledDayKey: String?, earnedBadges: [String: Date],
@@ -250,7 +261,8 @@ struct UserProfile: Codable {
          invitedBuddyNames: [String] = [], pendingNewMemberName: String? = nil,
          partialExcuseStart: [String: Prayer] = [:], partialExcuseEnd: [String: Prayer] = [:],
          startedSolo: Bool = false, groupAwardsFrozenWeek: String? = nil,
-         lastSeenUTCOffset: Int? = nil, travelDayKeys: Set<String> = []) {
+         lastSeenUTCOffset: Int? = nil, travelDayKeys: Set<String> = [],
+         lastStreakFreezeDayKey: String? = nil) {
         self.name = name
         self.totalXP = totalXP
         self.streak = streak
@@ -279,6 +291,7 @@ struct UserProfile: Codable {
         self.groupAwardsFrozenWeek = groupAwardsFrozenWeek
         self.lastSeenUTCOffset = lastSeenUTCOffset
         self.travelDayKeys = travelDayKeys
+        self.lastStreakFreezeDayKey = lastStreakFreezeDayKey
     }
 
     // Migration-safe decoding: v1 profiles lack the v2 fields.
@@ -292,6 +305,7 @@ struct UserProfile: Codable {
         case partialExcuseStart, partialExcuseEnd
         case startedSolo, groupAwardsFrozenWeek
         case lastSeenUTCOffset, travelDayKeys
+        case lastStreakFreezeDayKey
     }
 
     init(from decoder: Decoder) throws {
@@ -325,6 +339,11 @@ struct UserProfile: Codable {
         groupAwardsFrozenWeek = (try? c.decodeIfPresent(String.self, forKey: .groupAwardsFrozenWeek)) ?? nil
         lastSeenUTCOffset = (try? c.decodeIfPresent(Int.self, forKey: .lastSeenUTCOffset)) ?? nil
         travelDayKeys = (try? c.decodeIfPresent(Set<String>.self, forKey: .travelDayKeys)) ?? []
+        // v4.1: absent → nil, i.e. "the last increment banked nothing". A save
+        // written before this field existed loses the receipt for one pending
+        // undo, and the default errs the safe way round: undo may decline to
+        // take back a freeze it granted, but can never take one it did not.
+        lastStreakFreezeDayKey = (try? c.decodeIfPresent(String.self, forKey: .lastStreakFreezeDayKey)) ?? nil
     }
 
     /// A brand-new account. v3.9: everyone starts solo — onboarding also sets

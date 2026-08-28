@@ -432,6 +432,106 @@ final class V2CoreTests: XCTestCase {
         XCTAssertNil(ChallengeEngine.raceWinnerID(memberWeekLogs: [burst(a, count: 2, startingAt: t0)]))
     }
 
+    // MARK: - The race is run in ONE currency (v4.1)
+
+    /// A week that reaches the target ONLY once the perfect-day bonus counts,
+    /// and reaches it 25 XP later without it.
+    ///
+    /// * `d01` — four in-window prayers and a qada isha: complete, but the qada
+    ///   disqualifies the day, so 125 and no bonus.
+    /// * `d02` — all five in-window: +150 raw, and the fifth log makes the day
+    ///   perfect, so +25 lands with it. Running total 300 exactly, at `t0+9h`.
+    /// * `d03` — one more fajr at `t0+10h`, which is where a bonus-blind sum
+    ///   would finally cross 300 (275 → 305).
+    ///
+    /// So the hour between `t0+9h` and `t0+10h` is where the two definitions
+    /// disagree, and every assertion below is a runner placed inside it.
+    private func perfectDayClimber(startingAt t0: Date) -> [PrayerLog] {
+        var logs: [PrayerLog] = []
+        for (i, prayer) in Prayer.allCases.enumerated() {
+            let tier: LogTier = (prayer == .isha) ? .qada : .onTime
+            logs.append(log(prayer, tier, dayKey: "d01",
+                            loggedAt: t0.addingTimeInterval(Double(i) * 3600)))
+        }
+        for (i, prayer) in Prayer.allCases.enumerated() {
+            logs.append(log(prayer, .onTime, dayKey: "d02",
+                            loggedAt: t0.addingTimeInterval(Double(5 + i) * 3600)))
+        }
+        logs.append(log(.fajr, .onTime, dayKey: "d03",
+                        loggedAt: t0.addingTimeInterval(10 * 3600)))
+        return logs
+    }
+
+    /// 10 × 30 XP, all on the same prayer so no day is ever perfect, finishing
+    /// at `endingAt` — a runner whose two definitions agree, used to bracket
+    /// one whose definitions did not.
+    private func flatRunner(endingAt end: Date) -> [PrayerLog] {
+        (0..<10).map { i in
+            log(.dhuhr, .onTime, dayKey: "d0\(1 + i / 5)",
+                loggedAt: end.addingTimeInterval(Double(i - 9) * 3600))
+        }
+    }
+
+    func testRaceCountsThePerfectDayBonusTheProgressBarShows() {
+        let t0 = date(2026, 6, 8, 6, 0)
+        let climb = perfectDayClimber(startingAt: t0)
+
+        // The two halves of the race now quote the same number.
+        XCTAssertEqual(GameEngine.raceXP(logs: climb), 125 + 175 + 30)
+        XCTAssertEqual(ChallengeEngine.memberWeeklyXP(logs: climb), GameEngine.raceXP(logs: climb))
+
+        // 300 is reached the moment d02 turns perfect — not an hour later, when
+        // a sum blind to the bonus would have got there.
+        XCTAssertEqual(GameEngine.raceCrossing(logs: climb, threshold: 300),
+                       t0.addingTimeInterval(9 * 3600))
+
+        // And the bar reading the target is exactly when somebody has crossed:
+        // d01+d02 alone is 275 raw, 300 scored.
+        let throughD02 = Array(climb.dropLast())
+        XCTAssertEqual(GameEngine.raceXP(logs: throughD02), 300)
+        XCTAssertNotNil(GameEngine.raceCrossing(logs: throughD02, threshold: 300))
+
+        // One prayer short of perfect, the day is 245 and nobody has crossed.
+        let shortOfPerfect = throughD02.filter { !($0.dayKey == "d02" && $0.prayer == .isha) }
+        XCTAssertEqual(GameEngine.raceXP(logs: shortOfPerfect), 245)
+        XCTAssertNil(GameEngine.raceCrossing(logs: shortOfPerfect, threshold: 300))
+    }
+
+    /// The bonus decides the crown, and it decides it for whoever earned it —
+    /// here, you.
+    func testPerfectDayBonusWinsYouTheCrownItUsedToCostYou() {
+        let t0 = date(2026, 6, 8, 6, 0)
+        let you = member("you", isYou: true), a = member("a")
+        // "a" gets there at t0+9h30m: after your perfect day lands, before a
+        // bonus-blind sum would have credited it.
+        let entries: [(member: CircleMember, logs: [PrayerLog])] =
+            [(a, flatRunner(endingAt: t0.addingTimeInterval(9 * 3600 + 1800))),
+             (you, perfectDayClimber(startingAt: t0))]
+
+        XCTAssertEqual(ChallengeEngine.raceWinnerID(memberWeekLogs: entries), "you",
+                       "your perfect day put you over first — the crown follows the bar")
+        let def = ChallengeEngine.definition(id: "race300")!
+        XCTAssertTrue(ChallengeEngine.isCompletedNow(def, ctx: context(memberWeekLogs: entries)))
+    }
+
+    /// ...and against you just the same when the perfect day is somebody
+    /// else's, which is the half a "bonus always helps you" fix would miss.
+    func testPerfectDayBonusAlsoLosesYouACrownYouUsedToWin() {
+        let t0 = date(2026, 6, 8, 6, 0)
+        let you = member("you", isYou: true), a = member("a")
+        let entries: [(member: CircleMember, logs: [PrayerLog])] =
+            [(a, perfectDayClimber(startingAt: t0)),
+             (you, flatRunner(endingAt: t0.addingTimeInterval(9 * 3600 + 1800)))]
+
+        XCTAssertEqual(ChallengeEngine.raceWinnerID(memberWeekLogs: entries), "a",
+                       "her perfect day counts on her bar, so it counts in the race")
+        let def = ChallengeEngine.definition(id: "race300")!
+        XCTAssertFalse(ChallengeEngine.isCompletedNow(def, ctx: context(memberWeekLogs: entries)),
+                       "you reached 300 second — no award")
+        // You still crossed; you were simply beaten to it.
+        XCTAssertGreaterThanOrEqual(ChallengeEngine.memberWeeklyXP(logs: entries[1].logs), 300)
+    }
+
     func testCompletionAwardedOnceAndWeeklyRekeying() {
         let fullToday = Prayer.allCases.map { log($0, .onTime, dayKey: "d07") }
         let ctx = context(myLogs: fullToday)
@@ -718,6 +818,8 @@ final class V2CoreTests: XCTestCase {
         XCTAssertEqual(profile.streak, 4)
         XCTAssertTrue(profile.excusedDayKeys.isEmpty)
         XCTAssertTrue(profile.challengeCompletions.isEmpty)
+        XCTAssertNil(profile.lastStreakFreezeDayKey,
+                     "v4.1 freeze receipt is absent from old saves — undo declines to guess")
     }
 
     func testV1SettingsJSONStillDecodes() throws {

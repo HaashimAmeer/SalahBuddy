@@ -219,30 +219,32 @@ enum ChallengeEngine {
 
     // MARK: - Race to 300
 
-    /// The member whose cumulative weekly XP crossed `threshold` EARLIEST
-    /// (by log timestamps). nil while nobody has crossed.
+    /// The member whose weekly XP crossed `threshold` EARLIEST (by log
+    /// timestamps). nil while nobody has crossed.
+    ///
+    /// The crossing is `GameEngine.raceCrossing`, which walks the SAME XP the
+    /// progress bar above reads out of `memberWeeklyXP`. This loop used to run
+    /// its own sum of raw `log.xp` and so raced in a currency nobody was shown
+    /// — a member could watch the bar pass the target and stay uncrowned,
+    /// because the perfect-day bonus counted on screen and not here.
     static func raceWinnerID(memberWeekLogs: [(member: CircleMember, logs: [PrayerLog])],
                              threshold: Int = 300) -> String? {
         var winner: (id: String, at: Date)?
         for entry in memberWeekLogs {
-            var running = 0
-            for log in entry.logs.sorted(by: { $0.loggedAt < $1.loggedAt }) {
-                running += log.xp
-                if running >= threshold {
-                    if winner == nil || log.loggedAt < winner!.at {
-                        winner = (entry.member.id, log.loggedAt)
-                    }
-                    break
-                }
+            guard let crossedAt = GameEngine.raceCrossing(logs: entry.logs,
+                                                          threshold: threshold) else { continue }
+            if winner == nil || crossedAt < winner!.at {
+                winner = (entry.member.id, crossedAt)
             }
         }
         return winner?.id
     }
 
-    /// Weekly XP for a member's week-logs (per-day XP incl. perfect bonus —
-    /// matches the scoreboard math).
+    /// Weekly XP for a member's week-logs — per-day XP including the
+    /// perfect-day bonus, which is the scoreboard's prayer half and, since
+    /// v4.1, the race's own number too. See `GameEngine.raceXP`.
     static func memberWeeklyXP(logs: [PrayerLog]) -> Int {
-        Set(logs.map(\.dayKey)).reduce(0) { $0 + GameEngine.xp(forDay: $1, logs: logs) }
+        GameEngine.raceXP(logs: logs)
     }
 
     // MARK: - Helpers

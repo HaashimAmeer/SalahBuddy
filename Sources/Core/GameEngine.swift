@@ -249,26 +249,40 @@ enum GameEngine {
 
     /// Apply the streak increment that fires the moment the 5th prayer of
     /// `dayKey` is logged. No-op if this day already counted.
+    ///
+    /// Every 7th day banks a freeze, up to two — and the increment RECORDS
+    /// whether it actually banked one, because at the cap it banks nothing and
+    /// nothing downstream can tell that from the profile alone. See
+    /// `reverseStreakIncrement`, which is the reason the receipt exists.
     static func applyStreakIncrement(to profile: UserProfile, dayKey: String) -> UserProfile {
         guard profile.lastStreakDayKey != dayKey else { return profile }
         var p = profile
         p.streak += 1
         p.longestStreak = max(p.longestStreak, p.streak)
         p.lastStreakDayKey = dayKey
-        if p.streak > 0, p.streak % 7 == 0 {
-            p.streakFreezes = min(maxStreakFreezes, p.streakFreezes + 1)
-        }
+        let banksFreeze = p.streak > 0 && p.streak % 7 == 0 && p.streakFreezes < maxStreakFreezes
+        if banksFreeze { p.streakFreezes += 1 }
+        p.lastStreakFreezeDayKey = banksFreeze ? dayKey : nil
         return p
     }
 
     /// Reverse a streak increment (undo path). Only acts if `dayKey` was the
     /// day that most recently extended the streak.
+    ///
+    /// It gives back the freeze ONLY if this increment is the one that banked
+    /// it. `streak % 7 == 0` used to stand in for that question and is not the
+    /// same question: freezes cap at two, so a day-21 increment for somebody
+    /// already holding two banks nothing at all, and undoing it charged them a
+    /// freeze they had earned on day 7 and were entitled to keep. Both cases
+    /// end at "streak 21, two freezes", which is exactly why the forward step
+    /// leaves a receipt instead of letting undo infer one.
     static func reverseStreakIncrement(on profile: UserProfile, dayKey: String) -> UserProfile {
         guard profile.lastStreakDayKey == dayKey else { return profile }
         var p = profile
-        if p.streak > 0, p.streak % 7 == 0, p.streakFreezes > 0 {
-            p.streakFreezes -= 1   // give back the freeze this increment earned
+        if p.lastStreakFreezeDayKey == dayKey, p.streakFreezes > 0 {
+            p.streakFreezes -= 1   // give back the freeze THIS increment earned
         }
+        p.lastStreakFreezeDayKey = nil
         p.streak = max(0, p.streak - 1)
         p.lastStreakDayKey = nil
         return p
@@ -563,6 +577,58 @@ enum GameEngine {
             guard !dayLogs.isEmpty else { return total }
             return total + xp(forDay: key, logs: logs, excusedDayKeys: excusedDayKeys)
         }
+    }
+
+    // MARK: - The race (v4.1)
+
+    /// The XP the crown race is run in — ONE definition, behind both the
+    /// progress a member watches climb and the decision about who won.
+    ///
+    /// Prayer XP plus the perfect-day bonus, and no recovery XP. That is the
+    /// line SCORING.md draws: "the race stays prayer-only" separates praying
+    /// from the opaque weekly dhikr total, not a log from the bonus a day of
+    /// logs earns — and the perfect-day bonus is bought with exactly what the
+    /// race exists to reward, all five in their windows. It is also the number
+    /// the weekly scoreboard shows, minus that opaque total.
+    ///
+    /// It used to be two definitions that disagreed. The progress bar summed
+    /// `xp(forDay:)` (bonus included) while the winner walked raw `log.xp`
+    /// (bonus excluded), so the bar could read 300/300 with the crown still
+    /// unclaimed — and worse, hand the crown to whoever the bonus-free total
+    /// happened to favour. At 25 XP the bonus is worth most of a prayer; it
+    /// changes orderings, not just totals.
+    static func raceXP(logs: [PrayerLog]) -> Int {
+        Set(logs.map(\.dayKey)).reduce(0) { $0 + xp(forDay: $1, logs: logs) }
+    }
+
+    /// The instant `logs` first reached `threshold` under `raceXP`, or nil if
+    /// they never did.
+    ///
+    /// A running sum of `log.xp` cannot answer this, because the perfect-day
+    /// bonus is not carried by any one log: it lands when a day's fifth
+    /// in-window prayer does, and a later qada on the same day takes it away
+    /// again (a travel day can hold six). So the week is REPLAYED in log order
+    /// and the day each log belongs to is re-scored — by `xp(forDay:)`, the
+    /// same function `raceXP` sums — after every step. Re-scoring one day
+    /// rather than the whole prefix keeps it linear in the week AND keeps the
+    /// arithmetic identical to the total; a hand-rolled running version of the
+    /// perfect-day rule would be a second definition, which is the bug.
+    static func raceCrossing(logs: [PrayerLog], threshold: Int) -> Date? {
+        let ordered = logs.sorted { a, b in
+            a.loggedAt == b.loggedAt ? a.id.uuidString < b.id.uuidString
+                                     : a.loggedAt < b.loggedAt
+        }
+        var logsByDay: [String: [PrayerLog]] = [:]
+        var xpByDay: [String: Int] = [:]
+        var total = 0
+        for entry in ordered {
+            logsByDay[entry.dayKey, default: []].append(entry)
+            let scored = xp(forDay: entry.dayKey, logs: logsByDay[entry.dayKey] ?? [])
+            total += scored - (xpByDay[entry.dayKey] ?? 0)
+            xpByDay[entry.dayKey] = scored
+            if total >= threshold { return entry.loggedAt }
+        }
+        return nil
     }
 
     // MARK: - Weekly recap (v3.9)

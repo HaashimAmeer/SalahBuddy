@@ -212,6 +212,71 @@ final class GameEngineTests: XCTestCase {
         XCTAssertEqual(profile.streak, before.streak)
     }
 
+    // MARK: - Undo gives back the freeze it granted, and only that one (v4.1)
+
+    /// Below the cap, day 14 really does bank the second freeze — so undoing
+    /// day 14 must hand exactly that one back, leaving the day-7 freeze alone.
+    func testUndoingAFreezeEarningDayReturnsTheStreakToItsPriorFreezeCount() {
+        var profile = UserProfile.fresh(now: Date(timeIntervalSince1970: 0))
+        for day in 1...13 {
+            profile = GameEngine.applyStreakIncrement(to: profile, dayKey: "day-\(day)")
+        }
+        XCTAssertEqual(profile.streakFreezes, 1, "day 7 banked one; day 14 hasn't landed yet")
+
+        profile = GameEngine.applyStreakIncrement(to: profile, dayKey: "day-14")
+        XCTAssertEqual(profile.streakFreezes, 2)
+        XCTAssertEqual(profile.lastStreakFreezeDayKey, "day-14")
+
+        profile = GameEngine.reverseStreakIncrement(on: profile, dayKey: "day-14")
+        XCTAssertEqual(profile.streak, 13)
+        XCTAssertEqual(profile.streakFreezes, 1, "the freeze day 14 banked, and only that one")
+        XCTAssertNil(profile.lastStreakFreezeDayKey)
+        XCTAssertNil(profile.lastStreakDayKey)
+    }
+
+    /// At the cap, day 21 banks NOTHING — and undoing it must therefore take
+    /// nothing. The old reversal read `streak % 7 == 0` and spent a freeze
+    /// earned two weeks earlier: log the fifth prayer, tap undo, and a freeze
+    /// you had banked and never used was gone.
+    func testUndoingASeventhDayAtTheFreezeCapCannotStealABankedFreeze() {
+        var profile = UserProfile.fresh(now: Date(timeIntervalSince1970: 0))
+        for day in 1...20 {
+            profile = GameEngine.applyStreakIncrement(to: profile, dayKey: "day-\(day)")
+        }
+        XCTAssertEqual(profile.streakFreezes, 2, "days 7 and 14 filled the bank")
+
+        profile = GameEngine.applyStreakIncrement(to: profile, dayKey: "day-21")
+        XCTAssertEqual(profile.streak, 21)
+        XCTAssertEqual(profile.streakFreezes, 2, "capped — day 21 banked nothing")
+        XCTAssertNil(profile.lastStreakFreezeDayKey, "and the increment says so")
+
+        profile = GameEngine.reverseStreakIncrement(on: profile, dayKey: "day-21")
+        XCTAssertEqual(profile.streak, 20)
+        XCTAssertEqual(profile.streakFreezes, 2,
+                       "undo takes back what the increment gave — which was nothing")
+    }
+
+    /// The same thing through the door undo actually uses: take back the fifth
+    /// prayer of a day-21 completion and the freezes must not move.
+    func testUndoOfTheFifthPrayerAtTheFreezeCapKeepsBothFreezes() {
+        let dayKey = "2026-06-30"
+        var profile = UserProfile.fresh(now: Date(timeIntervalSince1970: 0))
+        for day in 1...20 {
+            profile = GameEngine.applyStreakIncrement(to: profile, dayKey: "day-\(day)")
+        }
+        let logs = fullDay(dayKey: dayKey)
+        profile.totalXP = logs.reduce(0) { $0 + $1.xp } + GameEngine.perfectDayBonus
+        profile.perfectDayCount = 1
+        profile = GameEngine.applyStreakIncrement(to: profile, dayKey: dayKey)
+        XCTAssertEqual(profile.streakFreezes, 2)
+
+        let undone = GameEngine.profileAfterUndo(of: logs[4], from: profile,
+                                                 remainingLogs: Array(logs.prefix(4)))
+        XCTAssertEqual(undone.streak, 20, "the day is no longer complete")
+        XCTAssertEqual(undone.perfectDayCount, 0)
+        XCTAssertEqual(undone.streakFreezes, 2, "and the two banked freezes survive the undo")
+    }
+
     // MARK: - Perfect day
 
     func testPerfectDayDetection() {

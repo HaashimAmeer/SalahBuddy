@@ -63,6 +63,6 @@ XP needed to clear level n → n+1: `100 + (n−1) × 25`. New title every 5 lev
 ## The circle (weekly, resets Monday 00:00 local)
 
 - Weekly score = prayer XP + bonuses **+ that week's recovery (dhikr/deeds) XP as one opaque total** — the same rule for you and for every friend (SPEC-V4 §3).
-- **Race**: first member to the weekly target wins the crown — **prayer XP only**, so a big dhikr week never buys one. The target starts at 300 and climbs +100 with every past win.
+- **Race**: first member to the weekly target wins the crown — **prayer XP only**, so a big dhikr week never buys one. "Prayer XP" here is the logs *plus the perfect-day bonuses they earned* — the same number the race's progress bar shows, since the bonus is bought with exactly what the race rewards (all five, in their windows). The one thing left out is the opaque recovery total. The target starts at 300 and climbs +100 with every past win.
 - **The weekly recap's circle page** (Journey, real circles only) recaps the last finished Mon–Sun week with the same two numbers: the standings as the scoreboard scored them, and the best single day anybody had — prayer XP, decided by the data (highest XP, then the earlier day, then the name) so every phone in the circle shows the same answer.
 - Hard-coded group challenges (everyone-prays-Isha ×3, Circle Perfect Day) plus **custom challenges** the circle creates (+ button): pick a prayer and a day count, everyone has to log it that many days in a row, reward = 15 XP × days.
