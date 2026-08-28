@@ -253,7 +253,10 @@ friend-activity toggle, and the local-clock rule all have failing mutations.
 **Local tooling:** `deno` is installed (brew, 2026-08-27). `run_sql_tests.sh`
 needs `PGHOST=/tmp PGPORT=5432 PGUSER=haashimameer PGDATABASE=postgres`.
 
-Current suites (2026-08-27): **460 iOS, 30 SQL, 112 Deno, 0 failures.**
+Current suites (2026-08-28): **646 iOS, 32 SQL, 147 Deno.** The one local run
+of the v5-cycle merge had 2 failures, both test-fixture bugs in never-executed
+agent tests (a misread shared fixture; random UUIDs across two fixture calls);
+both repaired — the repaired pair re-verifies on CI's runners, not this Mac.
 
 ---
 
@@ -289,16 +292,69 @@ wiring tests, and the scheduled maintenance above.
       second device joins — the roster should gain them within seconds (APNs
       secrets were verified §2, so the join push should really send).
 
-**Decisions parked for you (all working as shipped; none block anything):**
+**Decisions — ALL RESOLVED with Haashim, 2026-08-28:**
 
-- Excused days in the race: the crown now credits a perfect-day bonus on an
-  excused day; the recap standings beside it void it. Rare (an excused day
-  holding five in-window logs) but now inconsistent in the crown's favor.
-- Crown semantics: `raceCrossing` awards first-CROSSING; a later qada on a
-  perfect day can drop the bar back under the target while the crown stands.
-  Defensible as "crossed the line first" — but it is a choice, record it.
-- The lapsed-window camera flow still silently books a qada (5 XP, photo
-  dropped) with no warning before or after — file leak fixed, UX untouched.
-- Whether to sweep photos already orphaned on existing TestFlight installs
-  (a one-time launch sweep), and whether 10 min is the right
-  `CircleSyncTuning.reconcileInterval`.
+- ~~Excused days in the race~~ — DECIDED: the race matches the scoreboard.
+  `raceXP`/`raceCrossing` now take the excused set (no silent default), so a
+  break day never earns the bonus anywhere. Shipped this cycle.
+- ~~Crown semantics~~ — DECIDED: FIRST PAST THE POST, recorded in SCORING.md
+  and on `raceCrossing`. A crown falls with its deleted basis (stateless
+  recompute) but survives later bookkeeping; the bar can read 280/300 under a
+  standing crown. Race-to-a-target convention. Do not "fix".
+- ~~Lapsed-window camera silence~~ — DECIDED: warn before AND after. The
+  confirm stage carries a live closing-soon countdown (lead:
+  `GameEngine.lapseWarningLead`, 120s) and a lapse posts an honest
+  "saved as a make-up (+5); photo not kept" card. Shipped this cycle.
+- ~~Old orphaned photos~~ — DECIDED: leave them. The leak is capped; a sweep's
+  only win is disk space and its failure mode deletes a real memory.
+- `CircleSyncTuning.reconcileInterval` stays 10 min until two-phone testing
+  argues otherwise.
+
+---
+
+## 9. Shipped 2026-08-28 — the v5 cycle (widgets, Live Activity, triage desk)
+
+One ultracode cycle (7 Opus builders, 7 adversarial reviews, 6 fix agents):
+the break-day race fix + crown decision above, the camera lapse warnings, the
+**reports triage desk** (`backend/scripts/triage_reports.sh` + migration
+`20260828000100`, counts-only in the nightly job — guideline 1.2's reader
+exists now), and **all of SPEC-V5**: P1 shared container + iOS 18 floor, P2
+static widget (small/medium/lock-screen, demo renders), P3 photos + NSE +
+quiet reload push + the privacy setting (photos by default), P4 Live Activity
+with push-to-start, the nudge button, and the Control Center control.
+
+Suites after merge: see the counts line in §7's tail. Backend: 32 SQL,
+147 Deno.
+
+**⚠️ TestFlight is BLOCKED until the portal steps land.** Simulator builds and
+every CI check stay green without them — which is exactly why nothing red will
+remind you. In one portal session (team 852AXZ2B57):
+
+- [ ] App ID `org.amacvoters.salahbuddymock`: enable **App Groups** (register
+      + assign `group.org.amacvoters.salahbuddymock`) and **Keychain Sharing**.
+- [ ] NEW App ID `org.amacvoters.salahbuddymock.widget`: App Groups (same
+      group) + Keychain Sharing (LOAD-BEARING for the nudge button — without
+      it the button silently falls back to a deep link).
+- [ ] NEW App ID `org.amacvoters.salahbuddymock.notify`: no capabilities.
+- [ ] Refresh provisioning profiles (next device build with automatic signing,
+      or before the next Xcode Cloud archive). Table in XCODE-CLOUD.md.
+
+**Device checks only you can run (in rough order):**
+
+- [ ] **The P1 update path — highest-value check in the cycle**: install the
+      current TestFlight build, sign in, log a prayer with a photo, then
+      install this build over it. Sign-in, photos and streak must survive
+      (the keychain access-group move is invisible on the Simulator).
+- [ ] Add the widget; confirm it renders your window/streak (demo included)
+      and that the second process really reads the App Group container.
+- [ ] A friend's second post in a window: no tray banner, widget count still
+      moves (the quiet reload is best-effort — occasional misses are Apple's
+      throttling, not a bug). First-post banner unchanged.
+- [ ] The Live Activity: appears when a window opens, fills in as the circle
+      posts, ends at window close; nudge from the medium widget lands as a
+      real nudge push.
+
+**Still owed from §8:** the `SUPABASE_STAGING_SERVICE_ROLE_KEY` Actions secret
+(now also gates the nightly report count), arming the account sweep, the
+leftover-testuser check, and your first `triage_reports.sh list` (two lines —
+the command recipe is in backend/README.md's triage section).

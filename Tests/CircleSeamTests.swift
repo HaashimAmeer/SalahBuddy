@@ -664,8 +664,11 @@ final class RemoteCircleSourceTests: XCTestCase {
         // v4.2: and the set itself is on the seam, because the crown race walks
         // the week log by log and needs the same answer `weeklyXP` folds in.
         XCTAssertEqual(src.excusedDayKeys(forMember: amira.uuidString), [mondayKey])
-        XCTAssertTrue(src.excusedDayKeys(forMember: bilal.uuidString).isEmpty,
-                      "one member's rest day is not the circle's")
+        // Bilal's set is exactly HIS OWN fixture rest day (line ~475) — Amira's
+        // append must not leak into it. The first run of this test expected
+        // empty and learned the fixture better.
+        XCTAssertEqual(src.excusedDayKeys(forMember: bilal.uuidString), [mondayKey],
+                       "one member's rest day is not the circle's — Bilal keeps only his own")
         let logs: [PrayerLog] = src.weekLogs(forMember: amira.uuidString,
                                              days: weekDays(), asOf: asOf)
         XCTAssertEqual(GameEngine.raceXP(logs: logs,

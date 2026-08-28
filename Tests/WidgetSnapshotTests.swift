@@ -296,7 +296,13 @@ final class WidgetSnapshotTests: XCTestCase {
                              photoStyle: WidgetPhotoStyle = .photos) -> WidgetSnapshot {
         let day = fixedDay()
         let window: PrayerWindow = day.schedule.window(for: .asr)!
-        let me = UUID(), mina = UUID(), harun = UUID(), zayd = UUID()
+        // Fixed ids, not UUID(): the fixture is called more than once per test
+        // (extract an id from one build, feed it into the next), and a fresh
+        // id per call silently un-matches them. Determinism is the house rule.
+        let me = UUID(uuidString: "D0000000-0000-4000-8000-000000000001")!
+        let mina = UUID(uuidString: "D0000000-0000-4000-8000-000000000002")!
+        let harun = UUID(uuidString: "D0000000-0000-4000-8000-000000000003")!
+        let zayd = UUID(uuidString: "D0000000-0000-4000-8000-000000000004")!
         var posts: [RemotePost] = [
             post(mina, .asr, day.dayKey, tier: .onTime,
                  at: window.start.addingTimeInterval(5 * 60),
