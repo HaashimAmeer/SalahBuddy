@@ -93,8 +93,10 @@ final class CircleStack: ObservableObject {
         // first second of launch should be queued rather than dropped.
         let sync: CircleSync = circle.ensureSync()
         host.attachCircleSync(sync)
-        // AFTER `ensureSync()`, which is where `joinWeekBackfill` is wired.
-        adoptPushHooks()
+        // AFTER `ensureSync()`, which is where `joinWeekBackfill` is wired —
+        // and it takes the engine, because a push ARRIVING is news for the sync
+        // layer and nothing else.
+        adoptPushHooks(sync: sync)
 
         await auth.restore()
         await circle.bootstrap()
@@ -149,14 +151,31 @@ final class CircleStack: ObservableObject {
     }
 
     /// The two moments `CircleService` already has a hook for, which are also
-    /// the two moments push cares about.
+    /// the two moments push cares about — plus the third direction, which is
+    /// push telling the app something rather than the other way round.
     ///
     /// Wrapping rather than replacing: both hooks are already wired to
     /// something that matters (the week backfill, the sign-out itself), and a
     /// hook that some later reader assumes is free is a hook that quietly
     /// unwires a feature.
-    private func adoptPushHooks() {
+    private func adoptPushHooks(sync: CircleSync) {
         let push: PushRegistrar = self.push
+
+        // v4 §6, the RECEIVING side. `AppDelegate` reads the `kind` off an
+        // arriving payload and nothing else; this is where that becomes an
+        // action, and the action is the one realtime already takes — pull
+        // sooner. It matters most for a JOIN: `circle_members` is deliberately
+        // outside the realtime publication and outside the cheap delta, so this
+        // push is the only thing that can tell a phone already sitting open
+        // that somebody walked in.
+        //
+        // `weak`, because `PushRegistrar.shared` lives as long as the process
+        // and the engine belongs to `CircleService`. A strong capture would
+        // make a global a second owner of it — harmless today, and exactly the
+        // retain that outlives whoever changes that ownership later.
+        push.onRemoteNotification = { [weak sync] kind in
+            sync?.signalArrived(CircleSyncSignal.forPush(kind))
+        }
 
         // Sign-out has to take this device's `devices` row with it, and it can
         // only do that while the session that owns the row still exists —

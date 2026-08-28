@@ -21,6 +21,22 @@ enum CircleSyncTuning {
     /// than a person's patience.
     static let realtimeDebounce: TimeInterval = 2
 
+    /// How long the mirror's ROSTER may go unreconciled while the app sits open.
+    ///
+    /// Only the full pull reads the roster, and while the app stays in the
+    /// foreground nothing forces one: `circle_members` is not published to
+    /// realtime (its DELETE payload is the user→circle graph), and there is no
+    /// push at all when somebody LEAVES. So a delta promotes itself to the
+    /// reconciling read once the roster is this old — which is what
+    /// `backend/README.md` asks for under "re-fetch the roster on a `posts`
+    /// event", rate-limited so a maghrib burst does not cost a full read each
+    /// time it arrives.
+    ///
+    /// Ten minutes because none of this is urgent: the JOIN push is what makes
+    /// a new member appear promptly, and this is the floor under it for the
+    /// device that never got one — permission denied, no token, a dropped push.
+    static let reconcileInterval: TimeInterval = 10 * 60
+
     /// A delta asks for `updated_at > lastSyncedAt - overlap`. The overlap
     /// absorbs clock skew between the device and Postgres: without it, a row
     /// written in the second straddling our last sync is never seen again,
@@ -82,14 +98,62 @@ protocol CircleSyncHost: AnyObject {
 
 // MARK: - Wire types
 
-/// What a realtime event means to us. Note what it does NOT carry: any of the
-/// row's data. LOCKED DECISION — the payload is never decoded (§6); an event
+/// What a signal means to us — from the realtime channel, or from a §6 push
+/// this device was handed (`forPush`). Note what it does NOT carry: any of the
+/// row's data. LOCKED DECISION — the payload is never decoded (§6); a signal
 /// says only "something over there changed", and the pull is the one data path.
-enum CircleRealtimeEvent: Equatable, Sendable {
+///
+/// One type for both sources on purpose. A `postgres_changes` event and an APNs
+/// alert mean the identical thing to this app, and giving them separate doors
+/// would be two places for the debounce, the offline guard and the delta/full
+/// decision to drift apart.
+enum CircleSyncSignal: Equatable, Sendable {
     case changed
     /// A DELETE. Deltas key off `updated_at`, and a deleted row has none —
     /// only a full, reconciling pull can notice something is gone.
     case deleted
+    /// The ROSTER moved: somebody joined.
+    ///
+    /// v4 Phase D FIX: this had no way of arriving at all, and the gap was a
+    /// hole between two deliberate decisions rather than anybody's mistake.
+    /// `circle_members` is intentionally absent from the realtime publication —
+    /// its DELETE payload is the whole user→circle graph, broadcast
+    /// project-wide (`20260821000600_realtime.sql`) — and the cheap delta does
+    /// not read the roster either (`SupabaseCircleTransport.fetch` returns
+    /// early). So a friend joining a circle whose app was already open produced
+    /// NO roster refresh until a cold launch: their posts landed on the next
+    /// delta and drew as nobody at all, because every screen resolves a post
+    /// through the members it knows about. The join push is the one thing that
+    /// can say so, and this is it saying so.
+    case rosterChanged
+
+    /// Whether only the RECONCILING read can answer this.
+    ///
+    /// A delta adds and updates posts and does nothing else: it cannot see a
+    /// removal (a row that is gone has no `updated_at` to be greater than), and
+    /// it does not ask for the roster at all.
+    var needsReconcilingRead: Bool {
+        switch self {
+        case .changed: return false
+        case .deleted, .rosterChanged: return true
+        }
+    }
+
+    /// What an arriving §6 push means to the mirror.
+    ///
+    /// Only `join` is special, and for a structural reason rather than an
+    /// importance one (see `rosterChanged`). A `post` is already covered by a
+    /// delta — `posts` IS published, so realtime usually beats the push to it —
+    /// and a `nudge` changes nothing on the server whatsoever; it folds into an
+    /// ordinary `changed` because the person who sent it is demonstrably live
+    /// in the circle at that moment, and a delta that finds nothing costs one
+    /// request and cannot be wrong.
+    static func forPush(_ kind: PushKind) -> CircleSyncSignal {
+        switch kind {
+        case .join: return .rosterChanged
+        case .post, .nudge: return .changed
+        }
+    }
 }
 
 /// The oldest day/week a pull asks for.
@@ -181,7 +245,7 @@ protocol CircleSyncTransport: AnyObject {
     /// caller shows anyone — realtime is only ever a signal to pull sooner —
     /// but it must be reported, or a dead channel is never retried.
     func startRealtime(circleID: UUID,
-                       onEvent: @escaping @Sendable @MainActor (CircleRealtimeEvent) -> Void) async -> Bool
+                       onEvent: @escaping @Sendable @MainActor (CircleSyncSignal) -> Void) async -> Bool
     func stopRealtime() async
 }
 
@@ -224,6 +288,20 @@ final class CircleSync: ObservableObject {
     @Published private(set) var lastError: CircleError?
 
     @Published private(set) var lastSyncedAt: Date?
+
+    /// When the RECONCILING read last committed.
+    ///
+    /// Distinct from `lastSyncedAt`, which a delta moves too. Only the full
+    /// read asks for the roster and only the full read notices a removal, so
+    /// this — and not the cursor — is the honest answer to "how long could the
+    /// membership have been wrong for". Nil means no reconciling read has
+    /// landed in this session, which counts as STALE: a launch whose full pull
+    /// never made it should ask for everything at the first opportunity rather
+    /// than settle for a delta that structurally cannot see the roster.
+    ///
+    /// In memory, not on disk: it is a fact about this run, and a stamp
+    /// restored from `circle.json` would claim a read that never happened.
+    private(set) var lastReconciledAt: Date?
 
     /// Writes this device gave up on, and why. NOT decoration: an op the server
     /// refuses over and over is dropped so the queue behind it can move, and
@@ -898,6 +976,12 @@ final class CircleSync: ObservableObject {
         guard base.circle?.id == circleID else { return }
         var next: CircleSnapshot
         if isFullRead {
+            // The reconciling read is the pass that asks for the roster
+            // (`SupabaseCircleTransport.fetch` returns early for a delta), so
+            // this is where "the membership was checked" becomes true. Stamped
+            // on the COMMIT rather than on the request: a read that never
+            // reached the mirror reconciled nothing.
+            lastReconciledAt = AppClock.now
             next = CircleSync.merged(base, full: page, circleID: circleID)
         } else {
             next = CircleSync.merged(base, delta: page)
@@ -1123,8 +1207,8 @@ final class CircleSync: ObservableObject {
         if let wanted: UUID = wanted {
             guard subscribedCircleID != wanted else { return }
             subscribedCircleID = wanted
-            let joined: Bool = await transport.startRealtime(circleID: wanted) { [weak self] event in
-                self?.realtimeEventArrived(event)
+            let joined: Bool = await transport.startRealtime(circleID: wanted) { [weak self] signal in
+                self?.signalArrived(signal)
             }
             guard !joined else { return }
             // Only surrender the id if it is still the one we claimed: the
@@ -1137,21 +1221,54 @@ final class CircleSync: ObservableObject {
         }
     }
 
-    /// An event arrived. The payload is NOT read — this only decides how soon,
-    /// and how thoroughly, to ask the server what actually happened.
-    func realtimeEventArrived(_ event: CircleRealtimeEvent) {
-        if event == .deleted {
+    /// A signal arrived — a realtime event, or a §6 push this device was handed
+    /// and turned into one (`CircleSyncSignal.forPush`, wired in `CircleStack`).
+    /// The payload is NOT read: this only decides how soon, and how thoroughly,
+    /// to ask the server what actually happened.
+    ///
+    /// THE one door, for both sources. A push arriving while the app is open is
+    /// the same news a `postgres_changes` event is, and it earns the same
+    /// two-second debounce — five friends praying at maghrib is one pull
+    /// whether the phone heard about it over a socket or over APNs.
+    func signalArrived(_ signal: CircleSyncSignal) {
+        if signal.needsReconcilingRead {
             debouncedPullNeedsFullRead = true
         }
         armDebounce()
+    }
+
+    /// Whether the next pull has to be the RECONCILING read rather than a delta.
+    ///
+    /// Two reasons, and both are things a delta structurally cannot see. A
+    /// signal asked for one — a DELETE, or a join, whose whole content is the
+    /// roster. Or the roster is simply OLD: nothing else forces a full read
+    /// while the app sits in the foreground, and a member who left produces no
+    /// event and no push at all, so without a clock the mirror could keep
+    /// drawing them until the app was next relaunched.
+    ///
+    /// Pure, and `static`, so the rule can be asserted without moving a clock.
+    static func needsReconcilingRead(requested: Bool,
+                                     lastReconciledAt: Date?,
+                                     now: Date,
+                                     interval: TimeInterval = CircleSyncTuning.reconcileInterval)
+    -> Bool {
+        if requested { return true }
+        guard let last: Date = lastReconciledAt else { return true }
+        return now.timeIntervalSince(last) >= interval
     }
 
     /// Internal rather than private: the interesting part of the debounce is
     /// its DECISION — delta or full read — not its two-second nap, and a test
     /// should be able to assert the decision without sleeping through it.
     func runDebouncedPull() async {
-        let needsFull: Bool = debouncedPullNeedsFullRead
+        let requested: Bool = debouncedPullNeedsFullRead
         debouncedPullNeedsFullRead = false
+        // Only `requested` is consumed here. The age half is DERIVED, so it
+        // needs no putting back below: if the roster was stale before a pull
+        // that never ran, it is still stale after it.
+        let needsFull: Bool = CircleSync.needsReconcilingRead(requested: requested,
+                                                              lastReconciledAt: lastReconciledAt,
+                                                              now: AppClock.now)
         let cursor: Date? = needsFull ? nil : deltaCursor()
         let ran: Bool = await pull(since: cursor)
         guard !ran else { return }
@@ -1164,7 +1281,7 @@ final class CircleSync: ObservableObject {
         // on screen until the next lifecycle full pull. Nothing was asked, so
         // nothing is consumed: put the bit back and try again after the
         // debounce.
-        debouncedPullNeedsFullRead = debouncedPullNeedsFullRead || needsFull
+        debouncedPullNeedsFullRead = debouncedPullNeedsFullRead || requested
         // Re-armed only when the block was TEMPORARY — a pull already in
         // flight. Offline is not: `connectionCameBack` runs a full pull the
         // moment the network returns, which subsumes anything a delete needed,
@@ -1217,6 +1334,10 @@ final class CircleSync: ObservableObject {
         // Whatever was owed belonged to the circle (or the account) that just
         // went away — including a push that would have named it.
         announceablePostIDs.removeAll()
+        // A different circle's roster has never been read, whatever the old
+        // one's stamp said. Nil is stale, so the first signal after a join
+        // asks for everything rather than a delta with no members in it.
+        lastReconciledAt = nil
         retryTask?.cancel()
         retryTask = nil
         outbox = persists ? CircleOutbox.load() : .empty
@@ -1560,9 +1681,18 @@ final class SupabaseCircleTransport: CircleSyncTransport {
         page.excusedDays = try await fetchExcusedDays(circleID: circleID, window: window)
         page.recoveryWeeks = try await fetchRecoveryWeeks(circleID: circleID, window: window)
         page.challenges = try await fetchChallenges(circleID: circleID)
-        // The roster is reconciled by the full read only: it changes rarely, and
-        // a delta that returned an empty roster would be read as "everybody
-        // left" by a merge that trusted it.
+        // The roster is reconciled by the full read only. `circle_members` and
+        // `profiles` have no usable `updated_at` to filter on, so both reads are
+        // whole-list reads whatever this pass is — and `merged(_:delta:)` has no
+        // members branch to fold them through, deliberately, because a page that
+        // did NOT ask must never be read as "everybody left".
+        //
+        // v4 Phase D: what makes that affordable is that a full read is no
+        // longer only a lifecycle event. `CircleSync.needsReconcilingRead`
+        // promotes a delta to this pass when a JOIN push says the roster moved,
+        // and again whenever the roster is older than `reconcileInterval` — so
+        // a member who joined (or left) while the app sat open is picked up
+        // without the roster riding along on every post anyone makes.
         guard since == nil else { return page }
         page.members = try await fetchMembers()
         page.profiles = try await fetchProfiles()
@@ -1656,9 +1786,14 @@ final class SupabaseCircleTransport: CircleSyncTransport {
     /// receive nothing and at worst fail the whole channel. Nothing is lost:
     /// an event here is only a signal to pull, and the pull re-reads the roster
     /// and the rest days anyway.
+    ///
+    /// v4 Phase D: "the pull re-reads the roster anyway" was true of the FULL
+    /// pull and only of it. Nothing forced one while the app stayed open, so a
+    /// join went unseen until relaunch — see `CircleSyncSignal.rosterChanged`,
+    /// which is the join push filling exactly this gap.
     @discardableResult
     func startRealtime(circleID: UUID,
-                       onEvent: @escaping @Sendable @MainActor (CircleRealtimeEvent) -> Void) async -> Bool {
+                       onEvent: @escaping @Sendable @MainActor (CircleSyncSignal) -> Void) async -> Bool {
         await stopRealtime()
         let topic: String = "circle:\(circleID.uuidString.lowercased())"
         let channel: RealtimeChannelV2 = Supa.client.channel(topic)
@@ -1711,7 +1846,7 @@ final class SupabaseCircleTransport: CircleSyncTransport {
     /// The ONLY thing read off an event. Not `.record`, not `.oldRecord` —
     /// which is why a payload the client cannot decode (or must not trust) can
     /// never become data in this app.
-    static func signal(for action: AnyAction) -> CircleRealtimeEvent {
+    static func signal(for action: AnyAction) -> CircleSyncSignal {
         if case .delete = action {
             return .deleted
         }

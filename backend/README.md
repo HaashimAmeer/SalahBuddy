@@ -822,9 +822,21 @@ itself, and dropping the pin fails "filed a report that named no member").
       `PushRegistrar` writes the `AppSettings` toggle into the row through
       `register_device()`, and `AppState.settings.didSet` pushes a change
       straight through rather than waiting for the next foreground.
-- [ ] **Client: re-fetch the roster and resting flags on a `posts` realtime
+- [x] **Client: re-fetch the roster and resting flags on a `posts` realtime
       event.** `circle_members` and `excused_days` are deliberately not
       published (see Privacy invariants), so those two are pull, not push.
+      Done in Phase D, in the two halves that turned out to be needed. The
+      resting flags were already read on every pass — `excused_days` has no
+      `updated_at` to filter on, so its window read IS the cheap read. The
+      ROSTER was not, and nothing forced a full pull while the app sat open, so
+      a member who joined stayed invisible until relaunch: `notify`'s
+      `{kind:"join"}` push is now received by `AppDelegate`, decoded to its
+      `kind` and handed to `CircleSync` as the same "pull sooner" signal
+      realtime raises — one that asks for the reconciling read. A delta also
+      promotes itself to that read whenever the roster is older than
+      `CircleSyncTuning.reconcileInterval` (10 min), which is the floor under
+      the device that never got the push and the only thing that notices a
+      member who LEFT, since a departure raises no event and sends no push.
 - [ ] **Add `backend/supabase/.temp/` to `.gitignore`.** The Supabase CLI
       writes the linked project ref there; on a public repo that should never
       be committed by accident.

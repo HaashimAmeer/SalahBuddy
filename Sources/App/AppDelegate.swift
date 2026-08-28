@@ -1,10 +1,16 @@
 import UIKit
 import UserNotifications
 
-/// The app's one UIKit delegate. It exists for exactly two reasons, both of
-/// which SwiftUI has no equivalent for: APNs hands a device token to a
-/// `UIApplicationDelegate` and nowhere else, and how a notification behaves
-/// while the app is OPEN is a `UNUserNotificationCenterDelegate` decision.
+/// The app's one UIKit delegate. Everything in it is here because SwiftUI has
+/// no equivalent: APNs hands a device token to a `UIApplicationDelegate` and
+/// nowhere else, and both halves of a notification's RECEIPT — how it behaves
+/// while the app is open, and the fact that somebody tapped it — are
+/// `UNUserNotificationCenterDelegate` decisions.
+///
+/// It decides nothing about either. A receipt is decoded down to its `kind`
+/// (`PushKind`) and handed to `PushRegistrar`, which owns remote notifications;
+/// what that costs the app is `CircleSync`'s business, and the answer is the
+/// same one realtime gets — pull sooner.
 ///
 /// **It does not own notifications.** `NotificationManager` owns every LOCAL
 /// notification — prayer windows, last call, the break reminder — along with
@@ -69,7 +75,57 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         // this come from the circle", and it does not depend on knowing that
         // class's identifier prefix.
         let isRemote: Bool = (notification.request.trigger is UNPushNotificationTrigger)
+        AppDelegate.signalReceipt(remote: isRemote, notification: notification)
         completionHandler(AppDelegate.presentationOptions(remote: isRemote))
+    }
+
+    /// The app was opened FROM a notification — the other half of a receipt,
+    /// and the one that was missing entirely.
+    ///
+    /// `willPresent` only fires while the app is already in front. A push that
+    /// lands on a locked phone and is tapped ten minutes later never went
+    /// through it, so the tap was the app's first sight of the payload and it
+    /// had nowhere to go. The foreground pull that follows a tap covers most of
+    /// what this signals — but not all of it, and "most" is not a contract:
+    /// this runs before the scene phase settles, and a notification tapped
+    /// while the app is ALREADY foregrounded raises no foreground event at all.
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                didReceive response: UNNotificationResponse,
+                                withCompletionHandler completionHandler: @escaping () -> Void) {
+        let notification: UNNotification = response.notification
+        let isRemote: Bool = (notification.request.trigger is UNPushNotificationTrigger)
+        AppDelegate.signalReceipt(remote: isRemote, notification: notification)
+        completionHandler()
+    }
+
+    /// Read the one field a push is allowed to say anything with, and hand it
+    /// on. The `[AnyHashable: Any]` is decoded HERE, on the near side, for the
+    /// reason `didRegisterForRemoteNotificationsWithDeviceToken` converts its
+    /// token here: a `userInfo` dictionary is not `Sendable`, a `PushKind` is,
+    /// and these callbacks are not guaranteed to arrive on the main actor.
+    private static func signalReceipt(remote: Bool, notification: UNNotification) {
+        let userInfo: [AnyHashable: Any] = notification.request.content.userInfo
+        guard let kind: PushKind = AppDelegate.receivedKind(remote: remote,
+                                                            userInfo: userInfo) else { return }
+        Task { @MainActor in
+            PushRegistrar.shared.remoteNotificationArrived(kind)
+        }
+    }
+
+    /// What an arriving notification is worth telling the circle about.
+    ///
+    /// Pure and `static` for the same reason `presentationOptions` is: a
+    /// `UNNotification` has no public initialiser, so the only way this decision
+    /// is testable is if it never needs one.
+    ///
+    /// `remote: false` answers nil unconditionally. Everything
+    /// `NotificationManager` schedules is a local prayer reminder, it carries no
+    /// §6 payload, and a local notification must not be able to talk the app
+    /// into a network round trip — the same division `presentationOptions`
+    /// draws, drawn again where it decides something else.
+    static func receivedKind(remote: Bool, userInfo: [AnyHashable: Any]) -> PushKind? {
+        guard remote else { return nil }
+        return PushKind(userInfo: userInfo)
     }
 
     /// What to show while the app is in the FOREGROUND.

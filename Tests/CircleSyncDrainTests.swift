@@ -64,6 +64,16 @@ private final class DrainTransport: CircleSyncTransport {
         if let fetchError {
             throw fetchError
         }
+        // Faithful to `SupabaseCircleTransport.fetch`, which returns BEFORE it
+        // reads the roster whenever this is a delta. Handing a delta a roster
+        // here would let a test "prove" a refresh the shipping code never
+        // performs — the exact shape of fake that makes a green suite a lie.
+        guard since == nil else {
+            var delta: CircleSyncPage = page
+            delta.members = nil
+            delta.profiles = nil
+            return delta
+        }
         return page
     }
 
@@ -72,7 +82,7 @@ private final class DrainTransport: CircleSyncTransport {
     var joinSucceeds: Bool = true
 
     func startRealtime(circleID: UUID,
-                       onEvent: @escaping @Sendable @MainActor (CircleRealtimeEvent) -> Void) async -> Bool {
+                       onEvent: @escaping @Sendable @MainActor (CircleSyncSignal) -> Void) async -> Bool {
         guard joinSucceeds else { return false }
         subscribedTo = circleID
         return true
@@ -817,20 +827,157 @@ final class CircleSyncDrainTests: XCTestCase {
         let transport = DrainTransport()
         let sync: CircleSync = makeSync(host: host, transport: transport)
 
-        sync.realtimeEventArrived(.changed)
-        await sync.runDebouncedPull()
+        // The launch's reconciling read, which is what `start()` does — and the
+        // precondition for the assertion below: an unreconciled roster promotes
+        // the next pull whatever the signal said, so without this the "a change
+        // uses the delta" half would be measuring the wrong rule.
+        await sync.pull(since: nil)
         XCTAssertEqual(transport.fetches.count, 1)
-        // The delta is backdated by the overlap so a row written in the second
-        // straddling the last sync is not lost forever.
-        XCTAssertEqual(transport.fetches[0].since,
-                       synced.addingTimeInterval(-CircleSyncTuning.deltaOverlap))
+        XCTAssertNil(transport.fetches[0].since)
 
-        sync.realtimeEventArrived(.deleted)
+        sync.signalArrived(.changed)
         await sync.runDebouncedPull()
         XCTAssertEqual(transport.fetches.count, 2)
+        // The delta is backdated by the overlap so a row written in the second
+        // straddling the last sync is not lost forever.
+        XCTAssertEqual(transport.fetches[1].since,
+                       synced.addingTimeInterval(-CircleSyncTuning.deltaOverlap))
+
+        sync.signalArrived(.deleted)
+        await sync.runDebouncedPull()
+        XCTAssertEqual(transport.fetches.count, 3)
         // A deletion is invisible to `updated_at`, so only the reconciling read
         // can notice it.
-        XCTAssertNil(transport.fetches[1].since)
+        XCTAssertNil(transport.fetches[2].since)
+    }
+
+    // MARK: - A join push refreshes the roster (v4 Phase D)
+
+    /// THE regression, end to end through the same door realtime uses.
+    ///
+    /// `circle_members` is deliberately outside the realtime publication (its
+    /// DELETE payload is the whole user→circle graph) and outside the cheap
+    /// delta, so a friend joining a circle whose app was already open refreshed
+    /// NOTHING until a cold launch: their posts arrived on the next delta and
+    /// drew as nobody, because every screen resolves a post through the members
+    /// it knows about. The join push is the only thing that can say so.
+    func testAJoinPushRefreshesTheRosterAndProfilesIntoTheMirror() async {
+        let host: DrainHost = liveHost(snapshot(lastSyncedAt: stamp(0)))
+        let transport = DrainTransport()
+        transport.page = CircleSyncPage(
+            posts: [],
+            members: [RemoteMember(circleID: circleID, userID: me),
+                      RemoteMember(circleID: circleID, userID: friend, joinedAt: stamp(60))],
+            profiles: [RemoteProfile(id: friend, name: "Yusuf", avatarEmoji: "🌙")])
+        let sync: CircleSync = makeSync(host: host, transport: transport)
+        // The launch read, so nothing below is riding on a never-reconciled
+        // mirror — the join has to be what does this on its own.
+        await sync.pull(since: nil)
+        XCTAssertEqual(host.syncSnapshot.members.count, 2)
+
+        // ...and now the friend is gone again and comes back, so the assertion
+        // cannot pass on what the launch already fetched.
+        host.syncSnapshot.members = [RemoteMember(circleID: circleID, userID: me)]
+        host.syncSnapshot.profiles = []
+
+        sync.signalArrived(CircleSyncSignal.forPush(.join))
+        await sync.runDebouncedPull()
+
+        XCTAssertNil(transport.fetches.last?.since,
+                     "a join is answerable only by the pass that reads the roster")
+        XCTAssertEqual(host.syncSnapshot.members.count, 2, "the new member is in the mirror")
+        XCTAssertEqual(host.syncSnapshot.member(for: friend)?.name, "Yusuf",
+                       "and their profile came with them, or the scoreboard draws a blank row")
+    }
+
+    /// The other half, which is what keeps the delta cheap: an ordinary post
+    /// push is NOT a reason to re-read the roster.
+    func testAPostPushStaysOnTheCheapDelta() async {
+        let synced: Date = stamp(0)
+        let host: DrainHost = liveHost(snapshot(lastSyncedAt: synced))
+        let transport = DrainTransport()
+        transport.page = CircleSyncPage(
+            posts: [],
+            members: [RemoteMember(circleID: circleID, userID: me),
+                      RemoteMember(circleID: circleID, userID: friend)],
+            profiles: [])
+        let sync: CircleSync = makeSync(host: host, transport: transport)
+        await sync.pull(since: nil)
+
+        sync.signalArrived(CircleSyncSignal.forPush(.post))
+        await sync.runDebouncedPull()
+
+        XCTAssertEqual(transport.fetches.last?.since,
+                       synced.addingTimeInterval(-CircleSyncTuning.deltaOverlap),
+                       "`posts` is published to realtime; a post push needs nothing extra")
+    }
+
+    /// A nudge is aimed at one person about their own prayer and changes
+    /// nothing on the server — it still costs a delta, because the person who
+    /// sent it is demonstrably live in the circle at that moment, and never a
+    /// full read.
+    func testANudgePushIsWorthNoMoreThanADelta() {
+        XCTAssertEqual(CircleSyncSignal.forPush(.nudge), .changed)
+        XCTAssertFalse(CircleSyncSignal.forPush(.nudge).needsReconcilingRead)
+    }
+
+    /// Nothing signals a DEPARTURE — no realtime event, no push — so the only
+    /// thing standing between a mirror and a member who left is the clock.
+    /// A mirror that has never been reconciled is stale by definition, which is
+    /// what makes the very first signal of a session ask for everything.
+    func testAnUnreconciledMirrorPromotesTheNextDeltaToTheFullRead() async {
+        let host: DrainHost = liveHost(snapshot(lastSyncedAt: stamp(0)))
+        let transport = DrainTransport()
+        let sync: CircleSync = makeSync(host: host, transport: transport)
+        XCTAssertNil(sync.lastReconciledAt)
+
+        sync.signalArrived(.changed)
+        await sync.runDebouncedPull()
+
+        XCTAssertNil(transport.fetches.last?.since,
+                     "the roster has never been read; a delta cannot fix that")
+        XCTAssertNotNil(sync.lastReconciledAt, "and the reconciling read says so")
+    }
+
+    /// The rule itself, asserted without moving a clock.
+    func testTheReconcileIntervalIsTheFloorUnderAStaleRoster() {
+        let now: Date = stamp(100_000)
+        let interval: TimeInterval = CircleSyncTuning.reconcileInterval
+
+        XCTAssertTrue(CircleSync.needsReconcilingRead(requested: true,
+                                                      lastReconciledAt: now, now: now),
+                      "a signal that asked for one always wins")
+        XCTAssertTrue(CircleSync.needsReconcilingRead(requested: false,
+                                                      lastReconciledAt: nil, now: now),
+                      "never reconciled is stale, not fresh")
+        XCTAssertFalse(CircleSync.needsReconcilingRead(
+            requested: false,
+            lastReconciledAt: now.addingTimeInterval(-interval + 1), now: now),
+                       "a burst of posts a minute after a full read stays a delta")
+        XCTAssertTrue(CircleSync.needsReconcilingRead(
+            requested: false,
+            lastReconciledAt: now.addingTimeInterval(-interval), now: now),
+                      "and the interval is a floor, not a maybe")
+    }
+
+    /// Leaving and joining another circle throws the stamp away with everything
+    /// else: the new circle's roster has never been read, whatever the old
+    /// one's age said.
+    func testChangingCircleForgetsThatTheRosterWasEverRead() async {
+        let host: DrainHost = liveHost(snapshot(lastSyncedAt: stamp(0)))
+        let transport = DrainTransport()
+        let sync: CircleSync = makeSync(host: host, transport: transport)
+        // Anchor the generation the way the first enqueue or drain of a real
+        // launch does, so the bump below reads as a CHANGE rather than as the
+        // first identity this engine has ever seen.
+        await sync.drain()
+        await sync.pull(since: nil)
+        XCTAssertNotNil(sync.lastReconciledAt)
+
+        host.syncIdentityGeneration += 1
+        await sync.drain()
+
+        XCTAssertNil(sync.lastReconciledAt)
     }
 
     // MARK: - What never gets queued
@@ -1149,17 +1296,24 @@ final class CircleSyncDrainTests: XCTestCase {
         let host: DrainHost = liveHost(snapshot(lastSyncedAt: stamp(0)))
         let transport = DrainTransport()
         let net = Reachability()
-        net.setOnline(false)
+        net.setOnline(true)
         let sync: CircleSync = makeSync(host: host, transport: transport, reachability: net)
+        // The launch's reconciling read FIRST, so the roster is fresh and the
+        // only thing that can force a full read below is the bit the DELETE
+        // set. Without it a never-reconciled mirror would ask for everything
+        // anyway and this would pass while proving nothing.
+        await sync.pull(since: nil)
+        XCTAssertEqual(transport.fetches.count, 1)
 
-        sync.realtimeEventArrived(.deleted)
+        net.setOnline(false)
+        sync.signalArrived(.deleted)
         await sync.runDebouncedPull()
-        XCTAssertTrue(transport.fetches.isEmpty, "offline: nothing was asked")
+        XCTAssertEqual(transport.fetches.count, 1, "offline: nothing was asked")
 
         net.setOnline(true)
         await sync.runDebouncedPull()
-        XCTAssertEqual(transport.fetches.count, 1)
-        XCTAssertNil(transport.fetches[0].since,
+        XCTAssertEqual(transport.fetches.count, 2)
+        XCTAssertNil(transport.fetches[1].since,
                      "the deletion still needs the reconciling read")
     }
 

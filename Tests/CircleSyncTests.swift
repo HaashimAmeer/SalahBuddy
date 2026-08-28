@@ -752,6 +752,39 @@ final class CircleSyncTests: XCTestCase {
         XCTAssertEqual(round, op)
     }
 
+    // MARK: - A push is a signal, exactly like a realtime event
+
+    /// v4 Phase D: the whole mapping, kind by kind.
+    ///
+    /// `join` is the only one that costs a reconciling read, and for a
+    /// structural reason rather than an importance one: `circle_members` is
+    /// outside the realtime publication AND outside the cheap delta, so the
+    /// push is the only thing that can say the roster moved. `post` is already
+    /// covered — `posts` IS published — and `nudge` changes nothing on the
+    /// server at all.
+    func testEveryPushKindMapsToASignalAndOnlyJoinReReadsTheRoster() {
+        XCTAssertEqual(CircleSyncSignal.forPush(.join), .rosterChanged)
+        XCTAssertEqual(CircleSyncSignal.forPush(.post), .changed)
+        XCTAssertEqual(CircleSyncSignal.forPush(.nudge), .changed)
+
+        // Exhaustive over the kinds rather than over three literals: a fourth
+        // one added to `notify` has to be given an answer here, not defaulted
+        // into the cheap delta by whoever notices last.
+        let reReading: [PushKind] = PushKind.allCases
+            .filter { CircleSyncSignal.forPush($0).needsReconcilingRead }
+        XCTAssertEqual(reReading, [.join])
+    }
+
+    /// The other half of the same rule, stated where it is enforced: a delta
+    /// can add and update posts and nothing else. It cannot see a removal (a
+    /// row that is gone has no `updated_at` to be greater than) and it never
+    /// asks for the roster.
+    func testOnlyTheReconcilingReadCanAnswerADeleteOrAJoin() {
+        XCTAssertFalse(CircleSyncSignal.changed.needsReconcilingRead)
+        XCTAssertTrue(CircleSyncSignal.deleted.needsReconcilingRead)
+        XCTAssertTrue(CircleSyncSignal.rosterChanged.needsReconcilingRead)
+    }
+
     // MARK: - Last call
 
     /// The reminder is suppressed by the prayer you PRAYED, not by the calendar

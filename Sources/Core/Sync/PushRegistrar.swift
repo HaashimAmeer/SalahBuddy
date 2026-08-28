@@ -260,6 +260,44 @@ enum NotifyOutcome: Equatable, Sendable {
     var isFailure: Bool { self == .failed }
 }
 
+// MARK: - The incoming push
+
+/// What an ARRIVING §6 push is about.
+///
+/// The rawValues are the three `kind` strings `notify` writes into the payload's
+/// `data` block, and `buildAPNsPayload` spreads that block BESIDE `aps` — so
+/// each one arrives as a plain top-level key in the notification's `userInfo`.
+///
+/// **This is the only field read off a remote payload, and that is a rule
+/// rather than an oversight.** `data` also carries `postId`, `userId`, `dayKey`
+/// and `prayer`, and every one of them is ignored. A push means exactly what a
+/// realtime event means (`CircleSyncSignal`): something over there changed, ask
+/// — never here is the change. The pull is the one data path, because it is the
+/// only thing that asks the server, through RLS, what actually happened.
+enum PushKind: String, Equatable, Sendable, CaseIterable {
+    case post
+    case join
+    case nudge
+
+    /// The key `notify`'s `data` block spells it under.
+    static let payloadKey: String = "kind"
+
+    /// Pure, and on a type with no actor of its own — for the reason
+    /// `PushRegistrar.hexToken` is `nonisolated`: the notification-centre
+    /// callbacks are not guaranteed to arrive on the main actor, and a
+    /// `[AnyHashable: Any]` is not `Sendable`, so the crossing has to carry
+    /// this value, decoded on the near side.
+    ///
+    /// An absent or unrecognised kind is nil rather than a default: a later
+    /// build's push — or a notification that is not ours at all — must not be
+    /// read as one of these three.
+    init?(userInfo: [AnyHashable: Any]) {
+        guard let raw: String = userInfo[PushKind.payloadKey] as? String,
+              let kind: PushKind = PushKind(rawValue: raw) else { return nil }
+        self = kind
+    }
+}
+
 // MARK: - Seams
 
 /// Everything `PushRegistrar` needs from the network, and nothing else.
@@ -392,6 +430,21 @@ final class PushRegistrar {
     /// today — it exists so a developer card can, and so a failure is not
     /// swallowed silently.
     private(set) var lastFailure: CircleError?
+
+    /// The last push this device was HANDED. Same reason as `lastFailure`: a
+    /// developer card can show it, and a test can see a receipt land without
+    /// having to wire the hook below.
+    private(set) var lastReceived: PushKind?
+
+    /// Where an arriving push goes.
+    ///
+    /// Nil is "nobody is listening" — the honest state before `CircleStack` has
+    /// built the sync engine, and in every test that does not care. The app
+    /// wires it to `CircleSync.signalArrived`, which is the SAME door realtime
+    /// knocks on, deliberately: a push and a `postgres_changes` event mean the
+    /// identical thing to this app, and two doors would be two places for the
+    /// debounce, the offline guard and the delta/full decision to drift apart.
+    var onRemoteNotification: (@MainActor (PushKind) -> Void)?
 
     /// There is somewhere for a push to come from. Sending is not receiving, so
     /// this deliberately does NOT ask whether notifications are authorised: a
@@ -637,6 +690,27 @@ final class PushRegistrar {
         } catch {
             lastFailure = CircleError.from(error)
         }
+    }
+
+    // MARK: - Receiving (SPEC-V4 §6)
+
+    /// A remote notification was DELIVERED to this device — presented while the
+    /// app was open, or tapped from the lock screen. Both arrive through
+    /// `AppDelegate`, which is the only place iOS hands either one over.
+    ///
+    /// v4 Phase D FIX: until this existed the `kind` in every push's payload was
+    /// read by nobody. `AppDelegate` implemented `willPresent` — how to draw the
+    /// banner — and threw the payload away, so a push was a banner and nothing
+    /// else: the phone was told a friend had joined and did not go and look.
+    ///
+    /// Deliberately NOT gated on `isInRealCircle`. A push for a circle this
+    /// device has just left costs exactly one signal, and `CircleSync.pull`
+    /// already refuses to do anything without a live circle — whereas gating
+    /// here would put a race between the registrar learning about a circle and
+    /// the first push about it.
+    func remoteNotificationArrived(_ kind: PushKind) {
+        lastReceived = kind
+        onRemoteNotification?(kind)
     }
 
     // MARK: - notify (SPEC-V4 §6)

@@ -724,4 +724,86 @@ final class PushRegistrarTests: XCTestCase {
         XCTAssertTrue(remote.contains(.banner))
         XCTAssertTrue(remote.contains(.sound))
     }
+
+    // MARK: - Receiving a push (v4 Phase D)
+
+    /// The three payloads `notify` actually builds, verbatim.
+    ///
+    /// `buildAPNsPayload` spreads its `data` block BESIDE `aps`, so `kind`
+    /// arrives as a top-level key — and if that ever stops being true this is
+    /// the test that says so, because everything downstream reads exactly one
+    /// field and would otherwise just fall silent.
+    func testTheThreeNotifyPayloadsDecodeToTheirKind() {
+        // Every key but `kind` is here to be IGNORED — that is the point of the
+        // fixtures being the real shapes rather than one-key dictionaries.
+        let circle: String = friend.uuidString
+        let post: [AnyHashable: Any] = [
+            "aps": ["alert": ["title": "📸 Amira", "body": "posted first for Fajr"]],
+            "kind": "post", "circleId": circle, "postId": postID.uuidString,
+            "userId": me.uuidString, "dayKey": monday, "prayer": "fajr",
+        ]
+        let join: [AnyHashable: Any] = [
+            "aps": ["alert": ["title": "SalahBuddy", "body": "Yusuf joined your circle"]],
+            "kind": "join", "circleId": circle, "userId": me.uuidString,
+        ]
+        let nudge: [AnyHashable: Any] = [
+            "aps": ["alert": ["title": "Amira", "body": "nudged you for Asr"]],
+            "kind": "nudge", "circleId": circle, "fromUserId": me.uuidString,
+            "dayKey": monday, "prayer": "asr",
+        ]
+
+        XCTAssertEqual(PushKind(userInfo: post), .post)
+        XCTAssertEqual(PushKind(userInfo: join), .join)
+        XCTAssertEqual(PushKind(userInfo: nudge), .nudge)
+    }
+
+    /// Anything else is nil, not a default. A later build's push, and a
+    /// notification that is not ours at all, must not be read as one of three.
+    func testAnUnknownOrAbsentKindIsNotGuessedAt() {
+        XCTAssertNil(PushKind(userInfo: [:]))
+        XCTAssertNil(PushKind(userInfo: ["aps": ["alert": "hello"]]))
+        XCTAssertNil(PushKind(userInfo: ["kind": "circleDissolved"]))
+        XCTAssertNil(PushKind(userInfo: ["kind": 7]), "a non-string kind is not a kind")
+        XCTAssertNil(PushKind(userInfo: ["kind": "Join"]), "the rawValues are exact")
+    }
+
+    /// A LOCAL notification can never make the app talk to the network, even if
+    /// something in its payload happens to spell `kind`. The same division
+    /// `presentationOptions` draws, drawn again where it decides something else.
+    func testALocalNotificationNeverSignalsTheCircle() {
+        let payload: [AnyHashable: Any] = ["kind": "join"]
+        XCTAssertEqual(AppDelegate.receivedKind(remote: true, userInfo: payload), .join)
+        XCTAssertNil(AppDelegate.receivedKind(remote: false, userInfo: payload))
+    }
+
+    /// v4 Phase D REGRESSION: a receipt used to go nowhere. `AppDelegate`
+    /// implemented `willPresent` — how to draw the banner — and threw the
+    /// payload away, so the phone was told a friend had joined and did not go
+    /// and look. This is the hook `CircleStack` points at `CircleSync`.
+    func testAReceivedPushReachesTheHookThatSignalsTheSyncEngine() {
+        let rig: Rig = makeRig()
+        var seen: [PushKind] = []
+        rig.push.onRemoteNotification = { kind in seen.append(kind) }
+
+        rig.push.remoteNotificationArrived(.join)
+        rig.push.remoteNotificationArrived(.post)
+
+        XCTAssertEqual(seen, [.join, .post])
+        XCTAssertEqual(rig.push.lastReceived, .post)
+    }
+
+    /// And it is NOT gated on there being a live circle here: `CircleSync.pull`
+    /// already refuses to do anything without one, whereas a guard at this end
+    /// would race the registrar learning about a circle against the first push
+    /// about it.
+    func testAReceiptIsNotGatedOnThisDeviceKnowingAboutACircle() {
+        let rig: Rig = makeRig()
+        XCTAssertFalse(rig.push.isInRealCircle)
+        var seen: Int = 0
+        rig.push.onRemoteNotification = { _ in seen += 1 }
+
+        rig.push.remoteNotificationArrived(.join)
+
+        XCTAssertEqual(seen, 1)
+    }
 }

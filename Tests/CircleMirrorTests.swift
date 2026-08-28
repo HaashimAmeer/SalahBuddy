@@ -38,7 +38,7 @@ private final class MirrorTransport: CircleSyncTransport {
     }
 
     func startRealtime(circleID: UUID,
-                       onEvent: @escaping @Sendable @MainActor (CircleRealtimeEvent) -> Void) async -> Bool {
+                       onEvent: @escaping @Sendable @MainActor (CircleSyncSignal) -> Void) async -> Bool {
         true
     }
 
