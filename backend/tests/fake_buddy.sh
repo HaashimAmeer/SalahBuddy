@@ -191,6 +191,23 @@ load_state() {
     || die_unusable_state
 }
 
+# Read the file WITHOUT committing to it, for the two commands that have to say
+# something about the buddy on disk BEFORE they touch anything: `join` (which
+# must not walk you through a confirmation it was never going to honour) and
+# `new` (which must not silently forget a code). Empty output means load_state
+# refused — a subshell contains both that exit and the syntax error a
+# truncated file can be, which bash 3.2 otherwise takes the whole script down
+# with. (`forget` still sources by hand: its whole job is a file load_state
+# refuses, so it must not be gated on load_state accepting one.)
+#
+# Field order is id, code, name: the two that cannot hold a space first — a uuid
+# and six characters from a fixed alphabet — and the display name, which can,
+# last. The printf always emits its two separators, so an empty result can only
+# mean the read failed, never "all three fields were blank".
+peek_state() {
+  ( load_state >/dev/null 2>&1; printf '%s %s %s' "$CIRCLE_ID" "$CIRCLE_CODE" "$BUDDY_NAME" )
+}
+
 # Access tokens expire (1h by default), so every command re-signs in rather
 # than trusting the stored one. A stale JWT fails as 401 PGRST301, which reads
 # like an RLS refusal and would send you debugging the wrong thing entirely.
@@ -264,11 +281,73 @@ ensure_buddy() { # display-name
   fi
 }
 
+# The one thing `new` can cost you, and the only fork in it. `leave` keeps the
+# invite code of a circle of the buddy's OWN and calls this file the copy of
+# record for it — true, and the reason it must not be overwritten quietly.
+confirm_drop_code() { # invite-code about to be forgotten
+  local code="$1" typed=""
+  # Printed before every branch below, including the two that do not ask: the
+  # code IS the thing being lost, so the refusal has to be where you can still
+  # rescue it. (`join`'s confirmation returns early instead — there, the early
+  # exit costs nothing but a paragraph.)
+  echo "! This buddy left a circle of their OWN, and its code is remembered here:"
+  echo
+  echo "    $code"
+  echo
+  echo "  A new circle overwrites that, and nothing can hand the code back: they"
+  echo "  are not in that circle any more, so RLS hides the row from them and from"
+  echo "  you, and circles have no DELETE policy. It becomes unreachable for good."
+  echo "  To walk back into it instead, stop here and run:"
+  echo "      $0 join $code"
+  echo
+  if [ "${FAKE_BUDDY_ASSUME_YES:-}" = "1" ]; then
+    echo "note: FAKE_BUDDY_ASSUME_YES=1 — letting $code go and making a fresh circle"
+    return 0
+  fi
+  [ -t 0 ] || die "refusing to forget $code with no terminal to confirm on — it is
+     written above; save it, then set FAKE_BUDDY_ASSUME_YES=1 if you mean it"
+  printf 'Type the code back to confirm you have it (or are letting it go): '
+  # `|| typed=""` so a Ctrl-D lands on the refusal below rather than on `set -e`,
+  # which would take the script down with no message at all. Empty never matches.
+  read -r typed || typed=""
+  typed="$(printf '%s' "$typed" | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]')"
+  [ "$typed" = "$code" ] \
+    || die "that did not match — nothing was created, and $code is still remembered"
+}
+
 cmd_new() {
+  # Before a signup, not after: a remembered code belongs to a circle of their
+  # OWN that `leave` deliberately kept, and creating a second one drops it. This
+  # is the same size of one-way door `join` asks about, so it asks too — and it
+  # only comes up when there is a code to lose, which the ordinary `new` (no
+  # state file, or one whose circle was YOURS) never has.
+  if [ -f "$STATE" ]; then
+    local prior="" rest="" prior_circle="" prior_code=""
+    prior="$(peek_state)" || prior=""
+    [ -n "$prior" ] || die_unusable_state
+    prior_circle="${prior%% *}"; rest="${prior#* }"; prior_code="${rest%% *}"
+    # A circle they are still sitting IN is ensure_buddy's refusal, not ours —
+    # and it keeps the code, so there is nothing to rescue on that path.
+    [ -n "$prior_circle" ] || [ -z "$prior_code" ] || confirm_drop_code "$prior_code"
+  fi
+
   ensure_buddy "${1:-Test Buddy}"
 
+  # The name is built in a variable rather than written inline, and not for
+  # readability. An apostrophe inside a double-quoted string inside "$( )"
+  # inside a double-quoted word is the exact shape bash 3.2 — the /bin/bash
+  # every Mac ships, and what the shebang finds on any Mac without Homebrew —
+  # loses the quoting state on. It reads the rest of the word as UNQUOTED,
+  # brace-expands `{p_name:$n,p_emoji:"🧪"}` into two words, runs jq twice on
+  # two halves that are not filters, and hands api() an empty body — a
+  # create_circle with no arguments, which coalesces to its defaults and yields
+  # a circle called "Your Circle" that looks like a real one on the Circle tab.
+  # bash 5 parses the same line correctly, which is the only reason it survived
+  # a review. Same trick as q()'s `esc`, for the same version and the same
+  # reason: keep the awkward character out of the compound word.
+  local cname="$BUDDY_NAME's test circle"
   api POST "/rest/v1/rpc/create_circle" "$JWT" \
-    "$(jq -nc --arg n "$BUDDY_NAME's test circle" '{p_name:$n,p_emoji:"🧪"}')"
+    "$(jq -nc --arg n "$cname" '{p_name:$n,p_emoji:"🧪"}')"
   CIRCLE_ID="$(row id)"; CIRCLE_CODE="$(row code)"
   [ -n "$CIRCLE_ID" ] \
     || die "create_circle failed (HTTP $CODE): $(jqr '.message // .msg // "unknown"')"
@@ -300,10 +379,15 @@ cmd_new() {
 }
 
 # The one command that reaches into a circle with real people in it.
-confirm_join() { # invite-code display-name
-  local invite="$1" name="$2" typed=""
+#
+# `name` is the name that will actually LAND on the roster, which is not always
+# the one the operator typed — see cmd_join. The whole job of this prompt is
+# telling them what real people are about to see, so resolving that is the
+# caller's, and it passes the ignored one along to be said out loud.
+confirm_join() { # invite-code name-as-it-will-appear [name-argument-being-ignored]
+  local invite="$1" name="$2" ignored="${3:-}" typed=""
   if [ "${FAKE_BUDDY_ASSUME_YES:-}" = "1" ]; then
-    echo "note: FAKE_BUDDY_ASSUME_YES=1 — joining $invite without asking"
+    echo "note: FAKE_BUDDY_ASSUME_YES=1 — joining $invite as '$name' without asking"
     return 0
   fi
   # No terminal means nobody is reading the warning, and a `read` on a closed
@@ -314,19 +398,26 @@ confirm_join() { # invite-code display-name
   echo "into the circle behind code $invite. That is your circle, not a sandbox:"
   echo "they will appear on the roster, on the leaderboard and in the week grid"
   echo "until you run '$0 leave' or '$0 cleanup'."
+  if [ -n "$ignored" ]; then
+    echo
+    echo "('$ignored' is NOT what they will be called. There is already an account"
+    echo "on disk between circles, and this reuses it rather than minting another"
+    echo "permanent auth.users row nothing here can delete — so it keeps its own"
+    echo "name. To land as '$ignored', run '$0 cleanup' first.)"
+  fi
   echo
   echo "If you only need a second member to test against, '$0 new' makes them a"
   echo "circle of their own and touches nothing of yours."
   echo
   printf 'Type the code again to go ahead, anything else to stop: '
-  read -r typed
+  read -r typed || typed=""   # Ctrl-D refuses out loud instead of tripping `set -e`
   typed="$(printf '%s' "$typed" | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]')"
   [ "$typed" = "$invite" ] \
     || die "that did not match — no account was created and no circle was joined"
 }
 
 cmd_join() {
-  local invite="${1:-}" name="${2:-Test Buddy}"
+  local invite="${1:-}" requested="${2:-}" name="${2:-Test Buddy}"
   [ -n "$invite" ] || die "usage: $0 join <INVITE_CODE> [display-name]
      No code means no circle to join. For a buddy in a circle of their own
      (the usual thing you want), run: $0 new"
@@ -340,21 +431,33 @@ cmd_join() {
 
   # Order matters: shape, then the state check, then the confirmation, and only
   # then a signup. Every way of saying no must leave nothing behind.
-  local prior="" prior_circle="" prior_code="" reentry=false
+  local prior="" rest="" prior_circle="" prior_code="" prior_name="" reentry=false
   if [ -f "$STATE" ]; then
-    # Read it in a subshell: load_state refuses a half-written file, and this
-    # command has to be able to answer for itself rather than inherit that exit
-    # before it has said anything. Neither field can contain a space — a uuid
-    # and six characters from a fixed alphabet — so one line carries both.
-    prior="$( load_state >/dev/null 2>&1; printf '%s %s' "$CIRCLE_ID" "$CIRCLE_CODE" )" || prior=""
-    # The printf always emits at least the separating space, so an empty result
-    # here can only mean load_state refused the file. Say so NOW rather than
-    # after walking someone through a confirmation that was never going to run.
+    prior="$(peek_state)" || prior=""
+    # An empty result can only mean load_state refused the file. Say so NOW
+    # rather than after walking someone through a confirmation that was never
+    # going to run.
     [ -n "$prior" ] || die_unusable_state
-    prior_circle="${prior%% *}"; prior_code="${prior#* }"
+    prior_circle="${prior%% *}"; rest="${prior#* }"
+    prior_code="${rest%% *}";    prior_name="${rest#* }"
     [ -z "$prior_circle" ] \
       || die "there is already a buddy in a circle. '$0 leave' takes them out,
      '$0 cleanup' purges them; then join again."
+  fi
+
+  # What the confirmation promises has to be what real people end up seeing. A
+  # state file that survived the check above means ensure_buddy will REUSE that
+  # account rather than sign up a new one — which is the point, since §6 says
+  # nothing here can delete an auth.users row — and a reused account keeps the
+  # name it already has. The [display-name] argument is not applied to it. So
+  # resolve the effective name before printing it, or the prompt names somebody
+  # who never turns up.
+  local shown="$name" ignored=""
+  if [ -n "$prior_name" ]; then
+    shown="$prior_name"
+    # Only worth mentioning a name the operator actually typed. Saying that the
+    # default "Test Buddy" was ignored, when nobody asked for it, is noise.
+    [ -z "$requested" ] || [ "$requested" = "$shown" ] || ignored="$requested"
   fi
 
   # A code that outlives a `leave` can only be a circle of the buddy's OWN —
@@ -365,7 +468,7 @@ cmd_join() {
     reentry=true
     echo "note: $invite is the circle this buddy already had — going straight back in"
   else
-    confirm_join "$invite" "$name"
+    confirm_join "$invite" "$shown" "$ignored"
   fi
 
   ensure_buddy "$name"
@@ -455,7 +558,8 @@ cmd_status() {
     # one of their own — so this is the copy of record for a circle no server
     # will hand back.
     echo "circle  : none — they left their own, which is still there:"
-    echo "          '$0 join $CIRCLE_CODE' re-enters it, '$0 new' makes a fresh one."
+    echo "          '$0 join $CIRCLE_CODE' re-enters it. '$0 new' makes a fresh one"
+    echo "          and forgets this code, so it asks before it does."
   elif [ -z "$CIRCLE_ID" ]; then
     echo "circle  : none — they left. '$0 new' or '$0 join <CODE>' puts them back in one."
   elif [ "$CIRCLE_OWNED" = "true" ]; then
@@ -609,7 +713,7 @@ cmd_forget() {
   if [ -n "$prompt" ]; then
     local typed=""
     printf '%s' "$prompt"
-    read -r typed
+    read -r typed || typed=""   # Ctrl-D refuses out loud instead of tripping `set -e`
     [ "$typed" = "forget" ] || die "stopped — nothing was changed"
   fi
   rm -f "$STATE"
