@@ -20,7 +20,7 @@
 --
 --     (d) is the one worth being loudest about. delete_account() enumerates
 --     tables by hand and does not delete the auth.users row, so `on delete
---     cascade` covers nothing here: without the replacement in 20260828000100 a
+--     cascade` covers nothing here: without the replacement in 20260828000200 a
 --     deleted account would leave live push addresses behind, and the circle it
 --     left would keep paying to push to a phone whose owner asked to be gone.
 \set ON_ERROR_STOP on

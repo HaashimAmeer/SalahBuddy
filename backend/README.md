@@ -597,7 +597,7 @@ posts. The server's half is three things — a table, a push type, and a topic.
 
 ### The table
 
-`public.live_activity_tokens` (`20260828000100`). It is **its own table and not
+`public.live_activity_tokens` (`20260828000200`). It is **its own table and not
 a column on `devices`**, which is the point §6 makes and worth restating:
 
 - `devices.apns_token` is **stable** — one install, one row, for the life of the

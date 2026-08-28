@@ -235,7 +235,7 @@ export async function claimJoinAnnouncement(
 
 // ------------------------------------------------------- Live Activities (§6)
 
-/// One row of `live_activity_tokens` (20260828000100).
+/// One row of `live_activity_tokens` (20260828000200).
 ///
 /// Shaped so it can be handed to `deliverToDevices` by renaming one field —
 /// `apns_token: row.token` — which is the whole reason the delivery module
