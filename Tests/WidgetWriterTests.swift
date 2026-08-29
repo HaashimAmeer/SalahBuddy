@@ -234,10 +234,22 @@ final class WidgetWriterTests: XCTestCase {
         return (path, window)
     }
 
-    private func style(_ style: WidgetPhotoStyle, on state: AppState) {
+    /// Change the setting the way Settings does, then let the write land.
+    ///
+    /// A settings change publishes on the NEXT runloop turn rather than inside
+    /// the caller's — `SegmentedChoice` assigns inside `withAnimation`, and
+    /// doing two disk writes and a walk of the circle in that transaction is
+    /// what made the control stutter on device. The guarantee these tests care
+    /// about is unchanged (the file moves because the SETTING moved, with no
+    /// prayer, pull or clock involved); it just cannot be observed in the
+    /// statement after the assignment. So await the real task rather than
+    /// sleeping, or adding a synchronous back door that would only prove the
+    /// back door works.
+    private func style(_ style: WidgetPhotoStyle, on state: AppState) async {
         var settings: AppSettings = state.settings
         settings.widgetPhotoStyle = style
         state.settings = settings
+        await state.pendingWidgetPublish?.value
     }
 
     /// §9-02's setting has to reach the file through the PRODUCTION call site,
@@ -246,7 +258,7 @@ final class WidgetWriterTests: XCTestCase {
     /// from `AppState.publishWidgetSnapshot` and every assertion over there
     /// still passes while somebody who asked for no faces on their home screen
     /// keeps getting them.
-    func testTheWidgetPhotoSettingReachesTheFileThroughTheRealWriter() throws {
+    func testTheWidgetPhotoSettingReachesTheFileThroughTheRealWriter() async throws {
         prepareDisk(circleMode: .real)
         let state = AppState()
         let posted = try minaPosts(into: state)
@@ -260,7 +272,7 @@ final class WidgetWriterTests: XCTestCase {
 
         // Names only — applied by the WRITER, so the name is not in the bytes
         // at all rather than being in them and trusted not to be drawn.
-        style(.namesAndTier, on: state)
+        await style(.namesAndTier, on: state)
         let names: WidgetSnapshot = try XCTUnwrap(published())
         XCTAssertEqual(names.photoStyle, .namesAndTier)
         XCTAssertNotNil(names.circle.posts.first { $0.name == "Mina" },
@@ -274,7 +286,7 @@ final class WidgetWriterTests: XCTestCase {
         // Blurred — the RENDERER's, so the name comes back AND the setting
         // travels with it. A pre-blurred file on disk would be the widget-only
         // photo store §7 forbids.
-        style(.blurred, on: state)
+        await style(.blurred, on: state)
         let blurred: WidgetSnapshot = try XCTUnwrap(published())
         XCTAssertEqual(blurred.photoStyle, .blurred)
         XCTAssertEqual(blurred.circle.posts.first { $0.name == "Mina" }?.thumb, key)
@@ -287,14 +299,14 @@ final class WidgetWriterTests: XCTestCase {
     /// windows, and this one does not — so without the publish beside it,
     /// somebody could turn photos off in Settings and watch their home screen
     /// keep showing faces until the next time a friend prayed.
-    func testTurningPhotosOffRewritesTheFileImmediately() throws {
+    func testTurningPhotosOffRewritesTheFileImmediately() async throws {
         prepareDisk(circleMode: .real)
         let state = AppState()
         try minaPosts(into: state)
         let before: WidgetSnapshot = try XCTUnwrap(published())
 
         // Nothing but the setting moves — no log, no pull, no clock.
-        style(.namesAndTier, on: state)
+        await style(.namesAndTier, on: state)
 
         let after: WidgetSnapshot = try XCTUnwrap(published())
         XCTAssertEqual(after.photoStyle, .namesAndTier)
@@ -321,7 +333,7 @@ final class WidgetWriterTests: XCTestCase {
     /// behind the same `circleSync` fence as every other outbound call in
     /// `AppState`, so a unit test reaches no network — which is why the list is
     /// a function of its own.
-    func testTheAppCachesExactlyThePhotosTheFileNames() throws {
+    func testTheAppCachesExactlyThePhotosTheFileNames() async throws {
         prepareDisk(circleMode: .real)
         reporterToRestore = PhotoReports.shared.currentUserID
         PhotoReports.shared.currentUserID = { nil }
@@ -351,7 +363,7 @@ final class WidgetWriterTests: XCTestCase {
         // nothing cached for a tile that will not draw it.
         PhotoReports.shared.forgetHideForTesting(posted.path)
         XCTAssertEqual(state.widgetPhotoPathsToCache(), [posted.path])
-        style(.namesAndTier, on: state)
+        await style(.namesAndTier, on: state)
         XCTAssertEqual(state.widgetPhotoPathsToCache(), [])
     }
 

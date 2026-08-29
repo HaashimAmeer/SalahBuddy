@@ -2185,16 +2185,20 @@ final class AppState: ObservableObject {
     /// prayer being logged still publishes synchronously: that file IS the
     /// result there, and the work is dwarfed by what logging already does.
     private func scheduleWidgetPublish() {
-        guard !widgetPublishScheduled else { return }
-        widgetPublishScheduled = true
-        Task { @MainActor [weak self] in
+        guard pendingWidgetPublish == nil else { return }
+        pendingWidgetPublish = Task { @MainActor [weak self] in
             guard let self else { return }
-            self.widgetPublishScheduled = false
+            self.pendingWidgetPublish = nil
             self.publishWidgetSnapshot()
         }
     }
 
-    private var widgetPublishScheduled: Bool = false
+    /// The publish waiting for the next runloop turn, if any.
+    ///
+    /// Readable so a test can await the REAL mechanism — `await
+    /// state.pendingWidgetPublish?.value` — instead of sleeping and hoping, or
+    /// being handed a synchronous back door that proves the back door works.
+    private(set) var pendingWidgetPublish: Task<Void, Never>?
 
     func publishWidgetSnapshot(reloadTimelines: Bool = false) {
         let now: Date = AppClock.now
