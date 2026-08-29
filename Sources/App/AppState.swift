@@ -54,7 +54,18 @@ final class AppState: ObservableObject {
             // moves nothing the home screen shows costs a build and no disk,
             // and this way the NEXT field that reaches the file cannot be
             // forgotten here.
-            publishWidgetSnapshot()
+            //
+            // COALESCED, not immediate. A settings write is usually a TAP —
+            // `SegmentedChoice` sets the binding inside `withAnimation`, so
+            // everything this `didSet` does synchronously happens inside that
+            // animation's transaction. Publishing there means a walk of every
+            // circle member for photo paths plus a second JSON encode and disk
+            // write (`widget.json`, in the group container) before the spring
+            // can draw its first frame — which reads on device as the photo /
+            // blurred / names control not switching cleanly. Same family as
+            // the double-animation sweep in 770a4a8. Nothing on a home screen
+            // needs the file one frame sooner.
+            scheduleWidgetPublish()
             // Reschedule stays unconditional: the notification TOGGLES are
             // themselves a reason to requeue, and this only starts a Task.
             NotificationManager.shared.reschedule()
@@ -2166,6 +2177,25 @@ final class AppState: ObservableObject {
     /// (backgrounding, in `RootView`). Writing is cheap; a reload is rationed —
     /// §5-A's budget is ~40–70 a day — and while the app is on screen the
     /// widget behind it has nothing to show anybody.
+    /// `publishWidgetSnapshot`, off the current runloop turn and collapsed to
+    /// one call however many times it is asked for in that turn.
+    ///
+    /// For the paths where the publish is a SIDE EFFECT of something the person
+    /// is looking at — a settings toggle — rather than the point of it. A
+    /// prayer being logged still publishes synchronously: that file IS the
+    /// result there, and the work is dwarfed by what logging already does.
+    private func scheduleWidgetPublish() {
+        guard !widgetPublishScheduled else { return }
+        widgetPublishScheduled = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.widgetPublishScheduled = false
+            self.publishWidgetSnapshot()
+        }
+    }
+
+    private var widgetPublishScheduled: Bool = false
+
     func publishWidgetSnapshot(reloadTimelines: Bool = false) {
         let now: Date = AppClock.now
         let carryOver: (window: PrayerWindow, dayKey: String)? = liveCarryOverIsha()

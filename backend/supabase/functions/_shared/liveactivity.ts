@@ -74,18 +74,29 @@ export interface LiveActivityAttributes extends Record<string, unknown> {
   dayKey: string;
   /// Seconds since 1970. See the module note on why nothing here is a date.
   endsAt: number;
+  /// Seconds since 1970, when the window OPENED. Optional: the client decodes
+  /// a missing one as 0 and draws no progress bar, which is the honest answer
+  /// — a bar needs both ends. Send it whenever the caller knows it.
+  opensAt?: number;
 }
 
 export function buildLiveActivityAttributes(opts: {
   prayer: string;
   dayKey: string;
   endsAtSeconds: number;
+  opensAtSeconds?: number;
 }): LiveActivityAttributes {
-  return {
+  const attributes: LiveActivityAttributes = {
     prayer: opts.prayer,
     dayKey: opts.dayKey,
     endsAt: Math.floor(opts.endsAtSeconds),
   };
+  // Omitted rather than zeroed when unknown: the field is optional on both
+  // sides, and a 0 would mean "opened in 1970" to a client that trusted it.
+  if (opts.opensAtSeconds !== undefined && opts.opensAtSeconds > 0) {
+    attributes.opensAt = Math.floor(opts.opensAtSeconds);
+  }
+  return attributes;
 }
 
 export function buildLiveActivityContentState(opts: {

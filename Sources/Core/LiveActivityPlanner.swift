@@ -46,7 +46,8 @@ enum LiveActivityPlanner {
         guard let window = snapshot.window else { return nil }
         return PrayerWindowAttributes(prayer: window.prayer,
                                       dayKey: window.dayKey,
-                                      endsAt: window.endsAt)
+                                      endsAt: window.endsAt,
+                                      opensAt: window.opensAt)
     }
 
     /// The moving half.

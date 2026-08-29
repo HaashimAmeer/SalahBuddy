@@ -55,15 +55,33 @@ struct PrayerWindowAttributes: ActivityAttributes, Equatable {
     var prayer: Prayer? { Prayer(rawValue: prayerRaw) }
     var endsAtDate: Date { Date(timeIntervalSince1970: endsAt) }
 
-    init(prayerRaw: String, dayKey: String, endsAt: Double) {
+    /// Seconds since 1970. When the window OPENED — the other end of the bar.
+    ///
+    /// Defaulted rather than required: an activity started by a build before
+    /// this field existed, or by a server that does not send it, decodes to 0.
+    /// Every reader goes through `span`, which is nil in that case, and the
+    /// Lock Screen simply draws no progress bar. A bar running from 1970 would
+    /// be worse than no bar.
+    var opensAt: Double = 0
+
+    /// The window as a range, or nil when this activity predates `opensAt` or
+    /// carries a nonsensical one.
+    var span: ClosedRange<Date>? {
+        guard opensAt > 0, endsAt > opensAt else { return nil }
+        return Date(timeIntervalSince1970: opensAt) ... endsAtDate
+    }
+
+    init(prayerRaw: String, dayKey: String, endsAt: Double, opensAt: Double = 0) {
         self.prayerRaw = prayerRaw
         self.dayKey = dayKey
         self.endsAt = endsAt
+        self.opensAt = opensAt
     }
 
-    init(prayer: Prayer, dayKey: String, endsAt: Date) {
+    init(prayer: Prayer, dayKey: String, endsAt: Date, opensAt: Date? = nil) {
         self.init(prayerRaw: prayer.rawValue, dayKey: dayKey,
-                  endsAt: endsAt.timeIntervalSince1970)
+                  endsAt: endsAt.timeIntervalSince1970,
+                  opensAt: opensAt?.timeIntervalSince1970 ?? 0)
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -73,6 +91,7 @@ struct PrayerWindowAttributes: ActivityAttributes, Equatable {
         case prayerRaw = "prayer"
         case dayKey
         case endsAt
+        case opensAt
     }
 
     init(from decoder: Decoder) throws {
@@ -80,6 +99,7 @@ struct PrayerWindowAttributes: ActivityAttributes, Equatable {
         prayerRaw = (try? c.decodeIfPresent(String.self, forKey: .prayerRaw)) ?? ""
         dayKey = (try? c.decodeIfPresent(String.self, forKey: .dayKey)) ?? ""
         endsAt = (try? c.decodeIfPresent(Double.self, forKey: .endsAt)) ?? 0
+        opensAt = (try? c.decodeIfPresent(Double.self, forKey: .opensAt)) ?? 0
     }
 
     /// One person who has prayed this window.

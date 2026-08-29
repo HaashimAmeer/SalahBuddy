@@ -70,6 +70,18 @@ final class LiveActivityController {
     /// ActivityKit having to be real.
     private(set) var lastPlan: LiveActivityPlanner.Plan = .none
 
+    /// The effect currently in flight, if any — every plan chains onto it.
+    ///
+    /// `apply` is called from five places (`persist`, `persistProfile`,
+    /// `applyCircleSnapshot`, `refresh`, `sendNudge`) and each effect is a
+    /// `Task`, so without this two publishes landing in the same runloop turn
+    /// BOTH read `activity == nil`, both plan `.start`, and the Lock Screen
+    /// ends up with two identical countdowns for one window — the second of
+    /// which owns the token the server pushes to, orphaning the first.
+    /// Observed on device 2026-08-29. Serialising is the whole fix: the second
+    /// plan is computed after the first has stored its activity.
+    private var effect: Task<Void, Never>?
+
     /// Whether the person has Live Activities turned on for this app. iOS lets
     /// them off in Settings, and `Activity.request` throws when they are —
     /// asking first turns a thrown error on every publish into one check.
@@ -103,25 +115,32 @@ final class LiveActivityController {
     /// swallows its own failures. An activity that fails to start is a surface
     /// that is not there, which is exactly what the person had a second ago.
     func apply(snapshot: WidgetSnapshot?, now: Date) {
-        let running: LiveActivityPlanner.Running? = activity.map {
-            LiveActivityPlanner.Running(attributes: $0.attributes, state: $0.content.state)
-        }
-        let plan: LiveActivityPlanner.Plan =
-            LiveActivityPlanner.plan(snapshot: snapshot, running: running, now: now)
-        lastPlan = plan
-        switch plan {
-        case .none:
-            return
-        case .start(let attributes, let state):
-            Task { await start(attributes: attributes, state: state) }
-        case .update(let state):
-            Task { await update(to: state) }
-        case .end:
-            Task { await end() }
-        case .restart(let attributes, let state):
-            Task {
-                await end()
-                await start(attributes: attributes, state: state)
+        // The plan is computed INSIDE the chained task, not here: computing it
+        // now would read an `activity` that a still-running effect is about to
+        // set, which is exactly the race that put two Maghribs on one Lock
+        // Screen.
+        let previous: Task<Void, Never>? = effect
+        effect = Task { [weak self] in
+            await previous?.value
+            guard let self else { return }
+            let running: LiveActivityPlanner.Running? = self.activity.map {
+                LiveActivityPlanner.Running(attributes: $0.attributes, state: $0.content.state)
+            }
+            let plan: LiveActivityPlanner.Plan =
+                LiveActivityPlanner.plan(snapshot: snapshot, running: running, now: now)
+            self.lastPlan = plan
+            switch plan {
+            case .none:
+                return
+            case .start(let attributes, let state):
+                await self.start(attributes: attributes, state: state)
+            case .update(let state):
+                await self.update(to: state)
+            case .end:
+                await self.end()
+            case .restart(let attributes, let state):
+                await self.end()
+                await self.start(attributes: attributes, state: state)
             }
         }
     }

@@ -100,37 +100,111 @@ enum ActivityCopy {
 
 // MARK: - Lock Screen
 
+/// The Lock Screen presentation.
+///
+/// Built to hold the space a Live Activity is given rather than to be small in
+/// it: the surface a person glances at from across a room should read in one
+/// look, the way a ride-hailing ETA or a streak reminder does. Three bands —
+/// who and how long, the window draining, and where the circle stands.
+///
+/// **The countdown is the hero.** It is the only number that matters at a
+/// glance, so it gets the size, and `Text(timerInterval:)` keeps it ticking
+/// while the process sleeps (§4: no self-driven timers).
+///
+/// **The bar is system-driven too.** `ProgressView(timerInterval:)` empties
+/// itself over the window with no content-state updates at all — so between
+/// pushes the surface is still alive, which is the difference between this and
+/// a card that freezes the moment a friend last prayed. It is drawn for a solo
+/// person as well; the old layout hid the track whenever there was no circle,
+/// which is exactly how a solo Lock Screen ended up as three short lines.
 private struct LockScreenActivityView: View {
     let attributes: PrayerWindowAttributes
     let state: PrayerWindowAttributes.ContentState
 
     var body: some View {
-        HStack(alignment: .center, spacing: 14) {
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
-                    Text(attributes.prayer?.emoji ?? "🕌")
-                        .font(.system(size: 16))
-                    Text(ActivityCopy.title(attributes))
-                        .font(Theme.sans(18, .bold))
-                        .foregroundStyle(WidgetTheme.ink)
+        VStack(alignment: .leading, spacing: 10) {
+            header
+            countdownRow
+            if let span: ClosedRange<Date> = attributes.span {
+                ProgressView(timerInterval: span, countsDown: true) {
+                    EmptyView()
+                } currentValueLabel: {
+                    EmptyView()
                 }
-                CountdownText(endsAt: attributes.endsAtDate)
-                    .font(Theme.sans(13, .medium))
+                .progressViewStyle(.linear)
+                .tint(WidgetTheme.accent)
+                .frame(height: 6)
+            }
+            footer
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+    }
+
+    /// Prayer name at title weight, and the standing as a filled chip on the
+    /// right — a chip rather than a third line of text because it is the one
+    /// thing that CHANGES as the circle prays, and it should catch the eye.
+    private var header: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(attributes.prayer?.emoji ?? "🕌")
+                .font(.system(size: 22))
+            Text(ActivityCopy.title(attributes))
+                .font(Theme.sans(24, .bold))
+                .foregroundStyle(WidgetTheme.ink)
+            Spacer(minLength: 6)
+            StandingChip(state: state)
+        }
+    }
+
+    /// The hero: how long is left, with the closing time under it so the
+    /// countdown has something absolute to sit against.
+    private var countdownRow: some View {
+        HStack(alignment: .lastTextBaseline, spacing: 8) {
+            CountdownText(endsAt: attributes.endsAtDate)
+                .font(Theme.sans(40, .bold))
+                .foregroundStyle(WidgetTheme.ink)
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+            Text("left")
+                .font(Theme.sans(15, .semibold))
+                .foregroundStyle(WidgetTheme.inkMuted)
+            Spacer(minLength: 0)
+        }
+    }
+
+    /// Who has prayed, or — when there is nobody else — the closing time, so
+    /// the band is never empty.
+    private var footer: some View {
+        HStack(spacing: 8) {
+            if state.faces.isEmpty {
+                Text("Closes \(attributes.endsAtDate.formatted(date: .omitted, time: .shortened))")
+                    .font(Theme.sans(13, .semibold))
                     .foregroundStyle(WidgetTheme.inkMuted)
-                Text(ActivityCopy.count(state))
-                    .font(Theme.sans(15, .semibold))
-                    .foregroundStyle(WidgetTheme.ink)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-                if !state.isSolo {
-                    CountTrack(progress: state.progress)
-                        .padding(.top, 2)
-                }
+            } else {
+                FaceStack(faces: state.faces, youLogged: state.youLogged)
             }
             Spacer(minLength: 0)
-            FaceStack(faces: state.faces, youLogged: state.youLogged)
         }
-        .padding(.horizontal, 4)
+    }
+}
+
+/// "3 of 5 prayed" / "Not yet", as a filled pill.
+private struct StandingChip: View {
+    let state: PrayerWindowAttributes.ContentState
+
+    private var isDone: Bool { state.isSolo ? state.youLogged : state.prayedCount > 0 }
+
+    var body: some View {
+        Text(ActivityCopy.count(state))
+            .font(Theme.sans(14, .bold))
+            .foregroundStyle(isDone ? WidgetTheme.ground : WidgetTheme.ink)
+            .lineLimit(1)
+            .minimumScaleFactor(0.75)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 5)
+            .background(isDone ? WidgetTheme.accent : WidgetTheme.accentSoft,
+                        in: Capsule(style: .continuous))
     }
 }
 

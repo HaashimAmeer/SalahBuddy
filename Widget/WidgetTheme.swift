@@ -39,6 +39,10 @@ enum WidgetTheme {
     /// action, lifted in dark so it holds against the deep ground.
     static let accent: Color = pair(light: Theme.green, dark: Color(hex: 0x54D392))
 
+    /// The accent at rest — the fill behind a chip that has NOT happened yet,
+    /// where solid `accent` would claim the prayer was already prayed.
+    static let accentSoft: Color = pair(light: Theme.greenSoft, dark: Color(hex: 0x1D3D30))
+
     /// XP/streak gold, and nothing else — same rule as in the app.
     static let gold: Color = pair(light: Theme.gold, dark: Color(hex: 0xF7C548))
 
