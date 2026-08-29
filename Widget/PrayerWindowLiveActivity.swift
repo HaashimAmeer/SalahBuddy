@@ -122,7 +122,7 @@ private struct LockScreenActivityView: View {
     let state: PrayerWindowAttributes.ContentState
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 6) {
             header
             countdownRow
             if let span: ClosedRange<Date> = attributes.span {
@@ -133,41 +133,52 @@ private struct LockScreenActivityView: View {
                 }
                 .progressViewStyle(.linear)
                 .tint(WidgetTheme.accent)
-                .frame(height: 6)
+                .frame(height: 4)
             }
             footer
         }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 2)
+        .padding(.horizontal, 4)
+        // The Lock Screen gives this presentation a BUDGET (~160pt), and a view
+        // that exceeds it is not scaled to fit — it is pushed up under the
+        // status bar, where it collides with the clock and the battery. Seen on
+        // device with the first cut of this layout: an Isha window is five and
+        // a half hours, so the countdown reads "5:42:53" rather than the
+        // "31:39" the design was drawn against, and the whole card grew.
+        .frame(maxHeight: 108, alignment: .top)
     }
 
     /// Prayer name at title weight, and the standing as a filled chip on the
     /// right — a chip rather than a third line of text because it is the one
     /// thing that CHANGES as the circle prays, and it should catch the eye.
     private var header: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
+        HStack(alignment: .firstTextBaseline, spacing: 7) {
             Text(attributes.prayer?.emoji ?? "🕌")
-                .font(.system(size: 22))
+                .font(.system(size: 17))
             Text(ActivityCopy.title(attributes))
-                .font(Theme.sans(24, .bold))
+                .font(Theme.sans(19, .bold))
                 .foregroundStyle(WidgetTheme.ink)
             Spacer(minLength: 6)
             StandingChip(state: state)
         }
     }
 
-    /// The hero: how long is left, with the closing time under it so the
-    /// countdown has something absolute to sit against.
+    /// The hero: how long is left.
+    ///
+    /// **No `minimumScaleFactor` here, deliberately.** This text re-renders
+    /// every second, and a scale factor is recomputed on each render — so a
+    /// countdown that is even slightly too wide visibly resizes once a second.
+    /// That is what "tweaking" looked like on device. The font is sized so the
+    /// longest string the system can produce (`H:MM:SS`, for a five-hour Isha)
+    /// fits outright, which is the only stable answer.
     private var countdownRow: some View {
-        HStack(alignment: .lastTextBaseline, spacing: 8) {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
             CountdownText(endsAt: attributes.endsAtDate)
-                .font(Theme.sans(40, .bold))
+                .font(Theme.sans(30, .bold))
                 .foregroundStyle(WidgetTheme.ink)
                 .monospacedDigit()
                 .lineLimit(1)
-                .minimumScaleFactor(0.6)
             Text("left")
-                .font(Theme.sans(15, .semibold))
+                .font(Theme.sans(13, .semibold))
                 .foregroundStyle(WidgetTheme.inkMuted)
             Spacer(minLength: 0)
         }
