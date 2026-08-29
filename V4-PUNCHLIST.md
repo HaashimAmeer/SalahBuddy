@@ -333,18 +333,30 @@ with push-to-start, the nudge button, and the Control Center control.
 Suites after merge: see the counts line in §7's tail. Backend: 32 SQL,
 147 Deno.
 
-**⚠️ TestFlight is BLOCKED until the portal steps land.** Simulator builds and
-every CI check stay green without them — which is exactly why nothing red will
-remind you. In one portal session (team 852AXZ2B57):
+**✅ The portal steps are DONE (2026-08-29).** Recorded because the failure they
+caused is a convincing impostor: Xcode Cloud runs #27/#28/#29 all died at
+`** EXPORT FAILED **` with "No profiles for …" — while `Test - iOS` passed and
+the `.xcarchive` built fine. Nothing was wrong with the code.
 
-- [ ] App ID `org.amacvoters.salahbuddymock`: enable **App Groups** (register
-      + assign `group.org.amacvoters.salahbuddymock`) and **Keychain Sharing**.
-- [ ] NEW App ID `org.amacvoters.salahbuddymock.widget`: App Groups (same
-      group) + Keychain Sharing (LOAD-BEARING for the nudge button — without
-      it the button silently falls back to a deep link).
-- [ ] NEW App ID `org.amacvoters.salahbuddymock.notify`: no capabilities.
-- [ ] Refresh provisioning profiles (next device build with automatic signing,
-      or before the next Xcode Cloud archive). Table in XCODE-CLOUD.md.
+- [x] App ID `org.amacvoters.salahbuddymock` — **App Groups** added (with
+      `group.org.amacvoters.salahbuddymock`), alongside its existing push and
+      Sign in with Apple. Done automatically by a device build with
+      `-allowProvisioningUpdates`.
+- [x] `org.amacvoters.salahbuddymock.widget` — created by that same build, with
+      App Groups, because its entitlements forced an explicit App ID.
+- [x] `org.amacvoters.salahbuddymock.notify` — **registered by hand**, and here
+      is the trap: this extension ships NO entitlements, so automatic signing
+      was happy to hand it the team's `XC Wildcard *` profile. That works for
+      development and is refused by App Store distribution, which demands an
+      explicit App ID for every bundle in the app. So a green local device
+      build proves nothing about the archive. If you ever add another
+      entitlement-free extension, register its App ID up front.
+- [x] Provisioning profiles refreshed (development, by the local build;
+      distribution, by Xcode Cloud on the next run). Table in XCODE-CLOUD.md.
+
+Also worth knowing for next time: the App Store Connect **API key cannot create
+App IDs** — `POST /v1/bundleIds` returns 403 "check with one of your Team
+Admins". Xcode (signed in as a team member) can, and so can the portal UI.
 
 **Device checks only you can run (in rough order):**
 

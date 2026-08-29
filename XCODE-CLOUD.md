@@ -41,16 +41,27 @@ build reaching TestFlight.
 
 So before merging a branch that adds a target, its bundle id needs an explicit
 **App ID in the developer portal** carrying every capability its
-`.entitlements` file names. There are TWO owed as of v5 P3, and both gate the
-merge:
+`.entitlements` file names. Both v5 identities exist as of 2026-08-29:
 
-| Bundle id | Target | Capabilities to enable |
-|---|---|---|
-| `org.amacvoters.salahbuddymock.widget` | `SalahBuddyWidget` (§3, P2) | **App Groups** (`group.org.amacvoters.salahbuddymock`) and **Keychain Sharing** — the same two the app's own App ID gained in v5 §2 |
-| `org.amacvoters.salahbuddymock.notify` | `SalahBuddyNotify` (§5-B, P3) | **none** — it reads nothing, authenticates nothing, and ships no `.entitlements` file. It still needs the App ID to exist. |
+| Bundle id | Target | Capabilities | How it got registered |
+|---|---|---|---|
+| `org.amacvoters.salahbuddymock.widget` | `SalahBuddyWidget` (§3, P2) | **App Groups** (`group.org.amacvoters.salahbuddymock`) | automatically, by a device build with `-allowProvisioningUpdates` |
+| `org.amacvoters.salahbuddymock.notify` | `SalahBuddyNotify` (§5-B, P3) | **none** — it reads nothing and ships no `.entitlements` | **by hand in the portal** — see below |
 
-Only Haashim can do this, and it is a toggle on a new identity rather than any
-code change.
+**The lesson `.notify` taught, which will recur.** Automatic signing only
+registers an explicit App ID when it has to: an extension whose entitlements
+demand one (the widget) gets registered on the first device build, while an
+extension with NO entitlements is quietly given the team's `XC Wildcard *`
+profile instead. Development is happy. **App Store distribution is not** — it
+requires an explicit App ID for every bundle inside the app, so the failure
+appears only at `exportArchive`, long after a green local build and a green
+`Test - iOS`. Register the App ID for any entitlement-free extension up front
+rather than waiting for the archive to teach you.
+
+Note also that the **App Store Connect API cannot do this for you**:
+`POST /v1/bundleIds` answers 403 ("check with one of your Team Admins") for the
+key in `~/.appstoreconnect/private_keys`. Xcode, or the portal UI signed in as a
+team member, is the only path.
 
 **The app's own App ID needs nothing new for P3.** `UIBackgroundModes:
 remote-notification` (v5 §5's quiet reload push) is an Info.plist key, not a
