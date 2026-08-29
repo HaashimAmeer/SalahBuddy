@@ -56,7 +56,9 @@
 # bypasses every policy, and can delete anything.
 #
 # USAGE
-#   export SUPABASE_SERVICE_ROLE_KEY=...   # Project Settings > API Keys > service_role
+#   export SUPABASE_SERVICE_ROLE_KEY=...   # the `default` SECRET key (sb_secret_…) from
+#                                          # API Keys > "Publishable and secret API keys".
+#                                          # NOT the legacy service_role JWT — it 403s.
 #
 #   ./backend/scripts/triage_reports.sh list              # everything still open
 #   ./backend/scripts/triage_reports.sh photo   <id>      # a 5-minute link to look at it
@@ -114,7 +116,10 @@ require_key() {
 
      Nothing here can read \`reports\` without it — that is the design, not a
      missing feature. Get it from the Supabase dashboard:
-         Project Settings > API Keys > service_role (\"secret\")
+         Project Settings > API Keys > \"Publishable and secret API keys\"
+         > the \`default\` SECRET key (sb_secret_...). NOT the legacy
+         service_role JWT on the other tab — this project is on the new
+         key system and the legacy one is refused with a 403.
      then, in this shell only:
          export SUPABASE_SERVICE_ROLE_KEY='...'
 
@@ -180,8 +185,9 @@ check() { # what-we-were-doing  expected-code...
   case "$CODE" in
     401|403) die "$what: the project refused this key (HTTP $CODE).
      \`reports\` is readable by service_role and nothing else — check that
-     SUPABASE_SERVICE_ROLE_KEY is the service_role / secret key from
-     Project Settings > API Keys, verbatim." ;;
+     SUPABASE_SERVICE_ROLE_KEY is the \`default\` SECRET key (sb_secret_...)
+     from API Keys > \"Publishable and secret API keys\", verbatim. The
+     LEGACY service_role JWT produces exactly this refusal." ;;
     404) die "$what: not found (HTTP 404). If this is the first run against a
      project, the triage migration may not be deployed yet — push a
      \`backend/**\` change to staging and let deploy-staging run." ;;

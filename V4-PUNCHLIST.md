@@ -275,10 +275,17 @@ wiring tests, and the scheduled maintenance above.
 
 **Human steps, in order:**
 
-- [ ] **Add the Actions secret `SUPABASE_STAGING_SERVICE_ROLE_KEY`** (staging
-      project ▸ Settings ▸ API ▸ service_role, verbatim). Until then the
-      nightly job skips green and photos are not aging out. First run after a
-      `backend/**` push deploys `sweep-orphans`; before that it 404s loudly.
+- [x] ~~**Add the Actions secret `SUPABASE_STAGING_SERVICE_ROLE_KEY`**~~ DONE
+      2026-08-28, and PROVEN: a `workflow_dispatch` run swept for real —
+      retention pass 1 (0 paths due yet), sweep-orphans scanned 27 accounts
+      (0 deletable, all 27 under the age floor — the CI throwaways), 0 open
+      reports. Photos are now aging out on a schedule for the first time.
+      ⚠️ **The key is the `default` SECRET key (`sb_secret_…`) from API Keys ▸
+      "Publishable and secret API keys" — NOT the legacy `service_role` JWT.**
+      This project is on the new key system, so the platform injects that value
+      as `SUPABASE_SERVICE_ROLE_KEY`. The legacy JWT passes the gateway and is
+      then refused by our own comparison with a **403**, which looks exactly
+      like a broken deploy. That cost half an hour to find.
 - [ ] **After a few nightly reports look right**, arm the account sweep: repo
       variable `SUPABASE_STAGING_USER_SWEEP_APPLY=true` (or one
       `workflow_dispatch` with `apply_user_sweep`). Report mode deletes nothing.
@@ -354,7 +361,8 @@ remind you. In one portal session (team 852AXZ2B57):
       posts, ends at window close; nudge from the medium widget lands as a
       real nudge push.
 
-**Still owed from §8:** the `SUPABASE_STAGING_SERVICE_ROLE_KEY` Actions secret
-(now also gates the nightly report count), arming the account sweep, the
-leftover-testuser check, and your first `triage_reports.sh list` (two lines —
-the command recipe is in backend/README.md's triage section).
+**Still owed from §8:** arming the account sweep (the first report is in —
+27 scanned, 0 deletable), the leftover-testuser check, and your first
+`triage_reports.sh list` (the recipe is in backend/README.md's triage section;
+it wants the same `sb_secret_…` key, not the legacy JWT). The Actions secret
+itself is DONE and proven.

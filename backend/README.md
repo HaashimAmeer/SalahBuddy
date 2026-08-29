@@ -811,9 +811,19 @@ URL is masked before the first request.
 functions require the raw `SUPABASE_STAGING_SERVICE_ROLE_KEY` as the bearer:
 `isServiceRoleToken()` compares it verbatim against the value the platform
 injects and deliberately does not trust a decoded `role` claim, because that
-claim is what unlocks retention's destructive `days` knob. Copy it from **Project
-Settings → API Keys** — the `service_role` / secret key itself, not a personal
-access token and not the publishable key. Do not reach for `--no-verify-jwt`
+claim is what unlocks retention's destructive `days` knob.
+
+**Which key, exactly — this cost half an hour on 2026-08-28.** Copy the
+**`default` secret key (`sb_secret_…`) from Project Settings → API Keys →
+"Publishable and secret API keys"**. This project has moved to the new API-key
+system, so that value — NOT the legacy `service_role` JWT — is what the platform
+injects as `SUPABASE_SERVICE_ROLE_KEY`. The legacy JWT on the "Legacy anon,
+service_role API keys" tab is still valid enough for the gateway to let it
+through and is then **refused by our own comparison with a 403**, which reads
+exactly like a broken deploy. If you ever see a 403 from `sweep-orphans` with a
+key you are sure of, that is this. (Verified against the live project: the
+legacy `service_role` JWT 403s, `sb_secret_…` returns 200.) Not a personal
+access token and not the publishable key either. Do not reach for `--no-verify-jwt`
 while wiring this up, and never give this secret to the smoke job: a proof that
 bypasses RLS proves nothing.
 
@@ -1022,7 +1032,9 @@ a table; it asks for a human who can look at flagged content and act on it, and
 until this script existed nothing in the repo could read `reports` at all.
 
 ```bash
-export SUPABASE_SERVICE_ROLE_KEY=...     # Project Settings → API Keys → service_role
+export SUPABASE_SERVICE_ROLE_KEY=...     # the `default` SECRET key (sb_secret_…),
+                                         # API Keys → "Publishable and secret API keys".
+                                         # NOT the legacy service_role JWT — it 403s.
 
 ./backend/scripts/triage_reports.sh list              # everything still open
 ./backend/scripts/triage_reports.sh photo   <id>      # a 5-minute signed link — look first
@@ -1164,12 +1176,12 @@ public and permanent; reading what a report *says* is a human at a terminal.
       `supabase/functions/sweep-orphans/`, called by the same nightly job. The
       circles those users created need nothing extra — retention already drops a
       circle nobody is in.
-- [ ] **Add the `SUPABASE_STAGING_SERVICE_ROLE_KEY` secret.** Both sweeps above
-      are code until it exists; without it every nightly run skips with a notice
-      and **photos are not being aged out** and **nothing counts the reports
-      waiting for triage**. It is the staging project's `service_role` / secret
-      key, verbatim, from Project Settings → API Keys. The same key, exported as
-      `SUPABASE_SERVICE_ROLE_KEY` in a local shell, is what runs
+- [x] **Add the `SUPABASE_STAGING_SERVICE_ROLE_KEY` secret.** Done 2026-08-28
+      and proven by a `workflow_dispatch` run that swept for real (retention
+      pass 1, 27 accounts scanned / 0 deletable, 0 open reports). It is the
+      `default` **secret** key (`sb_secret_…`) — see "Which key, exactly" above,
+      because the legacy `service_role` JWT is refused with a 403. The same key,
+      exported as `SUPABASE_SERVICE_ROLE_KEY` in a local shell, is what runs
       `backend/scripts/triage_reports.sh` — it needs no GitHub secret of its own.
 - [ ] **Move the account sweep from report to apply.** Read a few nightly
       reports first — "would delete" against "accounts scanned" and the keep

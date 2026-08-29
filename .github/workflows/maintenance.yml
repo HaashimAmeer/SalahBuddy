@@ -128,10 +128,10 @@ jobs:
             echo "Missing: \`$list\`"
             echo
             echo "\`SUPABASE_STAGING_SERVICE_ROLE_KEY\` is the staging project's"
-            echo "**service_role / secret** key, copied verbatim from"
-            echo "**Project Settings → API Keys**. The functions compare it"
-            echo "against the value the platform injects, so it has to be that"
-            echo "exact key — not a personal access token, not the publishable key."
+            echo "**\`default\` secret key (\`sb_secret_…\`)**, copied verbatim from"
+            echo "**Project Settings → API Keys → \"Publishable and secret API keys\"**."
+            echo "NOT the legacy \`service_role\` JWT — this project is on the new"
+            echo "key system, so the legacy one is refused with a 403."
             echo
             echo "Add it under **Settings → Secrets and variables → Actions**."
             echo
@@ -185,8 +185,10 @@ jobs:
                      echo "change to \`staging\` and let \`deploy-staging\` run." ;;
                 401|403) echo "\`SUPABASE_STAGING_SERVICE_ROLE_KEY\` is not the key the project"
                          echo "injects. Both functions compare the bearer verbatim, so it must"
-                         echo "be the **service_role / secret** key from Project Settings → API"
-                         echo "Keys — not an access token, not the publishable key." ;;
+                         echo "be the \`default\` **secret** key (\`sb_secret_…\`) from Project"
+                         echo "Settings → API Keys → \"Publishable and secret API keys\"."
+                         echo "A 403 with the LEGACY \`service_role\` JWT is this exact mistake:"
+                         echo "the gateway lets it through and our comparison then refuses it." ;;
                 000) echo "The request never completed. A paused free-tier project does this;"
                      echo "unpause it in the dashboard and re-run." ;;
                 *)   echo "See the function's own logs in the Supabase dashboard — 5xx bodies"
