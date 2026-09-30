@@ -156,7 +156,10 @@ struct CurrentPrayerBlock: View {
 
             Spacer(minLength: 8)
 
-            if isWindowOpen {
+            // The clock, not `isWindowOpen`: that reads `status(of:)`, which
+            // answers `.logged` the moment you post, so a prayer logged with
+            // hours to spare used to announce "Window ended".
+            if now < block.windowEnd {
                 Text("\(HomeTimeFormat.countdown(to: block.windowEnd, from: now)) left")
                     .font(Theme.sans(13, .bold))
                     .foregroundStyle(Theme.amber)
@@ -259,7 +262,9 @@ struct CurrentPrayerBlock: View {
         }
     }
 
-    /// Window still open by the clock (independent of whether I logged).
+    /// Window open AND not yet logged by me — `status(of:)` answers `.logged`
+    /// once I post, so this goes false then. For "is the clock still inside
+    /// the window" compare `now` to `block.windowEnd`.
     private var isWindowOpen: Bool {
         if case .open = state.status(of: block.prayer) { return true }
         return false
