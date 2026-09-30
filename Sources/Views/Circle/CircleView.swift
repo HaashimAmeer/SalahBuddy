@@ -1049,7 +1049,7 @@ struct InviteSheet: View {
             Text("Build your circle")
                 .font(Theme.sans(22, .bold))
                 .foregroundStyle(Theme.inkDeep)
-            Text("A circle is up to eight real people on real phones, keeping all five together. To find each other, we just need to know who you are.")
+            Text("A circle is up to twelve real people on real phones, keeping all five together. To find each other, we just need to know who you are.")
                 .font(Theme.sans(14, .medium))
                 .foregroundStyle(Theme.inkMuted)
                 .multilineTextAlignment(.center)
