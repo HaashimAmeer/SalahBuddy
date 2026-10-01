@@ -29,6 +29,16 @@ endef
 generate:
 	@command -v xcodegen >/dev/null 2>&1 || { echo "✗ xcodegen not found — run: brew install xcodegen"; exit 1; }
 	@xcodegen generate
+	@# Seed the generated project with the committed pin (as ci_post_clone.sh
+	@# does on Xcode Cloud) so a fresh clone RESOLVES FROM it instead of
+	@# re-resolving from scratch. Fresh resolution differs by toolchain: the
+	@# GitHub runner's SPM drops swift-issue-reporting (pointfreeco's rename of
+	@# xctest-dynamic-overlay) while Xcode Cloud's requires it, and ios.yml's
+	@# auto-pin would commit the runner's version back and break Xcode Cloud.
+	@R=$(PROJECT)/project.xcworkspace/xcshareddata/swiftpm; \
+	if [ -f Package.resolved ] && [ ! -f "$$R/Package.resolved" ]; then \
+		mkdir -p "$$R" && cp Package.resolved "$$R/Package.resolved"; \
+	fi
 
 ## test: build + run the unit tests on the simulator (what the pre-push hook runs)
 ##
