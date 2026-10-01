@@ -153,9 +153,13 @@ them to expire.
   free public-repo **macOS runners** for every Swift-touching push — the fast
   compile-and-test verdict for cloud/web sessions, costing zero Xcode Cloud
   hours. It also **auto-pins `Package.resolved`**: when `project.yml` changes
-  the dependency set, the workflow commits the refreshed pin back with
-  `[ci skip]`, and `ci_post_clone.sh` self-heals by running
-  `-resolvePackageDependencies`, so adding an SPM package needs no Mac.
+  the dependency set (or an upstream package adds a dependency of its own),
+  the workflow commits the refreshed pin back. That commit deliberately has
+  NO `[ci skip]`: `ci_post_clone.sh`'s `-resolvePackageDependencies`
+  self-heal does not work on Xcode Cloud (automatic resolution is disabled
+  there, so it exits 74), which means the drifted push fails and the pin
+  commit is the build that reaches TestFlight. Build 34 (2026-10-01) was
+  lost to exactly this.
 - **Supabase: staging only.** The production project is deferred — the free
   tier caps the *account* at 2 active projects and both slots are taken.
   Repo secrets exist for staging (`SUPABASE_ACCESS_TOKEN`,
