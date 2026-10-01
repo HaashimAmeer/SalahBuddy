@@ -58,8 +58,12 @@ jobs:
 
       # If project.yml changed the dependency set, the build above resolved
       # fresh pins into the generated project — persist them so Xcode Cloud
-      # (which disables automatic resolution) keeps working. [ci skip] stops
-      # this bot commit from re-triggering either CI.
+      # (which disables automatic resolution) keeps working. No [ci skip]:
+      # Xcode Cloud has to build THIS commit. The push that drifted the pins
+      # already failed there (ci_post_clone's self-heal cannot resolve while
+      # automatic resolution is disabled), so the pin commit is the first
+      # one that can reach TestFlight. Actions won't loop: a GITHUB_TOKEN push
+      # does not trigger workflows, and a rerun would find the pin in sync.
       - name: Auto-pin Package.resolved
         run: |
           GENERATED="SalahBuddy.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
@@ -68,7 +72,7 @@ jobs:
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add Package.resolved
-            git commit -m "ci: pin Package.resolved after dependency change [ci skip]"
+            git commit -m "ci: pin Package.resolved after dependency change"
             # --autostash: `make generate` rewrites the tracked Sources/Info.plist
             # from project.yml, so the tree is dirty here by design and a plain
             # rebase would abort ("cannot pull with rebase").
