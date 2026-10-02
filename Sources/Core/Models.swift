@@ -191,8 +191,11 @@ struct PrayerLog: Codable, Identifiable, Equatable {
     /// fits — never mid-emoji.
     static func normalizedCaption(_ raw: String?) -> String? {
         guard let raw else { return nil }
+        // `.control` (Cc) only — what Postgres' [[:cntrl:]] means. Foundation's
+        // `controlCharacters` also holds Cf, which includes the zero-width
+        // joiner, and would shatter 👨‍👩‍👧‍👦 into four emoji.
         let spaced: String = String(String.UnicodeScalarView(raw.unicodeScalars.map {
-            CharacterSet.controlCharacters.contains($0) ? " " : $0
+            $0.properties.generalCategory == .control ? " " : $0
         }))
         let words: [Substring] = spaced.split(whereSeparator: { $0.isWhitespace })
         var out: String = words.joined(separator: " ")
