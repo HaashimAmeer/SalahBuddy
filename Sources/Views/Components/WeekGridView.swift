@@ -214,6 +214,7 @@ struct WeekGridView: View {
         case .inWindow(.lastCall): return "Late"
         case .inWindow(.closeCall): return "Just made it"
         case .inWindow(.qada), .qada: return "Made up"
+        case .inWindow(.forgot): return "Prayed"   // defensive (forgot is never in-window)
         case .missed: return "Missed"
         case .excused: return "Excused"
         case .future: return "—"

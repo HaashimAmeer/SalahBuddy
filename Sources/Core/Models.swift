@@ -45,6 +45,10 @@ enum Prayer: String, CaseIterable, Codable, Identifiable {
 /// xp and old tier rawValues still decode.
 enum LogTier: String, Codable {
     case onTime, prayed, lastCall, closeCall, qada
+    /// v5: "I prayed it in its time and forgot to log it." Not a make-up (that
+    /// is `.qada`): it earns nothing, carries no photo or caption, and counts
+    /// as done. The server enforces the bareness (`posts_forgot_is_bare`).
+    case forgot
 
     var xp: Int {
         switch self {
@@ -55,6 +59,8 @@ enum LogTier: String, Codable {
         case .qada: return 5       // v3.7 (design session): dropped from 10 so a
                                    // make-up clearly trails any in-window log.
                                    // Old logs keep their stored xp.
+        case .forgot: return 0     // v5: record-keeping only — the incentive
+                                   // stays on logging as you pray.
         }
     }
 
@@ -65,11 +71,23 @@ enum LogTier: String, Codable {
         case .lastCall: return "Getting late"
         case .closeCall: return "Just made it"
         case .qada: return "Made up (Qada)"
+        case .forgot: return "Prayed · not logged"
         }
     }
 
-    /// Logged within the window (anything but qada).
-    var isInWindow: Bool { self != .qada }
+    /// Logged within the window — i.e. while it was open, with a photo. A
+    /// forgotten log was PRAYED in time but LOGGED after, so it is not.
+    var isInWindow: Bool { self != .qada && self != .forgot }
+
+    /// v5: tolerant on purpose. Until this, an unknown rawValue threw — and
+    /// one post with a tier this build has never heard of failed the WHOLE
+    /// `[RemotePost]` decode, so a single newer phone in a circle stopped every
+    /// older phone's pull. An unknown tier is read as `.forgot`: it counts as
+    /// done and is worth nothing, which never invents XP for anybody.
+    init(from decoder: Decoder) throws {
+        let raw: String = try decoder.singleValueContainer().decode(String.self)
+        self = LogTier(rawValue: raw) ?? .forgot
+    }
 }
 
 // MARK: - Schedule
@@ -126,6 +144,10 @@ struct PrayerLog: Codable, Identifiable, Equatable {
     var jamaat: Bool            // v2: prayed in congregation (+5 XP, tracked for challenges)
     var placeTag: PlaceTag?     // v3: optional "where I prayed" tag
     var placeName: String?      // v3: reverse-geocoded name when tagged .onTheGo
+    /// v5: one short line under the photo. Stored as typed; `normalizedCaption`
+    /// is applied where it goes on the wire, so the server's shape check
+    /// (posts_caption_shape) can never wedge the outbox.
+    var caption: String?
     /// v4: the device's UTC offset in SECONDS when this was logged.
     ///
     /// `dayKey` is a local-time string, so "2026-08-22" means one thing in
@@ -144,7 +166,7 @@ struct PrayerLog: Codable, Identifiable, Equatable {
     init(id: UUID, prayer: Prayer, dayKey: String, loggedAt: Date, tier: LogTier, xp: Int,
          photoFilename: String? = nil, jamaat: Bool = false,
          placeTag: PlaceTag? = nil, placeName: String? = nil,
-         utcOffset: Int? = nil) {
+         utcOffset: Int? = nil, caption: String? = nil) {
         self.id = id
         self.prayer = prayer
         self.dayKey = dayKey
@@ -156,12 +178,33 @@ struct PrayerLog: Codable, Identifiable, Equatable {
         self.placeTag = placeTag
         self.placeName = placeName
         self.utcOffset = utcOffset
+        self.caption = caption
+    }
+
+    /// The server's caption limit, in Unicode SCALARS — Postgres' `char_length`
+    /// counts code points, and one family emoji is one `Character` but seven.
+    static let captionMaxScalars: Int = 140
+
+    /// A caption the server will accept, or nil. Control characters (newlines
+    /// included) become spaces, runs of whitespace collapse, the ends are
+    /// trimmed, and an over-long caption is cut at a Character boundary that
+    /// fits — never mid-emoji.
+    static func normalizedCaption(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let spaced: String = String(String.UnicodeScalarView(raw.unicodeScalars.map {
+            CharacterSet.controlCharacters.contains($0) ? " " : $0
+        }))
+        let words: [Substring] = spaced.split(whereSeparator: { $0.isWhitespace })
+        var out: String = words.joined(separator: " ")
+        while out.unicodeScalars.count > captionMaxScalars { out.removeLast() }
+        out = out.trimmingCharacters(in: .whitespaces)
+        return out.isEmpty ? nil : out
     }
 
     // Migration-safe decoding: v1/v2 logs (missing newer fields) must keep decoding.
     private enum CodingKeys: String, CodingKey {
         case id, prayer, dayKey, loggedAt, tier, xp, photoFilename, jamaat, placeTag, placeName
-        case utcOffset
+        case utcOffset, caption
     }
 
     init(from decoder: Decoder) throws {
@@ -177,6 +220,7 @@ struct PrayerLog: Codable, Identifiable, Equatable {
         placeTag = try c.decodeIfPresent(PlaceTag.self, forKey: .placeTag)
         placeName = try c.decodeIfPresent(String.self, forKey: .placeName)
         utcOffset = try c.decodeIfPresent(Int.self, forKey: .utcOffset)
+        caption = (try? c.decodeIfPresent(String.self, forKey: .caption)) ?? nil
     }
 }
 

@@ -21,9 +21,12 @@ import Foundation
 //    which would try to write null into a NOT NULL column. Both rules are why
 //    every DTO hand-writes `encode(to:)` instead of relying on synthesis.
 //
-// `Prayer` and `LogTier` are reused as-is: their rawValues ARE the Postgres
-// enum labels (`prayer_kind`, `log_tier`), which the migration documents. If
-// one side ever drifts, decoding fails loudly here rather than scoring wrongly.
+// `Prayer`, `LogTier` and `PlaceTag` are reused as-is: their rawValues ARE the
+// Postgres enum labels (`prayer_kind`, `log_tier`, `place_kind`), which the
+// migrations document and test 16 pins. `Prayer` still fails loudly on drift.
+// `LogTier` (v5) reads an unknown tier as `.forgot`, and `placeKind` an unknown
+// kind as nil, because one newer phone in a circle must not stop every older
+// phone's pull — see `LogTier.init(from:)`.
 
 // MARK: - profiles
 
@@ -204,6 +207,11 @@ struct RemotePost: Codable, Equatable, Sendable, Identifiable {
     var placeLabel: String?     // the rendered pill ("🏠 Home"), not the raw tag
     var photoPath: String?      // Storage path; nil once retention ages the photo out
     var travelCombined: Bool
+    /// v5: the tag behind `placeLabel` — what "spots on the go" counts and
+    /// what keeps Home and Work off a shared map, without parsing an emoji.
+    var placeKind: PlaceTag?
+    /// v5: the caption, already normalized (`PrayerLog.normalizedCaption`).
+    var caption: String?
     /// v4: the poster's UTC offset in seconds. See `PrayerLog.utcOffset` — part
     /// of a post's identity since migration 20260822000300, which put it in the
     /// `posts` unique key, and mirrored by `CircleSync.slotKey`. Inside the
@@ -228,6 +236,7 @@ struct RemotePost: Codable, Equatable, Sendable, Identifiable {
          tier: LogTier, loggedAt: Date, jamaat: Bool = false,
          placeLabel: String? = nil, photoPath: String? = nil,
          travelCombined: Bool = false, utcOffset: Int? = nil,
+         placeKind: PlaceTag? = nil, caption: String? = nil,
          updatedAt: Date? = nil) {
         self.id = id
         self.userID = userID
@@ -241,6 +250,8 @@ struct RemotePost: Codable, Equatable, Sendable, Identifiable {
         self.photoPath = photoPath
         self.travelCombined = travelCombined
         self.utcOffset = utcOffset
+        self.placeKind = placeKind
+        self.caption = caption
         self.updatedAt = updatedAt
     }
 
@@ -257,6 +268,8 @@ struct RemotePost: Codable, Equatable, Sendable, Identifiable {
         case photoPath = "photo_path"
         case travelCombined = "travel_combined"
         case utcOffset = "utc_offset"
+        case placeKind = "place_kind"
+        case caption
         case updatedAt = "updated_at"
     }
 
@@ -274,6 +287,8 @@ struct RemotePost: Codable, Equatable, Sendable, Identifiable {
         photoPath = try c.decodeIfPresent(String.self, forKey: .photoPath)
         travelCombined = (try? c.decodeIfPresent(Bool.self, forKey: .travelCombined)) ?? false
         utcOffset = (try? c.decodeIfPresent(Int.self, forKey: .utcOffset)) ?? nil
+        placeKind = (try? c.decodeIfPresent(PlaceTag.self, forKey: .placeKind)) ?? nil
+        caption = (try? c.decodeIfPresent(String.self, forKey: .caption)) ?? nil
         updatedAt = (try? c.decodeIfPresent(Date.self, forKey: .updatedAt)) ?? nil
     }
 
@@ -295,6 +310,8 @@ struct RemotePost: Codable, Equatable, Sendable, Identifiable {
         try c.encodeIfPresent(photoPath, forKey: .photoPath)
         try c.encode(travelCombined, forKey: .travelCombined)
         try c.encodeIfPresent(utcOffset, forKey: .utcOffset)
+        try c.encodeIfPresent(placeKind, forKey: .placeKind)
+        try c.encodeIfPresent(caption, forKey: .caption)
     }
 
     /// A synced post, as `GameEngine` sees it. This is the whole trick behind
@@ -304,12 +321,13 @@ struct RemotePost: Codable, Equatable, Sendable, Identifiable {
     /// - `photoFilename` is ALWAYS nil — buddy photos live in the disposable
     ///   `circlephotos/` cache (under `Store.directory`) keyed by `photoPath`,
     ///   never in `PhotoStore`, which is yours forever (§4).
-    /// - `placeTag`/`placeName` stay nil: the wire carries only the rendered
-    ///   label, and the tag matters solely for your own Journey "Places" stats.
+    /// - `placeTag` is the wire's `place_kind` (v5); `placeName` stays nil,
+    ///   because the wire carries the rendered label, not the raw name.
     func asPrayerLog() -> PrayerLog {
         return PrayerLog(id: id, prayer: prayer, dayKey: dayKey, loggedAt: loggedAt,
                          tier: tier, xp: postedXP, photoFilename: nil, jamaat: jamaat,
-                         placeTag: nil, placeName: nil, utcOffset: utcOffset)
+                         placeTag: placeKind, placeName: nil, utcOffset: utcOffset,
+                         caption: caption)
     }
 
     /// What `GameEngine` says this post is worth — run here so a buddy's row is
@@ -339,10 +357,17 @@ struct RemotePost: Codable, Equatable, Sendable, Identifiable {
     static func from(log: PrayerLog, userID: UUID, circleID: UUID,
                      placeLabel: String? = nil, photoPath: String? = nil,
                      travelCombined: Bool = false) -> RemotePost {
-        RemotePost(id: log.id, userID: userID, circleID: circleID, dayKey: log.dayKey,
-                   prayer: log.prayer, tier: log.tier, loggedAt: log.loggedAt,
-                   jamaat: log.jamaat, placeLabel: placeLabel, photoPath: photoPath,
-                   travelCombined: travelCombined, utcOffset: log.utcOffset)
+        // A forgotten log is bare on the server (posts_forgot_is_bare), and a
+        // caption outside posts_caption_shape would be refused on every drain
+        // forever — so both rules are applied here, at the one door.
+        let bare: Bool = log.tier == .forgot
+        return RemotePost(id: log.id, userID: userID, circleID: circleID, dayKey: log.dayKey,
+                          prayer: log.prayer, tier: log.tier, loggedAt: log.loggedAt,
+                          jamaat: log.jamaat, placeLabel: placeLabel,
+                          photoPath: bare ? nil : photoPath,
+                          travelCombined: travelCombined, utcOffset: log.utcOffset,
+                          placeKind: log.placeTag,
+                          caption: bare ? nil : PrayerLog.normalizedCaption(log.caption))
     }
 }
 
@@ -583,9 +608,13 @@ struct RemoteReport: Codable, Equatable, Sendable, Identifiable {
     /// Free text, ≤ 500 chars server-side. Nil is fine — a report with no words
     /// is still actionable, because a human looks at the photo.
     var reason: String?
+    /// v5: the caption at report time — evidence, pinned to the post's own
+    /// `caption` by the policy exactly as `photoPath` is.
+    var caption: String?
 
     init(id: UUID = UUID(), reporterID: UUID, postID: UUID, circleID: UUID,
-         reportedUserID: UUID? = nil, photoPath: String? = nil, reason: String? = nil) {
+         reportedUserID: UUID? = nil, photoPath: String? = nil, reason: String? = nil,
+         caption: String? = nil) {
         self.id = id
         self.reporterID = reporterID
         self.postID = postID
@@ -593,6 +622,7 @@ struct RemoteReport: Codable, Equatable, Sendable, Identifiable {
         self.reportedUserID = reportedUserID
         self.photoPath = photoPath
         self.reason = reason
+        self.caption = caption
     }
 
     enum CodingKeys: String, CodingKey {
@@ -603,6 +633,7 @@ struct RemoteReport: Codable, Equatable, Sendable, Identifiable {
         case reportedUserID = "reported_user_id"
         case photoPath = "photo_path"
         case reason
+        case caption
     }
 
     init(from decoder: Decoder) throws {
@@ -616,6 +647,7 @@ struct RemoteReport: Codable, Equatable, Sendable, Identifiable {
         reportedUserID = try c.decodeIfPresent(UUID.self, forKey: .reportedUserID)
         photoPath = try c.decodeIfPresent(String.self, forKey: .photoPath)
         reason = try c.decodeIfPresent(String.self, forKey: .reason)
+        caption = try c.decodeIfPresent(String.self, forKey: .caption)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -627,5 +659,6 @@ struct RemoteReport: Codable, Equatable, Sendable, Identifiable {
         try c.encodeIfPresent(reportedUserID, forKey: .reportedUserID)
         try c.encodeIfPresent(photoPath, forKey: .photoPath)
         try c.encodeIfPresent(reason, forKey: .reason)
+        try c.encodeIfPresent(caption, forKey: .caption)
     }
 }
