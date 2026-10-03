@@ -1,94 +1,34 @@
 import SwiftUI
 
-/// Today screen (v2) — compact header + prayer-times strip, the live current
-/// prayer block (photo grid + camera CTA), make-up rows, earlier-today
-/// collapsed blocks, dimmed upcoming list, and the quiet excused-day flow.
-/// Owned by the home agent. No mascot here in v2.
+/// Today screen. v5 (mockup): a sideways pager with one page per prayer
+/// (`TodayPager`) — header, "Your day", the prayer's own card, make-ups, and
+/// the circle's feed for that prayer. This view owns what sits above the
+/// pager: the camera sheet, the celebration, and tap-to-enlarge.
 struct HomeView: View {
     @EnvironmentObject private var state: AppState
     @Environment(\.appNow) private var now
 
     @State private var cameraTarget: CameraTarget?
-    @State private var travelSuggestionDismissed = false
     @State private var enlarged: EnlargedPost?
 
     var body: some View {
-        // ONE call, not three. This body re-runs every second — it reads
-        // `appNow` — and `currentTodayBlock` is not free: it filters and
-        // maxes over the day's windows, and takes `Calendar.current` on the
-        // pre-fajr path. Asking the same question three times per tick was
-        // pure waste, and the three answers were always identical anyway.
-        let block = state.currentTodayBlock(now: now)
-        return ZStack {
+        ZStack {
             Theme.bg.ignoresSafeArea()
 
-            ScrollViewReader { proxy in
-                ScrollView(showsIndicators: false) {
-                    VStack(spacing: 16) {
-                        TodayHeader()
-                            .id("tour-home-top")
-                        PrayerTimesStrip(currentPrayer: block?.isYesterdayIsha == false
-                                         ? block?.prayer : nil)
-
-                        // One travel banner at a time: a fresh crossing is
-                        // more specific and more urgent than "you look far
-                        // from home", so it wins while it stands.
-                        if state.pendingTravelNotice != nil {
-                            TimeZoneChangeBanner()
-                        } else {
-                            TravelSuggestionBanner(dismissed: $travelSuggestionDismissed)
-                        }
-
-                        if let block {
-                            CurrentPrayerBlock(
-                                block: block,
-                                onPost: {
-                                    // v4.1: the CTA only exists while the window is
-                                    // open (`showCTA`), so `inWindowAtOpen` is true
-                                    // in practice — but it is answered from the
-                                    // clock rather than assumed, because it is what
-                                    // decides whether a qada gets apologised for.
-                                    cameraTarget = CameraTarget(prayer: block.prayer, dayKey: block.dayKey,
-                                                                windowEnd: block.windowEnd,
-                                                                inWindowAtOpen: now < block.windowEnd,
-                                                                combinedLead: block.combinedWith != nil ? block.prayer : nil)
-                                },
-                                onEnlarge: { enlarged = EnlargedPost(entry: $0, prayer: block.prayer) })
-                            .tutorialTarget(.postPhoto)
-                        }
-
-                        MakeUpSection()
-                        EarlierTodaySection()
-                            .tutorialTarget(.earlierToday)
-                            .id("tour-earlier")
-                        UpcomingSection()
-                        // v3.6: travel + "can't pray" controls moved to Settings
-                        // (design session) — they're not everyday actions.
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.top, 18)
-                    .padding(.bottom, 28)
-                }
-                // v3.7: the guided tour scrolls its targets into view.
-                .onChange(of: state.tutorialStep) { previous, step in
-                    // Tour over: back to the top of Today. The last step
-                    // scrolled this view down to "Earlier today" and then the
-                    // tour walked off to another tab, so returning here landed
-                    // you mid-page looking at yesterday's leftovers rather than
-                    // at the prayer you are meant to log next.
-                    if step == nil, previous != nil {
-                        withAnimation(Theme.spring) {
-                            proxy.scrollTo("tour-home-top", anchor: .top)
-                        }
-                        return
-                    }
-                    guard let step else { return }
-                    withAnimation(Theme.spring) {
-                        if step == Tour.postPhotoIndex { proxy.scrollTo("tour-home-top", anchor: .top) }
-                        if step == Tour.earlierTodayIndex { proxy.scrollTo("tour-earlier", anchor: .center) }
-                    }
-                }
-            }
+            // v5 (mockup): swipe between today's prayers; each page scrolls
+            // down into that prayer's circle feed.
+            TodayPager(
+                onPost: { page in
+                    // The CTA only exists while the window is open, so
+                    // `inWindowAtOpen` is true in practice — but it is
+                    // answered from the clock rather than assumed, because it
+                    // is what decides whether a qada gets apologised for.
+                    cameraTarget = CameraTarget(prayer: page.prayer, dayKey: page.dayKey,
+                                                windowEnd: page.end,
+                                                inWindowAtOpen: now < page.end,
+                                                combinedLead: page.combinedWith != nil ? page.prayer : nil)
+                },
+                onEnlarge: { entry, prayer in enlarged = EnlargedPost(entry: entry, prayer: prayer) })
 
             if state.celebration != nil {
                 CelebrationOverlay()
@@ -170,53 +110,6 @@ struct TodayHeader: View {
 
     private var streakLitToday: Bool {
         state.profile.lastStreakDayKey == state.todayKey
-    }
-}
-
-// MARK: - Prayer-times strip
-
-/// Slim at-a-glance strip: 5 chips (name + start time); the current prayer
-/// is highlighted in soft green.
-struct PrayerTimesStrip: View {
-    let currentPrayer: Prayer?
-
-    @EnvironmentObject private var state: AppState
-
-    var body: some View {
-        HStack(spacing: 6) {
-            ForEach(Prayer.allCases) { prayer in
-                chip(for: prayer)
-            }
-        }
-    }
-
-    private func chip(for prayer: Prayer) -> some View {
-        let isCurrent = prayer == currentPrayer
-        return VStack(spacing: 1) {
-            Text(prayer.displayName)
-                .font(Theme.sans(11, .bold))
-                .foregroundStyle(isCurrent ? Theme.inkDeep : Theme.inkMuted)
-            Text(startText(for: prayer))
-                .font(Theme.sans(11, .semibold))
-                .foregroundStyle(isCurrent ? Theme.inkDeep : Theme.inkMuted.opacity(0.8))
-        }
-        .lineLimit(1)
-        .minimumScaleFactor(0.7)
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 7)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(isCurrent ? Theme.greenSoft : Theme.surface)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(isCurrent ? Theme.green.opacity(0.45) : .clear, lineWidth: 1.5)
-        )
-    }
-
-    private func startText(for prayer: Prayer) -> String {
-        guard let window = state.todaySchedule?.window(for: prayer) else { return "—" }
-        return HomeTimeFormat.clock(window.start)
     }
 }
 

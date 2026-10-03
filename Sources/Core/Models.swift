@@ -296,6 +296,9 @@ struct UserProfile: Codable {
     /// earlier. Paired with `lastStreakDayKey`; nil means the last increment
     /// banked nothing (and, for a pre-v4.1 save, that undo declines to guess).
     var lastStreakFreezeDayKey: String?
+    /// v5 (mockup): your own photos starred in Memories, by `PhotoStore`
+    /// filename, newest star first. Device-only — it never syncs.
+    var starredPhotos: [String]
 
     init(name: String, totalXP: Int, streak: Int, longestStreak: Int, streakFreezes: Int,
          lastStreakDayKey: String?, lastReconciledDayKey: String?, earnedBadges: [String: Date],
@@ -309,7 +312,7 @@ struct UserProfile: Codable {
          partialExcuseStart: [String: Prayer] = [:], partialExcuseEnd: [String: Prayer] = [:],
          startedSolo: Bool = false, groupAwardsFrozenWeek: String? = nil,
          lastSeenUTCOffset: Int? = nil, travelDayKeys: Set<String> = [],
-         lastStreakFreezeDayKey: String? = nil) {
+         lastStreakFreezeDayKey: String? = nil, starredPhotos: [String] = []) {
         self.name = name
         self.totalXP = totalXP
         self.streak = streak
@@ -339,6 +342,7 @@ struct UserProfile: Codable {
         self.lastSeenUTCOffset = lastSeenUTCOffset
         self.travelDayKeys = travelDayKeys
         self.lastStreakFreezeDayKey = lastStreakFreezeDayKey
+        self.starredPhotos = starredPhotos
     }
 
     // Migration-safe decoding: v1 profiles lack the v2 fields.
@@ -353,6 +357,7 @@ struct UserProfile: Codable {
         case startedSolo, groupAwardsFrozenWeek
         case lastSeenUTCOffset, travelDayKeys
         case lastStreakFreezeDayKey
+        case starredPhotos
     }
 
     init(from decoder: Decoder) throws {
@@ -391,6 +396,8 @@ struct UserProfile: Codable {
         // undo, and the default errs the safe way round: undo may decline to
         // take back a freeze it granted, but can never take one it did not.
         lastStreakFreezeDayKey = (try? c.decodeIfPresent(String.self, forKey: .lastStreakFreezeDayKey)) ?? nil
+        // v5: absent → nothing starred.
+        starredPhotos = (try? c.decodeIfPresent([String].self, forKey: .starredPhotos)) ?? []
     }
 
     /// A brand-new account. v3.9: everyone starts solo — onboarding also sets

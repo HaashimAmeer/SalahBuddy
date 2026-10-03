@@ -202,6 +202,47 @@ final class WidgetWriterTests: XCTestCase {
         XCTAssertFalse(raw.contains(BuddyPhotoCache.key(forRemotePath: path)))
     }
 
+    /// v5: a report hides the whole post — the caption written under a photo
+    /// goes with it, on every surface that reads `gridEntries`.
+    func testAReportedPostLosesItsCaptionToo() throws {
+        prepareDisk(circleMode: .real)
+        reporterToRestore = PhotoReports.shared.currentUserID
+        PhotoReports.shared.currentUserID = { nil }
+
+        let state = AppState()
+        state.publishWidgetSnapshot()
+        let opening: WidgetSnapshot = try XCTUnwrap(published())
+        let window: WidgetSnapshot.Window = try XCTUnwrap(opening.window)
+
+        let path: String = "circle/widget-writer-test/captioned.jpg"
+        let circleID = UUID(), me = UUID(), mina = UUID()
+        let minaPost = RemotePost(id: UUID(), userID: mina, circleID: circleID,
+                                  dayKey: window.dayKey, prayer: window.prayer,
+                                  tier: .onTime,
+                                  loggedAt: opening.writtenAt.addingTimeInterval(-60),
+                                  photoPath: path, caption: "Rooftop Asr")
+        state.applyCircleSnapshot(CircleSnapshot(
+            circle: RemoteCircle(id: circleID, code: "ABC234", name: "Test", emoji: "🤝"),
+            me: me,
+            profiles: [RemoteProfile(id: me, name: "Haashim", avatarEmoji: "😄"),
+                       RemoteProfile(id: mina, name: "Mina", avatarEmoji: "🌸")],
+            members: [RemoteMember(circleID: circleID, userID: me,
+                                   joinedAt: Date(timeIntervalSince1970: 1)),
+                      RemoteMember(circleID: circleID, userID: mina,
+                                   joinedAt: Date(timeIntervalSince1970: 2))],
+            posts: [minaPost], excusedDays: []))
+
+        func minasCaption() -> String? {
+            state.gridEntries(for: window.prayer, dayKey: window.dayKey)
+                .first { $0.member.name == "Mina" }?.caption
+        }
+        XCTAssertEqual(minasCaption(), "Rooftop Asr")
+
+        hidesToForget.append(path)
+        PhotoReports.shared.hide(minaPost)
+        XCTAssertNil(minasCaption())
+    }
+
     // MARK: - SPEC-V5 §7/§9-02 — the widget photo setting, through the real writer
 
     /// A real circle in which Mina has posted the CURRENT window with a photo.

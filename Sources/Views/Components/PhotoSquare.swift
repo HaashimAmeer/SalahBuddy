@@ -48,7 +48,7 @@ struct PhotoSquare: View {
         if let post = reportable {
             tile
                 .contextMenu { reportButton }
-                .confirmationDialog("Report this photo?",
+                .confirmationDialog("Report this post?",
                                     isPresented: $showReportConfirm,
                                     titleVisibility: .visible) {
                     Button("Report and hide it", role: .destructive) { fileReport(post) }
@@ -277,7 +277,7 @@ struct PhotoSquare: View {
     /// Calm, and it says exactly what happens — including the part the person
     /// actually cares about, which is that nobody is told they did it.
     private static let reportMessage: String =
-        "We'll hide it from your grid right away and send it to us to look at. "
+        "We'll hide the photo and its caption right away and send them to us to look at. "
         + "Nobody in your circle is told.\n\n"
         + "If you'd rather not see someone's posts at all, you can leave the circle "
         + "from the Circle tab."
@@ -286,7 +286,7 @@ struct PhotoSquare: View {
         Button(role: .destructive) {
             showReportConfirm = true
         } label: {
-            Label("Report this photo", systemImage: "flag")
+            Label("Report this post", systemImage: "flag")
         }
     }
 

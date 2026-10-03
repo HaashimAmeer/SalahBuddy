@@ -55,7 +55,7 @@ enum WidgetSnapshotBuilder {
     /// count as outstanding.
     ///
     /// v3.6's rule, and it lives here so the home screen and the Today screen
-    /// cannot offer different nudges: `TodayBlocks.nudgeEligible` reads this
+    /// cannot offer different nudges: `CircleFeed.nudgeAllowed` calls this
     /// same number. Praying five minutes into Asr is not late, and a push that
     /// says otherwise is the fastest way to make somebody delete a widget.
     static let nudgeGrace: TimeInterval = 30 * 60
@@ -65,7 +65,7 @@ enum WidgetSnapshotBuilder {
     /// `waiting` is not "everyone who has not posted" — §3 calls it the nudge
     /// list and P4's button spends it verbatim, so it carries the app's own
     /// gate rather than a looser one. Three conditions, all of them the Today
-    /// screen's (`TodayBlocks.nudgeRow`):
+    /// screen's (`CircleFeed.nudgeAllowed`, which calls this function):
     ///
     /// 1. **The window is OPEN.** `window(in:carryOver:now:)` deliberately
     ///    answers the NEXT window when nothing is open, because the tile still

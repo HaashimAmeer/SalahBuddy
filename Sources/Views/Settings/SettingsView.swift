@@ -34,35 +34,45 @@ struct SettingsView: View {
     // sit here with a single "forget everything" button.
     @State private var showSavedPlaces = false
 
+    @State private var showSignIn = false
+
+    /// v5 (mockup): iOS-style — a root list of what you flip or glance at,
+    /// and everything you CHOOSE behind a row that slides in a page. The cards
+    /// themselves are unchanged; only where they sit moved.
+    private enum Page: Hashable {
+        case profile, prayerTimes, circleAndWidget, help, developer
+    }
+
     var body: some View {
-        ZStack {
-            Theme.bg.ignoresSafeArea()
-            ScrollView {
-                VStack(spacing: 16) {
-                    header
-                    profileCard
-                    BreakAndTravelCard()
-                    calculationCard
-                    locationCard
-                    notificationsCard
-                    widgetCard
-                    aboutCard
-                    // v4 §1: an App Store build has no developer card, and
-                    // "Delete account" has to be reachable without one. Renders
-                    // nothing at all for a solo install, so v3.9's Settings is
-                    // unchanged for anyone who never signed in.
-                    accountCard
-                    // v3.6: dev tools ship in DEBUG *and* TestFlight (so
-                    // testers can time-travel / seed demo data), but auto-hide
-                    // in a real App Store release — same binary, gated by the
-                    // sandbox receipt at runtime.
-                    if BuildEnv.showsDeveloperTools {
-                        developerCard
+        NavigationStack {
+            ZStack {
+                Theme.bg.ignoresSafeArea()
+                ScrollView {
+                    VStack(spacing: 16) {
+                        header
+                        topRow
+                        notificationsCard
+                        BreakAndTravelCard()
+                        navGroup
+                        Text("Made with 🤲 to help you keep all five, every day.")
+                            .font(Theme.sans(13, .semibold))
+                            .foregroundStyle(Theme.inkMuted)
+                            .padding(.top, 4)
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 24)
                 }
-                .padding(.horizontal, 16)
-                .padding(.bottom, 24)
             }
+            .toolbar(.hidden, for: .navigationBar)
+            .navigationDestination(for: Page.self) { page in
+                detail(page)
+            }
+        }
+        .tint(Theme.inkDeep)
+        .sheet(isPresented: $showSignIn) {
+            SignInSheet()
+                .environmentObject(auth)
+                .environmentObject(circleService)
         }
         .onAppear {
             name = state.profile.name
@@ -113,6 +123,168 @@ struct SettingsView: View {
             Spacer()
         }
         .padding(.top, 16)
+    }
+
+    // MARK: - Root list (v5 mockup)
+
+    /// Signed out: a banner that sells the circle. Signed in: your profile row.
+    /// Either way the profile page is one tap away.
+    @ViewBuilder
+    private var topRow: some View {
+        if !auth.isSignedIn {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("🌷 🌸 🎨").font(.system(size: 22))
+                Text("Pray with real friends")
+                    .font(Theme.sans(18, .heavy))
+                    .foregroundStyle(Theme.inkDeep)
+                Text("Sign in to start your own circle and keep your streak on any phone.")
+                    .font(Theme.sans(13, .semibold))
+                    .foregroundStyle(Theme.inkMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button { showSignIn = true } label: {
+                    Text("Sign in")
+                        .font(Theme.sans(15, .heavy))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(RoundedRectangle(cornerRadius: 14).fill(Theme.green))
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .cardStyle()
+        }
+        NavigationLink(value: Page.profile) {
+            HStack(spacing: 14) {
+                avatarView
+                    .frame(width: 52, height: 52)
+                    .clipShape(Circle())
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(state.profile.name.isEmpty ? "Your profile" : state.profile.name)
+                        .font(Theme.sans(18, .heavy))
+                        .foregroundStyle(Theme.inkDeep)
+                    Text(auth.isSignedIn ? "Signed in · profile & account" : "Profile · not signed in")
+                        .font(Theme.sans(13, .semibold))
+                        .foregroundStyle(Theme.inkMuted)
+                }
+                Spacer(minLength: 4)
+                chevron
+            }
+            .padding(14)
+            .cardStyle()
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// Everything you choose rather than flip: tap through, like iOS.
+    private var navGroup: some View {
+        VStack(spacing: 0) {
+            navRow(.prayerTimes, icon: "🕰", tint: Color(hex: 0xFDEFC7),
+                   title: "Prayer times", value: state.activeLocationName)
+            Divider().padding(.leading, 58)
+            navRow(.circleAndWidget, icon: "👥", tint: Color(hex: 0xDCE7FB),
+                   title: "Circle & widget",
+                   value: state.settings.circleMode == .real ? "Your circle" : "Demo circle")
+            Divider().padding(.leading, 58)
+            navRow(.help, icon: "💬", tint: Color(hex: 0xF1EAFB), title: "Help", value: "")
+            if BuildEnv.showsDeveloperTools {
+                Divider().padding(.leading, 58)
+                navRow(.developer, icon: "🛠", tint: Theme.mist.opacity(0.5),
+                       title: "Developer", value: "")
+            }
+        }
+        .cardStyle()
+    }
+
+    private func navRow(_ page: Page, icon: String, tint: Color,
+                        title: String, value: String) -> some View {
+        NavigationLink(value: page) {
+            HStack(spacing: 12) {
+                Text(icon)
+                    .font(.system(size: 17))
+                    .frame(width: 32, height: 32)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(tint))
+                Text(title)
+                    .font(Theme.sans(16, .semibold))
+                    .foregroundStyle(Theme.inkDeep)
+                Spacer(minLength: 8)
+                Text(value)
+                    .font(Theme.sans(14, .semibold))
+                    .foregroundStyle(Theme.inkMuted)
+                    .lineLimit(1)
+                chevron
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var chevron: some View {
+        Image(systemName: "chevron.right")
+            .font(.system(size: 13, weight: .bold))
+            .foregroundStyle(Theme.inkMuted)
+    }
+
+    /// The pages behind the rows — the same cards as before, one page each.
+    @ViewBuilder
+    private func detail(_ page: Page) -> some View {
+        ZStack {
+            Theme.bg.ignoresSafeArea()
+            ScrollView {
+                VStack(spacing: 16) {
+                    switch page {
+                    case .profile:
+                        profileCard
+                        accountCard
+                    case .prayerTimes:
+                        locationCard
+                        calculationCard
+                    case .circleAndWidget:
+                        widgetCard
+                    case .help:
+                        aboutCard
+                        NavigationLink {
+                            ZStack {
+                                Theme.bg.ignoresSafeArea()
+                                ScrollView { ScoringExplainerContent().padding(16) }
+                            }
+                            .navigationTitle("How scoring works")
+                        } label: {
+                            HStack {
+                                Text("How scoring works ⚡")
+                                    .font(Theme.sans(16, .semibold))
+                                    .foregroundStyle(Theme.inkDeep)
+                                Spacer()
+                                chevron
+                            }
+                            .padding(16)
+                            .cardStyle()
+                        }
+                        .buttonStyle(.plain)
+                    case .developer:
+                        developerCard
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 16)
+            }
+        }
+        .navigationTitle(title(of: page))
+        .navigationBarTitleDisplayMode(.large)
+        .toolbar(.visible, for: .navigationBar)
+    }
+
+    private func title(of page: Page) -> String {
+        switch page {
+        case .profile: return "Profile"
+        case .prayerTimes: return "Prayer times"
+        case .circleAndWidget: return "Circle & widget"
+        case .help: return "Help"
+        case .developer: return "Developer"
+        }
     }
 
     // MARK: - Profile (v3.6: photo + name, more customizable)
@@ -821,10 +993,6 @@ struct SettingsView: View {
             }
             .buttonStyle(.plain)
 
-            Text("Made with 🤲 to help you keep all five, every day.")
-                .font(Theme.sans(13, .semibold))
-                .foregroundStyle(Theme.inkMuted)
-                .padding(.top, 4)
         }
         .padding(18)
         .frame(maxWidth: .infinity)

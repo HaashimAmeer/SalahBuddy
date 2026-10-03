@@ -205,6 +205,9 @@ struct CircleView: View {
             .tutorialTarget(.challenges)
             .id("tour-challenges")
         }
+
+        // v5 (mockup): the month's shared spots and its Explorer.
+        PlacesCard()
     }
 
     // MARK: Header
