@@ -1396,6 +1396,10 @@ struct PostSlotPatch: Encodable {
     var jamaat: Bool
     var placeLabel: String?
     var travelCombined: Bool
+    /// v5: both nullable on the row, so both go out as JSON `null` when absent
+    /// — the same "nothing is an answer" rule as `place_label` below.
+    var placeKind: PlaceTag? = nil
+    var caption: String? = nil
 
     enum CodingKeys: String, CodingKey {
         case tier
@@ -1403,6 +1407,8 @@ struct PostSlotPatch: Encodable {
         case jamaat
         case placeLabel = "place_label"
         case travelCombined = "travel_combined"
+        case placeKind = "place_kind"
+        case caption
     }
 
     /// Hand-written for ONE key. Synthesised `Encodable` emits
@@ -1425,6 +1431,8 @@ struct PostSlotPatch: Encodable {
             try c.encodeNil(forKey: .placeLabel)
         }
         try c.encode(travelCombined, forKey: .travelCombined)
+        try c.encode(placeKind, forKey: .placeKind)
+        try c.encode(caption, forKey: .caption)
     }
 }
 
@@ -1507,7 +1515,8 @@ final class SupabaseCircleTransport: CircleSyncTransport {
 
     private func updatePostSlot(_ row: RemotePost) async throws {
         let patch = PostSlotPatch(tier: row.tier, loggedAt: row.loggedAt, jamaat: row.jamaat,
-                                  placeLabel: row.placeLabel, travelCombined: row.travelCombined)
+                                  placeLabel: row.placeLabel, travelCombined: row.travelCombined,
+                                  placeKind: row.placeKind, caption: row.caption)
         let query = try Supa.client
             .from("posts")
             .update(patch, returning: .minimal)

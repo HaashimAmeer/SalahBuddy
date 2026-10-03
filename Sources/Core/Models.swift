@@ -71,7 +71,7 @@ enum LogTier: String, Codable {
         case .lastCall: return "Getting late"
         case .closeCall: return "Just made it"
         case .qada: return "Made up (Qada)"
-        case .forgot: return "Prayed · not logged"
+        case .forgot: return "Prayed · logged later"
         }
     }
 
@@ -846,6 +846,8 @@ struct GridEntry: Identifiable {
     let state: GridEntryState
     /// v3: short place pill for posted squares, e.g. "🏠 Home" or "📍 Capitol Hill".
     var placeLabel: String? = nil
+    /// v5: the poster's caption, for posted squares only.
+    var caption: String? = nil
 }
 
 enum GridCellState: Equatable {
@@ -854,6 +856,14 @@ enum GridCellState: Equatable {
     case missed
     case excused
     case future
+
+    /// The cell a logged prayer draws. v5: a forgotten log is `.inWindow(.forgot)`
+    /// — it reads as PRAYED, not "made up" — even though `isInWindow` is false
+    /// for scoring. Every surface that turns a tier into a cell goes through
+    /// here, so the two meanings cannot drift apart screen by screen.
+    static func logged(_ tier: LogTier) -> GridCellState {
+        tier == .forgot || tier.isInWindow ? .inWindow(tier) : .qada
+    }
 }
 
 struct MemberWeekRow: Identifiable {

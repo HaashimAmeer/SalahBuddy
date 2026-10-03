@@ -142,6 +142,15 @@ struct PhotoSquare: View {
                         .padding(.vertical, 2)
                         .background(.black.opacity(0.35), in: Capsule())
                 }
+                // v5: the caption, on tiles big enough to read one line. The
+                // flush Today grid shows it in tap-to-enlarge instead.
+                if let caption = entry.caption, size >= 120, !flush {
+                    Text(caption)
+                        .font(Theme.sans(max(9, t * 0.07), .semibold))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .opacity(0.95)
+                }
                 HStack(spacing: 4) {
                     Text(entry.member.name)
                         .font(Theme.sans(nameFontSize, .bold))

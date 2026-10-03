@@ -56,7 +56,7 @@ enum WidgetTheme {
         case .prayed: return pair(light: light, dark: Color(hex: 0x54D392))
         case .lastCall, .closeCall: return pair(light: light, dark: Color(hex: 0xF5B77A))
         case .qada: return pair(light: light, dark: Color(hex: 0x86AEF7))
-        case .forgot: return pair(light: Color(hex: 0x8DA197), dark: Color(hex: 0xA9BAB1))
+        case .forgot: return pair(light: light, dark: Color(hex: 0xA9BAB1))
         }
     }
 

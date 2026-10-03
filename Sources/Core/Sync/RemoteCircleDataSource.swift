@@ -126,7 +126,7 @@ struct RemoteCircleDataSource: CircleDataSource {
         switch visibility(userID: userID, prayer: prayer, dayKey: dayKey,
                           window: window, now: now) {
         case .posted(let post):
-            return post.tier.isInWindow ? .inWindow(post.tier) : .qada
+            return .logged(post.tier)
         case .pending, .waiting:
             return .future
         case .excused:
@@ -172,6 +172,17 @@ struct RemoteCircleDataSource: CircleDataSource {
             return nil
         }
         return RemoteCircleDataSource.nonEmpty(post.photoPath)
+    }
+
+    func caption(forMember id: String, prayer: Prayer, dayKey: String,
+                 asOf now: Date) -> String? {
+        guard let userID = userID(forMember: id),
+              let post = snapshot.post(userID: userID, dayKey: dayKey, prayer: prayer,
+                                       asOf: now),
+              post.tier.isInWindow else {
+            return nil
+        }
+        return RemoteCircleDataSource.nonEmpty(post.caption)
     }
 
     /// Treats an empty string as absent — a column that came back "" must not

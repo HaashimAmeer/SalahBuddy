@@ -392,7 +392,7 @@ final class AppState: ObservableObject {
     /// (photo-save failure must never lose the prayer). If the window already
     /// passed this also handles the qada path (photo/jamaat are dropped).
     func log(_ prayer: Prayer, photoFilename: String? = nil, jamaat: Bool = false,
-             placeTag: PlaceTag? = nil, placeName: String? = nil) {
+             placeTag: PlaceTag? = nil, placeName: String? = nil, caption: String? = nil) {
         guard let target = targetWindow(for: prayer) else { return }            // not computable / upcoming
         guard !hasLog(prayer: prayer, dayKey: target.dayKey) else { return }    // double-log = no-op
         guard let tier = GameEngine.tier(for: target.window, at: AppClock.now) else { return } // window not open yet
@@ -400,7 +400,7 @@ final class AppState: ObservableObject {
         let snapshot = preLogSnapshot(dayKey: target.dayKey)
         let entry = buildLog(prayer: prayer, dayKey: target.dayKey, tier: tier,
                              photoFilename: photoFilename, jamaat: jamaat,
-                             placeTag: placeTag, placeName: placeName)
+                             placeTag: placeTag, placeName: placeName, caption: caption)
         logs.append(entry)
         finalizeLogging(added: [entry], snapshot: snapshot,
                         celebrationPrayer: prayer, celebrationTier: tier, dayKey: target.dayKey,
@@ -412,13 +412,14 @@ final class AppState: ObservableObject {
     /// [lead.start, follow.end], so combining early still earns the most. Both
     /// share the photo; each computes its own (Jumma-aware) congregation bonus.
     func logCombined(lead: Prayer, photoFilename: String? = nil, jamaat: Bool = false,
-                     placeTag: PlaceTag? = nil, placeName: String? = nil) {
+                     placeTag: PlaceTag? = nil, placeName: String? = nil,
+                     caption: String? = nil) {
         guard let follow = TravelPairs.partner(of: lead),
               TravelPairs.lead(of: lead) == lead,
               let combined = combinedWindow(lead: lead),
               let tier = GameEngine.tier(for: combined, at: AppClock.now) else {
             log(lead, photoFilename: photoFilename, jamaat: jamaat,
-                placeTag: placeTag, placeName: placeName)
+                placeTag: placeTag, placeName: placeName, caption: caption)
             return
         }
         let dayKey = todaySchedule?.dayKey ?? todayKey
@@ -428,7 +429,8 @@ final class AppState: ObservableObject {
         for prayer in [lead, follow] where !hasLog(prayer: prayer, dayKey: dayKey) {
             added.append(buildLog(prayer: prayer, dayKey: dayKey, tier: tier,
                                   photoFilename: photoFilename, jamaat: jamaat,
-                                  placeTag: placeTag, placeName: placeName))
+                                  placeTag: placeTag, placeName: placeName,
+                                  caption: caption))
         }
         guard !added.isEmpty else { return }
         logs.append(contentsOf: added)
@@ -452,7 +454,8 @@ final class AppState: ObservableObject {
     /// bonus, and the remember-place side effect.
     private func buildLog(prayer: Prayer, dayKey: String, tier: LogTier,
                           photoFilename: String?, jamaat: Bool,
-                          placeTag: PlaceTag?, placeName: String?) -> PrayerLog {
+                          placeTag: PlaceTag?, placeName: String?,
+                          caption: String? = nil) -> PrayerLog {
         let inWindow = tier.isInWindow
         let normalizedPhoto: String? = {
             guard inWindow, let name = photoFilename, !name.isEmpty else { return nil }
@@ -468,7 +471,10 @@ final class AppState: ObservableObject {
                          photoFilename: normalizedPhoto, jamaat: countsJamaat,
                          placeTag: countsPlace,
                          placeName: countsPlace == .onTheGo ? placeName : nil,
-                         utcOffset: AppClock.utcOffsetSeconds)
+                         utcOffset: AppClock.utcOffsetSeconds,
+                         // v5: a caption belongs to a photo, so it goes where
+                         // the photo goes — a lapse into qada drops both.
+                         caption: inWindow ? PrayerLog.normalizedCaption(caption) : nil)
     }
 
     private struct PreLogSnapshot {
@@ -668,6 +674,26 @@ final class AppState: ObservableObject {
     /// XP a retroactive make-up of `dayKey` would earn right now.
     func lateEditXP(forDayKey dayKey: String) -> Int {
         GameEngine.lateEditXP(dayKey: dayKey, todayKey: todayKey)
+    }
+
+    /// v5: "I prayed it in its time and forgot to log it." The sibling of
+    /// `logPastMakeUp`, from the same Journey day sheet and behind the same
+    /// guard, but a different claim: it was prayed on time, so it is not a
+    /// make-up. It earns nothing (`LogTier.forgot`), carries no photo or
+    /// caption, and — like any past-day edit — never rewrites a streak that
+    /// already settled. It still reaches the circle (unannounced), so friends'
+    /// grids say "prayed" instead of "missed".
+    func logForgot(_ prayer: Prayer, dayKey: String) {
+        guard dayKey < todayKey,
+              !hasAnyLog(prayer: prayer, dayKey: dayKey),
+              !isExcused(prayer: prayer, dayKey: dayKey) else { return }
+        let entry = PrayerLog(id: UUID(), prayer: prayer, dayKey: dayKey,
+                              loggedAt: AppClock.now, tier: .forgot, xp: LogTier.forgot.xp,
+                              utcOffset: AppClock.utcOffsetSeconds)
+        logs.append(entry)
+        persist()
+        mirrorLogged([entry], travelCombined: false, announce: false)
+        objectWillChange.send()
     }
 
     func undoLog(_ prayer: Prayer) {
@@ -1253,19 +1279,26 @@ final class AppState: ObservableObject {
                                       dayKey: dayKey, window: window, now: now)
             let entryID: String = AppState.gridEntryID(memberID: member.id, dayKey: dayKey,
                                                       prayer: prayer)
+            let caption: String? = {
+                guard case .posted = result.state else { return nil }
+                return source.caption(forMember: member.id, prayer: prayer,
+                                      dayKey: dayKey, asOf: now)
+            }()
             entries.append(GridEntry(id: entryID,
                                      member: member, state: result.state,
-                                     placeLabel: result.placeLabel))
+                                     placeLabel: result.placeLabel, caption: caption))
         }
 
         let myState: GridEntryState
         var myPlaceLabel: String? = nil
+        var myCaption: String? = nil
         if let myLog = cellLog(prayer: prayer, dayKey: dayKey) {
             if myLog.tier.isInWindow {
                 let content: PostContent = myLog.photoFilename.map { .photo(filename: $0) }
                     ?? .illustration(seed: BuddySimulator.seed(name: "you", dayKey: dayKey, prayer: prayer))
                 myState = .posted(content, tier: myLog.tier, at: myLog.loggedAt)
                 myPlaceLabel = Self.placeLabel(for: myLog)
+                myCaption = myLog.caption
             } else {
                 myState = .qada(at: myLog.loggedAt)
             }
@@ -1278,7 +1311,8 @@ final class AppState: ObservableObject {
         }
         let myEntryID: String = AppState.gridEntryID(memberID: "you", dayKey: dayKey, prayer: prayer)
         entries.append(GridEntry(id: myEntryID,
-                                 member: youMember, state: myState, placeLabel: myPlaceLabel))
+                                 member: youMember, state: myState, placeLabel: myPlaceLabel,
+                                 caption: myCaption))
         return entries
     }
 
@@ -1465,7 +1499,7 @@ final class AppState: ObservableObject {
     private func myCell(dayKey: String, prayer: Prayer,
                         window: PrayerWindow?, now: Date) -> GridCellState {
         if let log = GameEngine.latestLog(prayer: prayer, dayKey: dayKey, in: logs) {
-            return log.tier.isInWindow ? .inWindow(log.tier) : .qada
+            return .logged(log.tier)
         }
         if isExcused(prayer: prayer, dayKey: dayKey) { return .excused }
         guard let window else { return .future }

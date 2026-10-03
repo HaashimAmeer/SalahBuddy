@@ -548,6 +548,14 @@ struct PrayerPhotoDetailContent: View {
                 .font(Theme.sans(20, .bold))
                 .foregroundStyle(Theme.inkDeep)
             photo
+            if let caption = entry.caption {
+                Text(caption)
+                    .font(Theme.sans(15, .semibold))
+                    .foregroundStyle(Theme.inkDeep)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity)
+            }
             detailRow
         }
     }

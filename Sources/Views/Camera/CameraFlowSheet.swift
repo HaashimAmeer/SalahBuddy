@@ -44,8 +44,9 @@ struct CameraFlowSheet: View {
                                 combinedLead: target.combinedLead,
                                 image: image,
                                 windowEnd: target.windowEnd,
-                                onPost: { jamaat, place, placeName in
-                                    post(image, jamaat: jamaat, place: place, placeName: placeName)
+                                onPost: { jamaat, place, placeName, caption in
+                                    post(image, jamaat: jamaat, place: place,
+                                         placeName: placeName, caption: caption)
                                 },
                                 onRetake: { captured = nil },
                                 onCancel: { dismiss() })
@@ -89,7 +90,8 @@ struct CameraFlowSheet: View {
     /// logged), the JPEG deleted as an orphan, `added` empty, and the `guard`
     /// below dismissing the very explanation the first tap had just earned.
     /// Harmless before this screen existed; the whole point of it now.
-    private func post(_ image: UIImage, jamaat: Bool, place: PlaceTag?, placeName: String?) {
+    private func post(_ image: UIImage, jamaat: Bool, place: PlaceTag?, placeName: String?,
+                      caption: String?) {
         guard !hasPosted else { return }
         hasPosted = true
         // Photo-save failure (disk) must never lose the prayer: an empty
@@ -100,10 +102,10 @@ struct CameraFlowSheet: View {
         withAnimation(Theme.spring) {
             if let lead = target.combinedLead {
                 state.logCombined(lead: lead, photoFilename: filename, jamaat: jamaat,
-                                  placeTag: place, placeName: placeName)
+                                  placeTag: place, placeName: placeName, caption: caption)
             } else {
                 state.log(target.prayer, photoFilename: filename, jamaat: jamaat,
-                          placeTag: place, placeName: placeName)
+                          placeTag: place, placeName: placeName, caption: caption)
             }
         }
         PhotoStore.deleteIfOrphaned(filename, in: state.logs)
@@ -131,7 +133,8 @@ struct PostConfirmView: View {
     let image: UIImage
     /// v4.1: when this screen's window closes — see `WindowClosingNotice`.
     let windowEnd: Date
-    let onPost: (Bool, PlaceTag?, String?) -> Void
+    /// (jamaat, place tag, on-the-go place name, caption)
+    let onPost: (Bool, PlaceTag?, String?, String?) -> Void
     let onRetake: () -> Void
     let onCancel: () -> Void
 
@@ -140,6 +143,10 @@ struct PostConfirmView: View {
     @State private var jamaat = false
     @State private var place: PlaceTag?
     @State private var autoSuggested = false
+    /// v5: optional, one line. Normalized (and capped) by `AppState` on the
+    /// way into the log, so what is typed here is never what gets refused.
+    @State private var caption = ""
+    @FocusState private var captionFocused: Bool
 
     /// Reverse-geocoded spot name, only attached for the "On the go" tag and
     /// only when the device location actually resolved one.
@@ -159,6 +166,8 @@ struct PostConfirmView: View {
 
                 placePicker
 
+                captionField
+
                 PotentialXPLine(prayer: prayer, combinedLead: combinedLead, jamaat: jamaat)
 
                 // v4.1: sits directly under the XP line because it is that line
@@ -169,7 +178,8 @@ struct PostConfirmView: View {
 
                 // v3.9: no circle yet → nowhere to post it "to".
                 PostCTA(prayer: prayer, combinedLead: combinedLead, solo: state.isSoloMode) {
-                    onPost(jamaat, place, resolvedPlaceName)
+                    captionFocused = false
+                    onPost(jamaat, place, resolvedPlaceName, caption)
                 }
 
                 Button(action: onRetake) {
@@ -299,6 +309,47 @@ struct PostConfirmView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .cardStyle()
         .animation(Theme.spring, value: place)
+    }
+
+    /// v5: "Add a caption". Friends see it under your photo; the count only
+    /// appears near the limit, in the same unit the server counts.
+    private var captionField: some View {
+        let used: Int = caption.unicodeScalars.count
+        let limit: Int = PrayerLog.captionMaxScalars
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Add a caption (optional)")
+                    .font(Theme.sans(13, .semibold))
+                    .foregroundStyle(Theme.inkMuted)
+                Spacer()
+                if used > limit - 20 {
+                    Text("\(max(0, limit - used))")
+                        .font(Theme.sans(12, .bold))
+                        .foregroundStyle(used > limit ? Theme.amber : Theme.inkMuted)
+                        .monospacedDigit()
+                }
+            }
+            TextField("A line for your circle…", text: $caption)
+                .font(Theme.sans(15, .semibold))
+                .foregroundStyle(Theme.inkDeep)
+                .submitLabel(.done)
+                .focused($captionFocused)
+                .onSubmit { captionFocused = false }
+                .onChange(of: caption) { _, new in
+                    // Hard stop at the server's limit, cut on a Character
+                    // boundary so an emoji is never split.
+                    var trimmed: String = new
+                    while trimmed.unicodeScalars.count > limit { trimmed.removeLast() }
+                    if trimmed != new { caption = trimmed }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 11)
+                .background(Theme.bg, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .accessibilityLabel("Caption")
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .cardStyle()
     }
 
     private func placeChip(_ tag: PlaceTag) -> some View {

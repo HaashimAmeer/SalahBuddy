@@ -17,6 +17,7 @@ enum Theme {
     static let amber     = Color(hex: 0xF2A65A)   // lastCall
     static let lilac     = Color(hex: 0xA98BDB)   // excused
     static let mist      = Color(hex: 0xC9CFCB)   // missed (NEVER red)
+    static let sage      = Color(hex: 0x6F8A7C)   // v5: prayed, logged later ("forgot")
 
     // MARK: legacy aliases (v1 names → v2 palette)
     static let cream     = bg
@@ -59,7 +60,7 @@ enum Theme {
             case .lastCall: return amber
             case .closeCall: return amber.opacity(0.8)  // 4th quarter
             case .qada: return qadaBlue                 // defensive (shouldn't occur)
-            case .forgot: return Color(hex: 0x8DA197)   // defensive: done, but quiet
+            case .forgot: return sage                   // v5: prayed, logged later
             }
         case .qada: return qadaBlue
         case .missed: return mist

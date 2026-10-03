@@ -928,6 +928,9 @@ private struct DayPhotoSheet: View {
     let summary: DayPhotoSummary
     @EnvironmentObject private var state: AppState
     @Environment(\.dismiss) private var dismiss
+    /// v5: the missed prayer whose "Log it" was tapped — the sheet asks which
+    /// of the two things actually happened before writing anything.
+    @State private var askingFor: Prayer?
 
     var body: some View {
         ZStack {
@@ -1060,9 +1063,7 @@ private struct DayPhotoSheet: View {
             }
 
             if isEditablePastDay, hasEditableMiss(dayLogs) {
-                Text(state.lateEditXP(forDayKey: summary.id) > 0
-                     ? "Forgot to log a make-up? Tap it — recent edits still earn +\(state.lateEditXP(forDayKey: summary.id)) XP."
-                     : "Forgot to log a make-up? Tap it — edits this far back don't earn XP, but the record counts.")
+                Text("Prayed one but didn't log it? Tap Log it — on time or made up later, the record counts.")
                     .font(Theme.sans(11.5, .semibold))
                     .foregroundStyle(Theme.inkMuted)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1071,6 +1072,24 @@ private struct DayPhotoSheet: View {
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
         .cardStyle()
+        .confirmationDialog(askingFor.map { "\($0.emoji) \($0.displayName)" } ?? "",
+                            isPresented: Binding(get: { askingFor != nil },
+                                                 set: { if !$0 { askingFor = nil } }),
+                            titleVisibility: .visible,
+                            presenting: askingFor) { prayer in
+            let xp = state.lateEditXP(forDayKey: summary.id)
+            Button("I prayed it on time, just forgot to log") {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                withAnimation(Theme.spring) { state.logForgot(prayer, dayKey: summary.id) }
+            }
+            Button(xp > 0 ? "I made it up later · +\(xp) XP" : "I made it up later") {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                withAnimation(Theme.spring) { state.logPastMakeUp(prayer, dayKey: summary.id) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text("Logged late, a prayer on time earns no XP — logging as you pray is what counts. It still shows as prayed.")
+        }
     }
 
     private func hasEditableMiss(_ dayLogs: [PrayerLog]) -> Bool {
@@ -1109,15 +1128,13 @@ private struct DayPhotoSheet: View {
     }
 
     private func makeUpButton(_ prayer: Prayer) -> some View {
-        let xp = state.lateEditXP(forDayKey: summary.id)
-        return Button {
-            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-            withAnimation(Theme.spring) { state.logPastMakeUp(prayer, dayKey: summary.id) }
+        Button {
+            askingFor = prayer
         } label: {
             HStack(spacing: 4) {
                 Image(systemName: "plus.circle.fill")
                     .font(.system(size: 13, weight: .semibold))
-                Text(xp > 0 ? "Made it up · +\(xp) XP" : "Made it up")
+                Text("Log it")
                     .font(Theme.sans(12, .bold))
             }
             .foregroundStyle(Theme.qadaBlue)
@@ -1130,7 +1147,7 @@ private struct DayPhotoSheet: View {
 
     private func rowColor(log: PrayerLog?, excused: Bool) -> Color {
         if let log {
-            return Theme.color(for: log.tier.isInWindow ? .inWindow(log.tier) : .qada)
+            return Theme.color(for: .logged(log.tier))
         }
         return excused ? Theme.lilac : Theme.mist
     }
@@ -1138,6 +1155,7 @@ private struct DayPhotoSheet: View {
     private func rowStatus(log: PrayerLog?, excused: Bool) -> String {
         if let log {
             let time = log.loggedAt.formatted(.dateTime.hour().minute())
+            if log.tier == .forgot { return log.tier.label }
             return log.tier.isInWindow ? "\(log.tier.label) · \(time)" : "Made up · \(time)"
         }
         return excused ? "Excused" : "Missed"
@@ -1163,6 +1181,7 @@ struct ScoringExplainerContent: View {
                         row("Third quarter", "+15 XP", Theme.amber)
                         row("Final quarter", "+12 XP", Theme.amber)
                         row("Made up later (Qada)", "+\(LogTier.qada.xp) XP", Theme.qadaBlue)
+                        row("Prayed on time, logged later", "+\(LogTier.forgot.xp) XP", Theme.sage)
                     }
                     section("🤝 Praying in a group") {
                         bullet("Prayed in jamaat (or Jumma on Friday)? Your prayer is lifted to 30 XP.")

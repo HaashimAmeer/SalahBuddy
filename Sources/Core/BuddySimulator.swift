@@ -143,6 +143,26 @@ enum BuddySimulator {
         }
     }
 
+    /// v5: a deterministic caption for a buddy's post (~40% have one).
+    /// Shifted bits, so it is not correlated with `placeTag(seed:)`.
+    static func caption(seed: UInt64) -> String? {
+        guard (seed >> 9) % 100 < 40 else { return nil }
+        return demoCaptions[Int((seed >> 17) % UInt64(demoCaptions.count))]
+    }
+
+    static let demoCaptions: [String] = [
+        "alarm #3 did it",
+        "between meetings, alhamdulillah",
+        "the ducks were watching",
+        "with the aunties after halaqa",
+        "quick one before class",
+        "sand in everything, worth it",
+        "made it just in time 😅",
+        "quiet corner at the library",
+        "on the road again",
+        "beautiful sky today",
+    ]
+
     /// Deterministic outcome for one buddy × day × prayer. Pure function of
     /// (buddy, dayKey, window) — never reads the clock.
     static func outcome(for buddy: Buddy, dayKey: String, window: PrayerWindow) -> Outcome {
