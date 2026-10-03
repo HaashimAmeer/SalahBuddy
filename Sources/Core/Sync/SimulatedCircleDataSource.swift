@@ -26,6 +26,15 @@ struct SimulatedCircleDataSource: CircleDataSource {
 
     // MARK: - Grid
 
+    /// v5: the demo circle captions some posts too, from the same seed as the
+    /// illustration and the place tag, so time travel reproduces it exactly.
+    func caption(forMember id: String, prayer: Prayer, dayKey: String,
+                 asOf now: Date) -> String? {
+        guard let buddy = buddy(forMember: id) else { return nil }
+        return BuddySimulator.caption(seed: BuddySimulator.seed(name: buddy.name,
+                                                               dayKey: dayKey, prayer: prayer))
+    }
+
     func entry(forMember id: String, prayer: Prayer, dayKey: String,
                window: PrayerWindow?, now: Date) -> (state: GridEntryState, placeLabel: String?) {
         guard let buddy = buddy(forMember: id), let window else { return (.waiting, nil) }

@@ -60,6 +60,11 @@ protocol CircleDataSource {
     /// the same rule at the same instant the tier was.
     func photoPath(forMember id: String, prayer: Prayer, dayKey: String,
                    asOf now: Date) -> String?
+
+    /// v5: the caption under this member's post for one square, when there is
+    /// one. Same resolution rule as `photoPath`, for the same reason.
+    func caption(forMember id: String, prayer: Prayer, dayKey: String,
+                 asOf now: Date) -> String?
 }
 
 extension CircleDataSource {
@@ -70,6 +75,11 @@ extension CircleDataSource {
     /// Phase C.
     func photoPath(forMember id: String, prayer: Prayer, dayKey: String,
                    asOf now: Date) -> String? {
+        nil
+    }
+
+    func caption(forMember id: String, prayer: Prayer, dayKey: String,
+                 asOf now: Date) -> String? {
         nil
     }
 }

@@ -13,7 +13,7 @@ Each prayer's window (e.g. Asr → Maghrib) is split into **four quarters**. The
 | 3rd quarter | **15** |
 | 4th quarter | **12** |
 | Made up later same day (Qada, tap-only, no photo) | **5** |
-| Prayed in its time but forgot to log it (v5, `forgot`, tap-only, no photo — not in the app's UI yet) | **0** — counts toward a complete day and the streak, never a perfect day |
+| Prayed in its time but forgot to log it (v5, `forgot`: Journey → a past day → Log it; tap-only, no photo) | **0** — shows as prayed and counts toward a complete day, never a perfect day; like any past-day edit it does not rewrite a streak that already settled |
 | Never logged | 0 — shown as "you missed out on +30 XP" |
 
 In-window always beats qada; qada always beats nothing.

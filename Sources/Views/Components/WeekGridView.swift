@@ -100,6 +100,8 @@ struct WeekGridView: View {
         var anyQada = false
         for cell in cells {
             switch cell {
+            // v5: a forgotten log is done but, like a make-up, never perfect.
+            case .inWindow(.forgot): done += 1; anyQada = true
             case .inWindow: done += 1
             case .qada: done += 1; anyQada = true
             case .missed, .excused, .future: break
@@ -214,7 +216,7 @@ struct WeekGridView: View {
         case .inWindow(.lastCall): return "Late"
         case .inWindow(.closeCall): return "Just made it"
         case .inWindow(.qada), .qada: return "Made up"
-        case .inWindow(.forgot): return "Prayed"   // defensive (forgot is never in-window)
+        case .inWindow(.forgot): return "Prayed · logged later"
         case .missed: return "Missed"
         case .excused: return "Excused"
         case .future: return "—"
