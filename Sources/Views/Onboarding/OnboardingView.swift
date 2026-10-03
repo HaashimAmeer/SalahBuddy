@@ -10,6 +10,9 @@ struct OnboardingView: View {
     @ObservedObject private var location = LocationProvider.shared
 
     @State private var step = 0
+    /// v5 (mockup): welcome, about you, hardest prayer, permissions, how XP
+    /// works, your circle.
+    private static let stepCount = 6
     @State private var name = ""
     @State private var kind: String?      // v3.2: "brother" / "sister" (optional)
     @State private var hardest: Prayer?
@@ -35,7 +38,9 @@ struct OnboardingView: View {
                         case 0: welcomeStep
                         case 1: kindStep
                         case 2: goalStep
-                        default: permissionsStep
+                        case 3: permissionsStep
+                        case 4: xpStep
+                        default: circleStep
                         }
                     }
                     // One identity per step + an explicit crossfade. The switch
@@ -99,7 +104,7 @@ struct OnboardingView: View {
 
     private var stepDots: some View {
         HStack(spacing: 8) {
-            ForEach(0..<4, id: \.self) { i in
+            ForEach(0..<Self.stepCount, id: \.self) { i in
                 Capsule()
                     .fill(i == step ? Theme.green : Theme.greenSoft)
                     .frame(width: i == step ? 22 : 8, height: 8)
@@ -109,7 +114,7 @@ struct OnboardingView: View {
 
     private var footer: some View {
         VStack(spacing: 10) {
-            ChunkyButton(title: step == 3 ? "Let's go! 🚀" : "Continue",
+            ChunkyButton(title: step == Self.stepCount - 1 ? "Let's go! 🚀" : "Continue",
                          color: Theme.green, isEnabled: true) {
                 advance()
             }
@@ -133,7 +138,7 @@ struct OnboardingView: View {
         // is mid-flight, and the ScrollView re-resolves its content offset
         // against a height that is still moving.
         nameFocused = false
-        if step < 3 {
+        if step < Self.stepCount - 1 {
             withAnimation(Theme.spring) { step += 1 }
         } else {
             finish()
@@ -437,6 +442,94 @@ struct OnboardingView: View {
         s.hardestPrayer = hardest          // seeds the goal3 challenge
         s.hasOnboarded = true
         state.settings = s                 // single write: didSet persists + refreshes
+    }
+}
+
+// MARK: - Steps 4–5 (v5 mockup)
+
+extension OnboardingView {
+
+    /// Step 4: earlier = more XP. The four parts of a window, as `LogTier`
+    /// scores them.
+    var xpStep: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Earlier = more XP ⚡")
+                .font(Theme.sans(28, .heavy))
+                .foregroundStyle(Theme.inkDeep)
+            Text("Each time you pray, snap a photo of your spot. Every prayer's window has four parts, and the sooner you post, the more you earn.")
+                .font(Theme.sans(15, .semibold))
+                .foregroundStyle(Theme.inkMuted)
+                .fixedSize(horizontal: false, vertical: true)
+
+            VStack(spacing: 10) {
+                HStack(spacing: 4) {
+                    ForEach(Self.quarters, id: \.label) { quarter in
+                        Capsule().fill(quarter.color).frame(height: 12)
+                    }
+                }
+                HStack(spacing: 4) {
+                    ForEach(Self.quarters, id: \.label) { quarter in
+                        VStack(spacing: 2) {
+                            Text("+\(quarter.tier.xp)")
+                                .font(Theme.sans(16, .heavy))
+                                .foregroundStyle(quarter.color)
+                            Text(quarter.label)
+                                .font(Theme.sans(11, .bold))
+                                .foregroundStyle(Theme.inkMuted)
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                }
+                Text("On Today, a gold bar shows how long your current part lasts.")
+                    .font(Theme.sans(12, .semibold))
+                    .foregroundStyle(Color(hex: 0x7A5600))
+                    .frame(maxWidth: .infinity)
+                    .multilineTextAlignment(.center)
+            }
+            .padding(16)
+            .cardStyle()
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("🕌 Prayed in jamaat? Any prayer counts as +\(LogTier.onTime.xp).")
+                Text("💙 Window closed? A make-up still earns +\(LogTier.qada.xp).")
+            }
+            .font(Theme.sans(14, .semibold))
+            .foregroundStyle(Theme.inkDeep)
+        }
+        .padding(.top, 24)
+    }
+
+    private static let quarters: [(tier: LogTier, label: String, color: Color)] = [
+        (.onTime, "First", Color(hex: 0x1F8A50)),
+        (.prayed, "Second", Theme.green),
+        (.lastCall, "Third", Theme.amber),
+        (.closeCall, "Last", Color(hex: 0xE9A863)),
+    ]
+
+    /// Step 5: the circle, and how Today moves.
+    var circleStep: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Pray with your people")
+                .font(Theme.sans(28, .heavy))
+                .foregroundStyle(Theme.inkDeep)
+            Text("Post your prayer and your circle's photos come in underneath it, live. On Today, swipe sideways to move between prayers.")
+                .font(Theme.sans(15, .semibold))
+                .foregroundStyle(Theme.inkMuted)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 10) {
+                ForEach(0..<3, id: \.self) { i in
+                    IllustratedPrayerCard(seed: UInt64(i * 7919 + 17))
+                        .frame(width: 96, height: 128)
+                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                }
+            }
+            .frame(maxWidth: .infinity)
+            Text("You can start a circle or join a friend's from the Circle tab whenever you're ready.")
+                .font(Theme.sans(13, .semibold))
+                .foregroundStyle(Theme.inkMuted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.top, 24)
     }
 }
 
