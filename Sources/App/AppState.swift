@@ -148,7 +148,7 @@ final class AppState: ObservableObject {
 
     /// Yesterday's isha window — it may still be open past midnight
     /// (it ends at TODAY's fajr). Used so a 1 AM isha log counts for yesterday.
-    private var previousIshaWindow: PrayerWindow?
+    private(set) var previousIshaWindow: PrayerWindow?
     private var previousDayKey: String = ""
 
     /// Per-dayKey schedule cache for circle grids/weeks. Cleared on refresh()

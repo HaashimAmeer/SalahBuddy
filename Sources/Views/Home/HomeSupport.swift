@@ -91,42 +91,6 @@ extension AppState {
                           windowEnd: current.end, isYesterdayIsha: false)
     }
 
-    /// Today's prayers whose windows already started, excluding whatever the
-    /// current block already represents (oldest first). Empty pre-fajr.
-    func earlierTodayPrayers(now: Date) -> [Prayer] {
-        guard let schedule = todaySchedule,
-              let block = currentTodayBlock(now: now), !block.isYesterdayIsha else { return [] }
-        var shown: Set<Prayer> = [block.prayer]
-        if let partner = block.combinedWith { shown.insert(partner) }
-        return schedule.windows
-            .filter { $0.start <= now && !shown.contains($0.prayer) }
-            .sorted { $0.start < $1.start }
-            .map(\.prayer)
-    }
-
-    /// Today's prayers whose windows haven't opened yet (soonest first). While
-    /// traveling, a pair whose lead is still upcoming collapses to one entry
-    /// (the lead window; the UI labels it "Dhuhr + Asr").
-    func upcomingTodayWindows(now: Date) -> [PrayerWindow] {
-        guard let schedule = todaySchedule else { return [] }
-        let future = schedule.windows.filter { $0.start > now }.sorted { $0.start < $1.start }
-        guard isTraveling else { return future }
-        // Drop the follow prayer of any pair whose lead is also upcoming —
-        // the combined card/row covers it.
-        return future.filter { window in
-            guard let lead = TravelPairs.partner(of: window.prayer).map({ _ in TravelPairs.lead(of: window.prayer) }),
-                  lead != window.prayer else { return true }
-            return !future.contains { $0.prayer == lead }
-        }
-    }
-
-    /// Whether an upcoming window should be labelled as a combined pair.
-    func upcomingCombinedPartner(for prayer: Prayer, now: Date) -> Prayer? {
-        guard isTraveling, TravelPairs.lead(of: prayer) == prayer,
-              let follow = TravelPairs.partner(of: prayer) else { return nil }
-        return follow
-    }
-
     /// Today's passed-unlogged prayers — the make-up (qada) candidates.
     ///
     /// `.beforeJoining` counts. Somebody installing at Maghrib may well have
@@ -153,5 +117,52 @@ extension AppState {
             if case .beforeJoining = status(of: $0) { return true }
             return false
         }
+    }
+}
+
+// MARK: - Today pager (v5 mockup)
+
+/// What one Today page shows for YOU.
+enum TodayPageStatus: Equatable {
+    case upcoming
+    case open
+    case logged(PrayerLog)
+    /// The window passed with nothing logged. `canMakeUp` mirrors the make-up
+    /// section's own candidates (today only), so the two never disagree.
+    case missed(canMakeUp: Bool)
+    case excused
+}
+
+@MainActor
+extension AppState {
+
+    /// Every page of the Today pager, in time order — see `TodayPages`.
+    func todayPages(now: Date) -> [TodayPage] {
+        guard let schedule = todaySchedule else { return [] }
+        let yesterday = Calendar.current.date(byAdding: .day, value: -1,
+                                              to: Calendar.current.startOfDay(for: now))
+        let yesterdayKey = yesterday.map { AppClock.dayKey(for: $0) } ?? schedule.dayKey
+        return TodayPages.build(schedule: schedule, yesterdayKey: yesterdayKey,
+                                traveling: isTraveling, now: now)
+    }
+
+    func pageStatus(_ page: TodayPage, now: Date) -> TodayPageStatus {
+        if isExcused(prayer: page.prayer, dayKey: page.dayKey) { return .excused }
+        if let log = GameEngine.latestLog(prayer: page.prayer, dayKey: page.dayKey, in: logs) {
+            return .logged(log)
+        }
+        if let start = page.start, now < start { return .upcoming }
+        if now < page.end { return .open }
+        let candidates = makeUpPrayers
+        let canMakeUp = page.dayKey == todayKey
+            && (candidates.contains(page.prayer)
+                || page.combinedWith.map(candidates.contains) == true)
+        return .missed(canMakeUp: canMakeUp)
+    }
+
+    /// The tier a post would earn on `page` right now — the pair's combined
+    /// window while traveling, exactly as `logCombined` judges it.
+    func pageTier(_ page: TodayPage) -> LogTier? {
+        postOutlook(prayer: page.prayer, combinedLead: page.combinedWith != nil ? page.prayer : nil)?.tier
     }
 }
