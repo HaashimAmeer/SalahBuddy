@@ -297,7 +297,11 @@ extension WidgetSnapshot.Post {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         name = (try? c.decodeIfPresent(String.self, forKey: .name)) ?? ""
         emoji = (try? c.decodeIfPresent(String.self, forKey: .emoji)) ?? "🙂"
-        tier = (try? c.decodeIfPresent(LogTier.self, forKey: .tier)) ?? .prayed
+        // Read as a raw string: `LogTier`'s own decoder maps an unknown tier to
+        // `.forgot` (right for scoring), but on a tile it should still look
+        // like the friend prayed.
+        tier = ((try? c.decodeIfPresent(String.self, forKey: .tier)) ?? nil)
+            .flatMap(LogTier.init(rawValue:)) ?? .prayed
         loggedAt = (try? c.decodeIfPresent(Date.self, forKey: .loggedAt))
             ?? Date(timeIntervalSince1970: 0)
         thumb = (try? c.decodeIfPresent(String.self, forKey: .thumb)) ?? nil

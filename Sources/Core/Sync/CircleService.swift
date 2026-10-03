@@ -1127,7 +1127,8 @@ final class PhotoReports: ObservableObject {
                                     circleID: post.circleID,
                                     reportedUserID: post.userID,
                                     photoPath: post.photoPath,
-                                    reason: reason))
+                                    reason: reason,
+                                    caption: post.caption))
         persist()
     }
 

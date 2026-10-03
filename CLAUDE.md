@@ -166,9 +166,9 @@ Rules that do not bend:
 - **`PhotoStore`** — JPEG persistence in `photos/` under `Store.directory` (downscaled, quality 0.7); logs reference bare filenames; also renders seeded demo illustrations. Buddy photos are the other store, `BuddyPhotoCache` (`circlephotos/`), and are disposable. **v5 §3 (P3): each cached buddy photo also gets a ~300px thumbnail** in `circlephotos/thumbs/`, under the SAME key, so the widget can draw a picture without a network and without decoding a 1200px original. `sweep(in:)` visits both directories — the 30-day rule is identical, the COUNT caps are separate on purpose (sharing one would halve the age at which real photos vanish from the app's own grid) — and `remove(forRemotePath:)` deletes both, so a report cannot leave the face it hid at 44pt on a home screen.
 
 ### Models — `Sources/Core/Models.swift`
-Home of the shared value types: `Prayer`, `LogTier` (onTime 30 / prayed 20 / lastCall 15 / closeCall 12 / qada 5), `PrayerWindow`/`DaySchedule`, `PrayerLog`, `UserProfile`, `AppSettings`, `CircleMember`, `GridEntry`/`GridEntryState`, `PlaceTag`, `TravelPairs`, `Recharge` (tasbih/good-deeds content). Two concepts to internalize:
+Home of the shared value types: `Prayer`, `LogTier` (onTime 30 / prayed 20 / lastCall 15 / closeCall 12 / qada 5 / forgot 0 — v5 "prayed but forgot to log"; an unknown tier from the wire decodes as `forgot` rather than failing the pull), `PrayerWindow`/`DaySchedule`, `PrayerLog`, `UserProfile`, `AppSettings`, `CircleMember`, `GridEntry`/`GridEntryState`, `PlaceTag`, `TravelPairs`, `Recharge` (tasbih/good-deeds content). Two concepts to internalize:
 - **`dayKey` is `"yyyy-MM-dd"` in local time and means the SCHEDULE day a window belongs to**, not when something was logged. An Isha logged after midnight carries *yesterday's* dayKey (its window ends at today's Fajr) — this special case recurs in status, logging, streak reconcile, and undo.
-- `LogTier.isInWindow` (everything but `qada`) gates photos, perfect-day, and jamaat floor.
+- `LogTier.isInWindow` (everything but `qada` and `forgot`) gates photos, perfect-day, and jamaat floor.
 
 ### Views — `Sources/Views/<Area>/`
 - **Home/** — Today: prayer-times strip, current-prayer photo grid + camera CTA, make-up / earlier-today / upcoming sections, break flow.

@@ -59,6 +59,7 @@ enum Theme {
             case .lastCall: return amber
             case .closeCall: return amber.opacity(0.8)  // 4th quarter
             case .qada: return qadaBlue                 // defensive (shouldn't occur)
+            case .forgot: return Color(hex: 0x8DA197)   // defensive: done, but quiet
             }
         case .qada: return qadaBlue
         case .missed: return mist

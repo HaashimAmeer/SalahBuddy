@@ -1,4 +1,4 @@
--- 16. Enum labels are the Swift rawValues verbatim, and invite codes stay inside
+-- 16. Enum labels (prayer_kind, log_tier, place_kind) are the Swift rawValues verbatim, and invite codes stay inside
 --     the read-aloud alphabet (no I/O/0/1).
 \set ON_ERROR_STOP on
 begin;
@@ -17,8 +17,14 @@ begin
 
   select string_agg(enumlabel, ',' order by enumsortorder) into v_labels
   from pg_enum where enumtypid = 'public.log_tier'::regtype;
-  if v_labels <> 'onTime,prayed,lastCall,closeCall,qada' then
+  if v_labels <> 'onTime,prayed,lastCall,closeCall,qada,forgot' then
     raise exception 'log_tier labels drifted from LogTier.rawValue: %', v_labels;
+  end if;
+
+  select string_agg(enumlabel, ',' order by enumsortorder) into v_labels
+  from pg_enum where enumtypid = 'public.place_kind'::regtype;
+  if v_labels <> 'home,masjid,work,onTheGo' then
+    raise exception 'place_kind labels drifted from PlaceTag.rawValue: %', v_labels;
   end if;
 
   for i in 1..200 loop
