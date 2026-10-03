@@ -40,6 +40,9 @@ struct StatsView: View {
                         // v3.8: challenges surfaced above memories (design
                         // session) — they were buried at the bottom.
                         challengesCard
+                        // v5 (mockup): your starred photos, above the
+                        // calendar they were starred from.
+                        StarredStrip()
                         photoCalendarCard
                         statTiles
                         placesCard
@@ -1030,10 +1033,29 @@ private struct DayPhotoSheet: View {
                         PhotoThumb(filename: filename, pixelSize: 640)
                             .frame(width: 190, height: 190)
                             .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                            .overlay(alignment: .topTrailing) { starButton(filename) }
                     }
                 }
             }
         }
+    }
+
+    /// v5 (mockup): star a photo to keep it in Journey's "Starred" strip.
+    private func starButton(_ filename: String) -> some View {
+        let starred = state.isStarred(filename)
+        return Button {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            withAnimation(Theme.spring) { state.toggleStar(filename) }
+        } label: {
+            Image(systemName: starred ? "star.fill" : "star")
+                .font(.system(size: 16, weight: .bold))
+                .foregroundStyle(starred ? Theme.gold : .white)
+                .frame(width: 36, height: 36)
+                .background(Circle().fill(.black.opacity(0.35)))
+        }
+        .buttonStyle(.plain)
+        .padding(8)
+        .accessibilityLabel(starred ? "Unstar photo" : "Star photo")
     }
 
     /// v3.6: past days are editable here — "I made it up but forgot to log
@@ -1289,5 +1311,49 @@ private struct PhotoThumb: View {
             image = thumb
             loadedFor = name
         }
+    }
+}
+
+// MARK: - Starred (v5 mockup)
+
+/// Your starred photos, newest star first. Explains itself while empty.
+private struct StarredStrip: View {
+    @EnvironmentObject private var state: AppState
+
+    var body: some View {
+        let starred = state.starredPhotoFilenames
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Text("⭐ Starred")
+                    .font(Theme.sans(17, .bold))
+                    .foregroundStyle(Theme.inkDeep)
+                Text("NEW")
+                    .font(Theme.sans(10, .heavy))
+                    .foregroundStyle(Color(hex: 0x7A5600))
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Color(hex: 0xFFF3D1)))
+                Spacer()
+            }
+            if starred.isEmpty {
+                Text("Tap ☆ on any of your photos in Memories to keep it here.")
+                    .font(Theme.sans(13, .semibold))
+                    .foregroundStyle(Theme.inkMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 10) {
+                        ForEach(starred, id: \.self) { filename in
+                            PhotoThumb(filename: filename, pixelSize: 360)
+                                .frame(width: 110, height: 110)
+                                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        }
+                    }
+                }
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .cardStyle()
     }
 }

@@ -1281,6 +1281,14 @@ final class AppState: ObservableObject {
                                                       prayer: prayer)
             let caption: String? = {
                 guard case .posted = result.state else { return nil }
+                // v5: a report hides the whole post — the caption goes with
+                // the photo it was written under.
+                if let remote = source as? RemoteCircleDataSource,
+                   let path = remote.photoPath(forMember: member.id, prayer: prayer,
+                                               dayKey: dayKey, asOf: now),
+                   PhotoReports.shared.isHidden(path) {
+                    return nil
+                }
                 return source.caption(forMember: member.id, prayer: prayer,
                                       dayKey: dayKey, asOf: now)
             }()
@@ -2453,6 +2461,28 @@ final class AppState: ObservableObject {
             return nil
         }
         return target
+    }
+
+    // MARK: - Starred photos (v5 mockup)
+
+    /// Starred photos that still exist — an undone post takes its photo with
+    /// it, so a star on it simply stops showing.
+    var starredPhotoFilenames: [String] {
+        let live = Set(logs.compactMap(\.photoFilename))
+        return profile.starredPhotos.filter(live.contains)
+    }
+
+    func isStarred(_ filename: String) -> Bool {
+        profile.starredPhotos.contains(filename)
+    }
+
+    func toggleStar(_ filename: String) {
+        if let index = profile.starredPhotos.firstIndex(of: filename) {
+            profile.starredPhotos.remove(at: index)
+        } else {
+            profile.starredPhotos.insert(filename, at: 0)
+        }
+        persistProfile()
     }
 
     // MARK: - Profile edits
